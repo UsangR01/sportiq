@@ -3,3 +3,13 @@ keys.docx
 .env.*
 *.pem
 *.key
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Session-local Claude Code settings
+.claude/settings.local.json

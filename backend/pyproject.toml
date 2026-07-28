@@ -1,0 +1,18 @@
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = [
+    "B008",  # function-call-in-default-argument — idiomatic for FastAPI's Depends()/Query()
+    "UP042", # replace-str-enum — (str, Enum) is intentional here, not a StrEnum migration
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
