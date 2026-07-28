@@ -1,7 +1,21 @@
+import { Platform } from "react-native";
+
 import { clearTokens, getTokens, setTokens } from "@/lib/tokenStore";
 import type { ApiErrorBody, TokenPair } from "./types";
 
-const BASE_URL = process.env.EXPO_PUBLIC_API_URL ?? "http://localhost:8000";
+function resolveBaseUrl(): string {
+  const configured = process.env.EXPO_PUBLIC_API_URL ?? "http://localhost:8000";
+  // The Android emulator's "localhost" is the emulator's own loopback, not the host
+  // machine — 10.0.2.2 is the documented alias Android provides for the host. Real devices
+  // need an actual LAN IP in EXPO_PUBLIC_API_URL instead (this rewrite only helps the
+  // emulator case, since a real device has no such alias).
+  if (Platform.OS === "android") {
+    return configured.replace("localhost", "10.0.2.2").replace("127.0.0.1", "10.0.2.2");
+  }
+  return configured;
+}
+
+const BASE_URL = resolveBaseUrl();
 
 export class ApiError extends Error {
   status: number;

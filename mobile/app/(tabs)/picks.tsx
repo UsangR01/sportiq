@@ -1,6 +1,7 @@
 import Slider from "@react-native-community/slider";
 import { useQuery } from "@tanstack/react-query";
 import * as Haptics from "expo-haptics";
+import { useRef } from "react";
 import { FlatList, Platform, Text, View } from "react-native";
 
 import { SportFilterChips } from "@/components/SportFilterChips";
@@ -56,7 +57,19 @@ export default function PicksScreen() {
     queryFn: () => getPicks({ min_odds: minOdds, sport_slug: sportFilter ?? undefined }),
   });
 
+  // @react-native-community/slider's Android SeekBar backing view fires onSlidingComplete
+  // once on mount with no real touch involved (confirmed live: it reported minimumValue,
+  // silently overwriting a fresh guest session's min_odds before the user ever touched the
+  // slider). Only commit a completion that was preceded by a real onSlidingStart.
+  const hasStartedSliding = useRef(false);
+
+  function onSlidingStart() {
+    hasStartedSliding.current = true;
+  }
+
   function onSlidingComplete(value: number) {
+    if (!hasStartedSliding.current) return;
+    hasStartedSliding.current = false;
     const rounded = Math.round(value * 100) / 100;
     setMinOdds(rounded);
     if (Platform.OS !== "web") {
@@ -75,6 +88,7 @@ export default function PicksScreen() {
           maximumValue={20}
           step={0.01}
           value={minOdds}
+          onSlidingStart={onSlidingStart}
           onSlidingComplete={onSlidingComplete}
           minimumTrackTintColor="#2563eb"
         />
