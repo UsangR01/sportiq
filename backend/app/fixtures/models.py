@@ -106,6 +106,9 @@ class TeamFeatures(Base):
     days_since_last_match: Mapped[int] = mapped_column(Integer, nullable=True)
     home_win_rate: Mapped[float] = mapped_column(Float, nullable=True)
     away_win_rate: Mapped[float] = mapped_column(Float, nullable=True)
+    # Not in TDD §2.1's schema listing — a season-long (not last-N) average point
+    # differential, used as a "net rating" proxy by app/models_ml/nba_features.py.
+    season_point_diff: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class FixtureLiveState(Base):

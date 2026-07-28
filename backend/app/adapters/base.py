@@ -54,6 +54,11 @@ class TeamStats:
     days_since_last_match: int | None = None
     home_win_rate: float | None = None
     away_win_rate: float | None = None
+    # Season-long (not last-N) average point differential — used as a "net rating" proxy by
+    # app/models_ml/nba_features.py. Not part of the original shape; added because the model
+    # needs both a short-term-form signal (form_pts_5/attack_str/defence_str, last-N) and a
+    # longer season-quality signal, and TeamFeatures had no season-long aggregate at all.
+    season_point_diff: float | None = None
 
 
 @dataclass(frozen=True)

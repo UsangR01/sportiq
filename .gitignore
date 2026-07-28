@@ -14,3 +14,8 @@ __pycache__/
 
 # Session-local Claude Code settings
 .claude/settings.local.json
+
+# ML: generated/regeneratable — real source is ml/training/*.py, ml/notebooks/, ml/evaluation/
+ml/data/
+ml/artifacts/
+ml/mlruns/

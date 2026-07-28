@@ -89,6 +89,14 @@ def _compute_team_stats(team_external_id: str, games: list[dict], n_matches: int
     home_win_rate = (sum(1 for g in home_games if won(g)) / len(home_games)) if home_games else None
     away_win_rate = (sum(1 for g in away_games if won(g)) / len(away_games)) if away_games else None
 
+    # Season-long (all `completed`, not just `recent`) average point differential — a "net
+    # rating" proxy for app/models_ml/nba_features.py, distinct from the last-N form signal.
+    season_point_diff = (
+        (sum(team_score(g) - opp_score(g) for g in completed) / len(completed))
+        if completed
+        else None
+    )
+
     days_since_last_match = None
     if completed:
         last_date = datetime.fromisoformat(completed[0]["datetime"].replace("Z", "+00:00"))
@@ -105,6 +113,7 @@ def _compute_team_stats(team_external_id: str, games: list[dict], n_matches: int
         days_since_last_match=days_since_last_match,
         home_win_rate=home_win_rate,
         away_win_rate=away_win_rate,
+        season_point_diff=season_point_diff,
     )
 
 
@@ -189,3 +198,43 @@ class BallDontLieAdapter(DataSourceAdapter):
         RotoWire — no GTD → OUT transition alerts — and the re-inference trigger stays
         disabled when this path is used."""
         raise NotImplementedError("BallDontLie injury fetch not yet implemented")
+
+
+H2H_SEASONS_BACK = 3  # how many recent seasons to search for head-to-head meetings
+
+
+async def fetch_h2h_win_rate(home_external_id: str, away_external_id: str) -> float | None:
+    """NBA/BallDontLie-specific helper, not part of the DataSourceAdapter ABC — H2H is
+    fixture-specific (needs both teams), not a generic per-team stat, so it doesn't fit
+    fetch_team_stats(team_id)'s shape. Used by
+    app/models_ml/nba_features.py:assemble_from_live_db. Searches the home team's own game
+    history for meetings against the away team rather than a dedicated endpoint (BallDontLie
+    has none) — each game a team's history includes already embeds both participants."""
+    api_key = get_settings().balldontlie_api_key
+    current_season = _current_nba_season()
+    seasons = [current_season - i for i in range(H2H_SEASONS_BACK)]
+
+    async with httpx.AsyncClient(
+        base_url=BASE_URL, headers={"Authorization": api_key}, timeout=10.0
+    ) as client:
+        games = await _fetch_all_games(
+            client, {"team_ids[]": home_external_id, "seasons[]": seasons, "per_page": 100}
+        )
+
+    def is_home(g: dict) -> bool:
+        return str(g["home_team"]["id"]) == home_external_id
+
+    def opponent_id(g: dict) -> str:
+        return str(g["visitor_team"]["id"]) if is_home(g) else str(g["home_team"]["id"])
+
+    def home_team_won(g: dict) -> bool:
+        if is_home(g):
+            return g["home_team_score"] > g["visitor_team_score"]
+        return g["visitor_team_score"] > g["home_team_score"]
+
+    meetings = [
+        g for g in games if g.get("status") == "Final" and opponent_id(g) == away_external_id
+    ]
+    if not meetings:
+        return None
+    return sum(1 for g in meetings if home_team_won(g)) / len(meetings)

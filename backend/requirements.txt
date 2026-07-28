@@ -28,6 +28,8 @@ scipy>=1.14
 pandas>=2.2
 joblib>=1.4
 mlflow>=2.16
+optuna>=4.0
+pyarrow>=17.0  # parquet caching for ml/training/collect_nba_data.py
 
 # Sport data source SDKs
 nba_api>=1.6      # offline historical training only — never called from production workers

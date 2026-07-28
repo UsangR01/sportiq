@@ -113,6 +113,7 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
                         days_since_last_match=stats.days_since_last_match,
                         home_win_rate=stats.home_win_rate,
                         away_win_rate=stats.away_win_rate,
+                        season_point_diff=stats.season_point_diff,
                     )
                 )
         await db.commit()

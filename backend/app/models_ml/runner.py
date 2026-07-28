@@ -47,6 +47,6 @@ class ModelRunner:
         if registry_row is None:
             raise ValueError(f"No active model registered for sport_id={sport_id}")
 
-        model = model_cls(artefact_path=registry_row.artefact_path)
+        model = model_cls(artefact_path=registry_row.artefact_path, version=registry_row.version)
         self._cache[sport_id] = model
         return model
