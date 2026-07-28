@@ -208,7 +208,9 @@ def _optuna_objective(trial, X_train, y_train, X_val, y_val) -> float:
     return log_loss(y_val, val_preds)
 
 
-async def _register_model(artefact_path: Path, rps: float, accuracy: float) -> None:
+async def _register_model(
+    artefact_path: Path, rps: float, accuracy: float, roi_simulation: float | None
+) -> None:
     from app.core.database import async_session_factory
     from app.predictions.models import ModelRegistry
     from app.sports.models import Sport
@@ -240,6 +242,7 @@ async def _register_model(artefact_path: Path, rps: float, accuracy: float) -> N
                 artefact_path=str(artefact_path),
                 rps_score=rps,
                 accuracy=accuracy,
+                roi_simulation=roi_simulation,
                 trained_at=datetime.now(UTC),
                 is_active=True,
             )
@@ -358,7 +361,7 @@ async def main_async() -> None:
             mlflow.log_metric("flat_stake_roi_home_picks", flat_stake_roi)
         mlflow.log_artifact(str(artefact_path))
 
-    await _register_model(artefact_path, rps, accuracy)
+    await _register_model(artefact_path, rps, accuracy, flat_stake_roi)
 
 
 def main() -> None:

@@ -49,5 +49,9 @@ class ModelRegistry(Base):
     artefact_path: Mapped[str] = mapped_column(String(255), nullable=False)
     rps_score: Mapped[float] = mapped_column(Float, nullable=True)
     accuracy: Mapped[float] = mapped_column(Float, nullable=True)
+    # Flat-stake ROI from the training script's backtest simulation (ml/training/train_nba.py)
+    # — nullable since it's a small-sample, directional metric that not every model version
+    # will have a real value for (e.g. no bookmaker odds existed for the test-set games).
+    roi_simulation: Mapped[float | None] = mapped_column(Float, nullable=True)
     trained_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

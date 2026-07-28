@@ -15,7 +15,9 @@ The architecture section below is the *intended* design per the TDD/PRD. Where t
 
 ## Backend implementation status
 
-Real logic exists for: auth (`POST /auth/register|login|refresh`, Argon2id + JWT + rotating refresh tokens), guest sessions (`POST/PUT /guest/session`), `GET /picks` (the full TDD §4.2 algorithm — see `app/picks/service.py` for the DB-free EV/threshold/best-outcome math, unit-tested in `tests/test_picks.py`), `GET /sports`, `GET /fixtures*`, and `GET/PUT /user/preferences`. All SQLAlchemy models for the TDD §2.1 schema exist and migrate via Alembic.
+Real logic exists for: auth (`POST /auth/register|login|refresh`, Argon2id + JWT + rotating refresh tokens), guest sessions (`POST/PUT /guest/session`), `GET /picks` (the full TDD §4.2 algorithm — see `app/picks/service.py` for the DB-free EV/threshold/best-outcome math, unit-tested in `tests/test_picks.py`), `GET /sports`, `GET /fixtures*`, `GET/PUT /user/preferences`, `PUT /user/push-token`, and `GET /stats/model`. All SQLAlchemy models for the TDD §2.1 schema exist and migrate via Alembic.
+
+**`GET /stats/model`** (TDD §4.1) returns the currently *active* `models_registry` row per sport (optionally filtered by `sport_slug`), joined to the sport's slug — reflects whichever model version is actually serving predictions right now, matching TDD §3.1's "promotion is a DB update, not a redeploy" design. `ModelRegistry` gained a `roi_simulation` column (nullable — a small-sample, directional backtest metric, not every version will have one) so `ml/training/train_nba.py`'s flat-stake ROI calculation is persisted going forward instead of only printed; the currently-active NBA row was backfilled with its real, already-known value (`0.20873793103448263`, from the training run recorded under "ML training" below) rather than left null or recomputed. Tested in `backend/tests/test_model_stats.py` with real seeded `Sport`/`ModelRegistry` rows (both an active and an inactive version, to confirm only the active one is ever returned).
 
 **Two real, live-verified `DataSourceAdapter` methods exist**: `BallDontLieAdapter.fetch_fixtures`/`.fetch_team_stats` (NBA) and `TheRundownAdapter.fetch_odds` (all sports — odds is always TheRundown, per TDD §6.2). All make real HTTP calls and have been run against the live API end to end, including real odds landing against a real fixture (see "External API research findings" below). Everything else in `app/adapters/` is still stubbed. Before ingestion can do anything, run `PYTHONPATH=. python scripts/seed_sports.py` once — nothing seeds a `Sport`/`League` row otherwise, so `ingest_fixtures`/`ingest_odds` silently have zero sports to iterate.
 
@@ -31,7 +33,7 @@ Real logic exists for: auth (`POST /auth/register|login|refresh`, Argon2id + JWT
 - A pre-existing, never-before-exercised bug was found and fixed while rebuilding `ingest_injuries.py`: `PlayerInjuryStatus(team_id=update.team_external_id, ...)` was assigning the injury provider's own external team ID directly into the internal UUID FK column (same bug class as earlier fixture/odds work) — fixed via a new `_resolve_team` helper that resolves through `Team.external_id` first. Never triggered before because both injury adapters (`RotoWireAdapter`, `BallDontLieAdapter.fetch_injuries`) were still `NotImplementedError` stubs.
 - **TDD §7's NBA cost-breakdown table is stale** — it still describes a "salary-weighted historical injury-impact proxy," language from before this feature replaced that design. Flagging it, not editing the TDD.
 
-Stubbed (signature + schema exist, body is `NotImplementedError`/`501`, pending real API keys or a trained model): `GET /history`, `GET /stats/model`, `fetch_odds` on every adapter except TheRundown, `fetch_injuries` on every adapter (`RotoWireAdapter` and `BallDontLieAdapter.fetch_injuries` — live-tested: BallDontLie's `/nba/v1/player_injuries` 401s on this key's plan, same paid-tier gate as `/season_averages`/`/standings`; no `ROTOWIRE_API_KEY` was ever provisioned), `TheRundownAdapter.fetch_fixtures`/`.fetch_team_stats`, `APIFootballAdapter`/`SportsDataIOAdapter` entirely, `FootballModel` (`app/models_ml/`), and the model-inference parts of the Celery workers for football. `ingest_injuries.py`'s re-inference trigger and DB-write logic are fully real and tested (see above) — only the underlying HTTP calls into RotoWire/BallDontLie are stubbed, so `player_injury_status` stays empty in practice until one of those exists.
+Stubbed (signature + schema exist, body is `NotImplementedError`/`501`, pending real API keys or settled outcomes): `GET /history` (needs an outcomes-ingestion pipeline plus real settled games — neither exists yet; unlike `/stats/model`, there's no shortcut here since this needs actual game results, not just a registered model), `fetch_odds` on every adapter except TheRundown, `fetch_injuries` on every adapter (`RotoWireAdapter` and `BallDontLieAdapter.fetch_injuries` — live-tested: BallDontLie's `/nba/v1/player_injuries` 401s on this key's plan, same paid-tier gate as `/season_averages`/`/standings`; no `ROTOWIRE_API_KEY` was ever provisioned), `TheRundownAdapter.fetch_fixtures`/`.fetch_team_stats`, `APIFootballAdapter`/`SportsDataIOAdapter` entirely, `FootballModel` (`app/models_ml/`), and the model-inference parts of the Celery workers for football. `ingest_injuries.py`'s re-inference trigger and DB-write logic are fully real and tested (see above) — only the underlying HTTP calls into RotoWire/BallDontLie are stubbed, so `player_injury_status` stays empty in practice until one of those exists.
 
 **Known divergences from the TDD, introduced deliberately while building — check these before assuming the docs are authoritative:**
 - `refresh_tokens` table and `users.expo_push_token` column exist in code but aren't in the TDD §2.1 schema listing (the TDD's own prose requires both — §4.3, §5.4).
@@ -212,12 +214,19 @@ Note the `PYTHONPATH=.` on the seed script — run directly (`python scripts/see
 
 ### Not yet configured
 
-- Mobile tests/lint: `Jest`, `ESLint` (via GitHub Actions on every PR) — not configured yet, though `mobile/` itself now exists (see "Mobile implementation status" above).
-- Mobile build/release: EAS Build/Update/Submit — no `eas.json`/EAS project set up yet; only tested via `expo start --web` so far, not a device/emulator/EAS build.
+- Mobile tests/lint: `Jest`, `ESLint` — not configured yet, though `mobile/` itself now exists (see "Mobile implementation status" above) and its `tsc` typecheck does run in CI (see below).
+- Mobile build/release: EAS Build/Update/Submit — no `eas.json`/EAS project set up yet; only tested via `expo start --web`/`--android` so far, not a real EAS build. This is also why real push notification tokens can't be minted yet (see "Mobile implementation status").
 - Deploy: Render.com for MVP (FastAPI web service, Celery worker, Celery beat, managed Postgres/Redis); AWS ECS/RDS/ElastiCache at Phase 2 scale — no `infra/` yet.
-- CI (`.github/workflows/`) — none yet.
 
 Check for the relevant files before assuming any of the above exists — this section will go stale the moment it's scaffolded.
+
+### CI (`.github/workflows/ci.yml`)
+
+Two jobs, both real:
+- **backend**: Postgres 16 + Redis 7 as GitHub Actions services (matching `app/core/config.py`'s defaults exactly — `sportiq_user`/`password`/`sportiq` on the standard ports — so no env vars need setting in CI), Python 3.11 (matching the real local dev venv, not the TDD's 3.12), `alembic upgrade head`, then `ruff check .`, `black --check .`, `pytest`. All backend tests mock third-party HTTP calls (`httpx.MockTransport` / mocking the `exponent_server_sdk.PushClient` call itself) rather than hitting real external APIs, so none of the unprovisioned API keys block CI.
+- **mobile**: Node 20, `npm ci`, `npx tsc --noEmit`. No Jest/ESLint step since neither is configured yet (see above) — this typecheck is genuinely the only automated mobile check that exists right now, not a placeholder standing in for a fuller suite.
+
+Runs on push to `main` and on every PR. Not yet verified against a real GitHub Actions run (would need a push to confirm) — verified locally by running every step's exact command against the same real Postgres/Redis this project already uses for local dev, plus a YAML syntax check.
 
 ## Git
 

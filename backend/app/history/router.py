@@ -1,7 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.database import get_db
 from app.history.schemas import HistoryEntry, ModelStats
+from app.predictions.models import ModelRegistry
+from app.sports.models import Sport
 
 router = APIRouter(tags=["history"])
 
@@ -24,10 +29,28 @@ async def get_history(
 
 
 @router.get("/stats/model", response_model=list[ModelStats])
-async def get_model_stats(sport_slug: str | None = None):
-    """Model performance summary per sport (TDD §4.1). Needs a models_registry entry with
-    real evaluation metrics — not implemented until a model has actually been trained."""
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Model stats not implemented yet — no trained model registered.",
+async def get_model_stats(sport_slug: str | None = None, db: AsyncSession = Depends(get_db)):
+    """Model performance summary per sport (TDD §4.1) — the currently *active* model per
+    sport, since that's what's actually serving predictions right now. Model promotion
+    (models_registry.is_active flip) is a DB update per TDD §3.1, so this always reflects
+    whichever version is live without a code change."""
+    stmt = (
+        select(ModelRegistry, Sport.slug)
+        .join(Sport, Sport.id == ModelRegistry.sport_id)
+        .where(ModelRegistry.is_active.is_(True))
     )
+    if sport_slug:
+        stmt = stmt.where(Sport.slug == sport_slug)
+
+    rows = (await db.execute(stmt)).all()
+    return [
+        ModelStats(
+            sport_slug=slug,
+            model_version=model.version,
+            accuracy=model.accuracy,
+            rps_score=model.rps_score,
+            roi_simulation=model.roi_simulation,
+            trained_at=model.trained_at,
+        )
+        for model, slug in rows
+    ]

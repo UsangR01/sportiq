@@ -24,6 +24,10 @@ class HistoryQuery(BaseModel):
 class ModelStats(BaseModel):
     sport_slug: str
     model_version: str
-    accuracy: float
-    rps_score: float
-    roi_simulation: float
+    accuracy: float | None = None
+    rps_score: float | None = None
+    # Small-sample, directional flat-stake backtest metric (see ml/training/train_nba.py) —
+    # null for any model version trained before this column existed, or where no bookmaker
+    # odds existed for the test-set games.
+    roi_simulation: float | None = None
+    trained_at: datetime
