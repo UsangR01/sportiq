@@ -13,6 +13,7 @@ from app.adapters.balldontlie import (
     _compute_team_stats,
     _current_nba_season,
     _fetch_all_games,
+    _get_with_retry,
     _map_game_to_fixture_payload,
     _map_status,
 )
@@ -159,3 +160,32 @@ async def test_fetch_all_games_follows_cursor_pagination():
 
     assert [g["id"] for g in games] == [1, 2]
     assert call_count["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_get_with_retry_retries_on_429_then_succeeds():
+    call_count = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return httpx.Response(429, headers={"Retry-After": "0"}, json={"error": "rate limited"})
+        return httpx.Response(200, json={"data": [make_game(id=1)], "meta": {"next_cursor": None}})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="https://example.test") as client:
+        response = await _get_with_retry(client, "/games", {"per_page": 100})
+
+    assert call_count["n"] == 2
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_get_with_retry_raises_after_exhausting_retries():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, headers={"Retry-After": "0"}, json={"error": "rate limited"})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="https://example.test") as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            await _get_with_retry(client, "/games", {"per_page": 100})

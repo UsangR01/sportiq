@@ -2,6 +2,7 @@ import asyncio
 
 from sqlalchemy import select
 
+from app.adapters.base import TeamStats
 from app.adapters.factory import AdapterFactory
 from app.core.database import async_session_factory
 from app.fixtures.models import Fixture, FixtureStatus, Team, TeamFeatures
@@ -80,6 +81,10 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
             .scalars()
             .all()
         )
+        # A team appears in many fixtures within one run (every fixture it plays in this
+        # league), and fetch_team_stats is expensive/rate-limited — cache per external_id so
+        # each team is only fetched once per run instead of once per (fixture, team) pair.
+        team_stats_cache: dict[str, TeamStats] = {}
         for fixture in upcoming:
             for team_id in (fixture.home_team_id, fixture.away_team_id):
                 # fetch_team_stats needs the provider's own team ID, not our internal UUID —
@@ -90,9 +95,11 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
                 ).scalar_one_or_none()
                 if team is None or team.external_id is None:
                     continue
-                stats = await adapter.fetch_team_stats(
-                    team.external_id, n_matches=FEATURE_WINDOW_MATCHES
-                )
+                if team.external_id not in team_stats_cache:
+                    team_stats_cache[team.external_id] = await adapter.fetch_team_stats(
+                        team.external_id, n_matches=FEATURE_WINDOW_MATCHES
+                    )
+                stats = team_stats_cache[team.external_id]
                 db.add(
                     TeamFeatures(
                         team_id=team_id,

@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -107,6 +108,28 @@ def _compute_team_stats(team_external_id: str, games: list[dict], n_matches: int
     )
 
 
+MAX_RETRIES = 5  # on 429 specifically — the free tier's per-minute limit is tight and easy
+# to hit on a batch of team-stats lookups (confirmed live: ~4-5 calls in quick succession).
+
+
+async def _get_with_retry(client: httpx.AsyncClient, path: str, params: dict) -> httpx.Response:
+    """Retries on 429, honouring Retry-After when present, else capped exponential backoff.
+    Any other error status raises immediately — this is not a general-purpose retry-on-
+    anything helper."""
+    response = None
+    for attempt in range(MAX_RETRIES):
+        response = await client.get(path, params=params)
+        if response.status_code == 429 and attempt < MAX_RETRIES - 1:
+            retry_after = response.headers.get("Retry-After")
+            delay = float(retry_after) if retry_after else min(2**attempt, 30)
+            await asyncio.sleep(delay)
+            continue
+        response.raise_for_status()
+        return response
+    response.raise_for_status()  # exhausted retries — surface the last 429 as a real error
+    return response
+
+
 async def _fetch_all_games(client: httpx.AsyncClient, params: dict) -> list[dict]:
     """Follows BallDontLie's cursor pagination (meta.next_cursor), not offset-based."""
     games: list[dict] = []
@@ -115,8 +138,7 @@ async def _fetch_all_games(client: httpx.AsyncClient, params: dict) -> list[dict
         query = dict(params)
         if cursor is not None:
             query["cursor"] = cursor
-        response = await client.get("/games", params=query)
-        response.raise_for_status()
+        response = await _get_with_retry(client, "/games", query)
         payload = response.json()
         games.extend(payload.get("data", []))
         cursor = payload.get("meta", {}).get("next_cursor")
@@ -140,7 +162,7 @@ class BallDontLieAdapter(DataSourceAdapter):
             base_url=BASE_URL, headers={"Authorization": self._api_key}, timeout=10.0
         )
 
-    async def fetch_odds(self, fixture_ids: list[str]) -> list[OddsPayload]:
+    async def fetch_odds(self, sport: str, league: str, days_ahead: int) -> list[OddsPayload]:
         raise NotImplementedError("BallDontLie does not provide odds — use TheRundownAdapter")
 
     async def fetch_fixtures(

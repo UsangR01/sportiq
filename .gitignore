@@ -1,4 +1,5 @@
 keys.docx
+~$keys.docx
 .env
 .env.*
 *.pem
