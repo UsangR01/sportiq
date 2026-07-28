@@ -4,7 +4,8 @@ from sqlalchemy import select
 
 from app.adapters.factory import AdapterFactory
 from app.core.database import async_session_factory
-from app.fixtures.models import Fixture, TeamFeatures
+from app.fixtures.models import Fixture, FixtureStatus, Team, TeamFeatures
+from app.fixtures.service import get_or_create_team
 from app.sports.models import League, Sport
 from app.workers.celery import celery_app
 
@@ -22,24 +23,54 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
             sport=sport.slug, league=league.slug, days_ahead=FEATURE_LOOKAHEAD_DAYS
         )
 
-        # TODO: TDD §2.3 says "cancelled/postponed fixtures are updated", but the fixtures.status
-        # enum in §2.1 only defines scheduled|live|completed — no cancelled/postponed value.
-        # Insert-new / update-existing logic goes here once fetch_fixtures is implemented.
         for payload in fixture_payloads:
+            # Dedupe on the provider's own fixture ID, not the internal UUID PK — matching on
+            # Fixture.id here would never hit (see CLAUDE.md for why this was previously wrong).
             existing = (
-                await db.execute(select(Fixture).where(Fixture.id == payload.external_id))
+                await db.execute(
+                    select(Fixture).where(
+                        Fixture.sport_id == sport.id, Fixture.external_id == payload.external_id
+                    )
+                )
             ).scalar_one_or_none()
+
+            home_team = await get_or_create_team(
+                db,
+                sport_id=sport.id,
+                league_id=league.id,
+                external_id=payload.home_team_external_id,
+                name=payload.home_team_name or payload.home_team_external_id,
+                short_name=payload.home_team_short_name,
+            )
+            away_team = await get_or_create_team(
+                db,
+                sport_id=sport.id,
+                league_id=league.id,
+                external_id=payload.away_team_external_id,
+                name=payload.away_team_name or payload.away_team_external_id,
+                short_name=payload.away_team_short_name,
+            )
+
             if existing is None:
                 db.add(
                     Fixture(
                         sport_id=sport.id,
                         league_id=league.id,
-                        home_team_id=payload.home_team_external_id,
-                        away_team_id=payload.away_team_external_id,
+                        external_id=payload.external_id,
+                        home_team_id=home_team.id,
+                        away_team_id=away_team.id,
                         kickoff_utc=payload.kickoff_utc,
+                        status=FixtureStatus(payload.status),
                         season=payload.season,
                     )
                 )
+            else:
+                # TODO: TDD §2.3 says "cancelled/postponed fixtures are updated", but the
+                # fixtures.status enum in §2.1 only defines scheduled|live|completed — no
+                # cancelled/postponed value. Status transitions we DO support get applied here.
+                new_status = FixtureStatus(payload.status)
+                if existing.status != new_status:
+                    existing.status = new_status
         await db.commit()
 
         # Team feature vectors, computed at ingest time for fixtures in the next 7 days
@@ -51,8 +82,16 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
         )
         for fixture in upcoming:
             for team_id in (fixture.home_team_id, fixture.away_team_id):
+                # fetch_team_stats needs the provider's own team ID, not our internal UUID —
+                # passing team_id directly here would silently query the real API with a
+                # UUID it doesn't recognise (caught while writing this, not from experience).
+                team = (
+                    await db.execute(select(Team).where(Team.id == team_id))
+                ).scalar_one_or_none()
+                if team is None or team.external_id is None:
+                    continue
                 stats = await adapter.fetch_team_stats(
-                    str(team_id), n_matches=FEATURE_WINDOW_MATCHES
+                    team.external_id, n_matches=FEATURE_WINDOW_MATCHES
                 )
                 db.add(
                     TeamFeatures(

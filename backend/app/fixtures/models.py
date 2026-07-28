@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import Date, DateTime, Enum, Float, ForeignKey, Integer, String
+from sqlalchemy import Date, DateTime, Enum, Float, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -63,6 +63,13 @@ class Fixture(Base):
         Enum(FixtureStatus, name="fixture_status"), default=FixtureStatus.SCHEDULED, nullable=False
     )
     season: Mapped[str] = mapped_column(String(20), nullable=False)
+    # Not in TDD §2.1's schema listing — added so ingest workers can upsert idempotently
+    # against a provider's own fixture ID instead of matching on the internal UUID PK.
+    external_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("sport_id", "external_id", name="uq_fixtures_sport_external_id"),
+    )
 
     live_state: Mapped["FixtureLiveState | None"] = relationship(
         back_populates="fixture", uselist=False

@@ -22,6 +22,15 @@ class FixturePayload:
     away_team_external_id: str
     kickoff_utc: datetime
     season: str
+    # Not part of the original shape — a first-seen team needs a display name to create its
+    # Team row, and a provider that returns historical/completed fixtures (e.g. verifying
+    # against a past date range) needs to say so, rather than every ingested fixture silently
+    # defaulting to "scheduled" forever. Optional so adapters without this data can omit it.
+    home_team_name: str | None = None
+    away_team_name: str | None = None
+    home_team_short_name: str | None = None
+    away_team_short_name: str | None = None
+    status: str = "scheduled"  # "scheduled" | "live" | "completed" — matches FixtureStatus
 
 
 @dataclass(frozen=True)
