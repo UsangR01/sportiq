@@ -34,6 +34,15 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    # app/core/config.py defaults database_url/redis_url to exactly what the services below
+    # expose, so those need no override — but jwt_secret_key defaults to "", and PyJWT
+    # (unlike some JWT libs) hard-rejects an empty HMAC key rather than just being insecure
+    # about it. Confirmed live: every auth-touching test failed in CI with
+    # `InvalidKeyError: HMAC key must not be empty` despite passing locally, since local dev
+    # always has a real (if dummy) value in the gitignored backend/.env. A real deployment
+    # would set this via a secrets manager per TDD §4.3/§7 — this is CI's equivalent.
+    env:
+      JWT_SECRET_KEY: ci-only-test-secret-not-a-real-credential
     steps:
       - uses: actions/checkout@v4
 
@@ -47,8 +56,6 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      # Settings default to these exact credentials/ports (app/core/config.py), which is
-      # also what the services above expose — no env vars need setting for CI.
       - run: alembic upgrade head
 
       - run: ruff check .
