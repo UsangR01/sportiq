@@ -21,7 +21,7 @@ class RotoWireAdapter(DataSourceAdapter):
             raise RuntimeError("RotoWireAdapter constructed without ROTOWIRE_API_KEY set")
         self._api_key = settings.rotowire_api_key
 
-    async def fetch_odds(self, fixture_ids: list[str]) -> list[OddsPayload]:
+    async def fetch_odds(self, sport: str, league: str, days_ahead: int) -> list[OddsPayload]:
         raise NotImplementedError("RotoWire does not provide odds — use TheRundownAdapter")
 
     async def fetch_fixtures(

@@ -66,9 +66,18 @@ class Fixture(Base):
     # Not in TDD §2.1's schema listing — added so ingest workers can upsert idempotently
     # against a provider's own fixture ID instead of matching on the internal UUID PK.
     external_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # A separate column from external_id: the stats/fixtures provider (BallDontLie for NBA,
+    # API-Football for football) and the odds provider (always TheRundown, per TDD §6.2) use
+    # different ID spaces for the same real-world fixture. Populated on first successful
+    # team+kickoff-time match (see app/fixtures/service.py:find_fixture_by_abbreviations_and_time)
+    # so subsequent odds ingests can look the fixture up directly instead of re-matching.
+    odds_provider_external_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     __table_args__ = (
         UniqueConstraint("sport_id", "external_id", name="uq_fixtures_sport_external_id"),
+        UniqueConstraint(
+            "sport_id", "odds_provider_external_id", name="uq_fixtures_sport_odds_external_id"
+        ),
     )
 
     live_state: Mapped["FixtureLiveState | None"] = relationship(

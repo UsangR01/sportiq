@@ -5,6 +5,11 @@ from datetime import datetime
 
 @dataclass(frozen=True)
 class OddsPayload:
+    # This is the ODDS provider's own event ID (TheRundown's, per TDD §6.2 — always TheRundown
+    # regardless of sport) — a *different* ID space from a fixture's stats-provider
+    # external_id (BallDontLie for NBA, API-Football for football). The two only get linked
+    # by matching team abbreviations + kickoff time; see
+    # app/fixtures/service.py:find_fixture_by_abbreviations_and_time.
     fixture_external_id: str
     bookmaker: str
     market: str  # "h2h" | "spread" | "total"
@@ -12,6 +17,10 @@ class OddsPayload:
     draw_odds: float | None
     away_odds: float | None
     updated_at: datetime
+    # Needed for fixture matching — not part of the original shape.
+    home_team_short_name: str | None = None
+    away_team_short_name: str | None = None
+    kickoff_utc: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -63,7 +72,13 @@ class DataSourceAdapter(ABC):
     Ingest workers and routes must never call a provider's SDK/HTTP client directly."""
 
     @abstractmethod
-    async def fetch_odds(self, fixture_ids: list[str]) -> list[OddsPayload]: ...
+    async def fetch_odds(self, sport: str, league: str, days_ahead: int) -> list[OddsPayload]:
+        """Deliberately mirrors fetch_fixtures's shape, not a fixture_ids list as originally
+        drafted: real odds providers (TheRundown) are queried by sport+date-range, not by IDs
+        the caller already knows — those IDs live in a different provider's ID space
+        entirely. The caller (ingest_odds.py) matches results to internal Fixture rows
+        itself, the same way ingest_fixtures.py resolves teams via get_or_create_team."""
+        ...
 
     @abstractmethod
     async def fetch_fixtures(

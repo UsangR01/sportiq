@@ -15,7 +15,7 @@ class APIFootballAdapter(DataSourceAdapter):
     def __init__(self) -> None:
         self._api_key = get_settings().api_football_key
 
-    async def fetch_odds(self, fixture_ids: list[str]) -> list[OddsPayload]:
+    async def fetch_odds(self, sport: str, league: str, days_ahead: int) -> list[OddsPayload]:
         raise NotImplementedError("API-Football does not provide odds — use TheRundownAdapter")
 
     async def fetch_fixtures(

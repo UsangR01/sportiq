@@ -11,7 +11,7 @@ class SportsDataIOAdapter(DataSourceAdapter):
     """NFL, NHL, MLB fixtures/stats/injuries — Phase 2 (TDD §2.2). Not yet implemented; no
     sport is configured to use this adapter at MVP (football + NBA only)."""
 
-    async def fetch_odds(self, fixture_ids: list[str]) -> list[OddsPayload]:
+    async def fetch_odds(self, sport: str, league: str, days_ahead: int) -> list[OddsPayload]:
         raise NotImplementedError("SportsDataIO does not provide odds — use TheRundownAdapter")
 
     async def fetch_fixtures(
