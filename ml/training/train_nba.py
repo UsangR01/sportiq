@@ -55,7 +55,82 @@ TEST_SEASON = "2025-26"
 N_OPTUNA_TRIALS = 50
 
 
-def build_training_examples(games: pd.DataFrame, odds: pd.DataFrame) -> pd.DataFrame:
+def index_played_names(player_game_log: pd.DataFrame) -> dict[tuple[str, str], set[str]]:
+    """Pre-indexes player_game_log by (GAME_ID, TEAM_ABBREVIATION) -> the set of lowercased
+    names who played (MIN > 0). historical_key_player_availability is called twice per game
+    (home + away) across thousands of games — re-filtering the full ~150k-row log on every
+    call is a real (confirmed live: made a full run not finish in 5 minutes) performance
+    problem; this makes each lookup O(1) after one O(n) pass."""
+    played = player_game_log[player_game_log["MIN"] > 0]
+    index: dict[tuple[str, str], set[str]] = {}
+    for game_id, team_abbr, name in zip(
+        played["GAME_ID"], played["TEAM_ABBREVIATION"], played["PLAYER_NAME"].str.lower(), strict=False
+    ):
+        index.setdefault((game_id, team_abbr), set()).add(name)
+    return index
+
+
+def historical_key_player_availability(
+    played_names_index: dict[tuple[str, str], set[str]],
+    team_key_players_by_team_season: dict,
+    team_abbr: str,
+    season_year: int,
+    game_id: str,
+) -> tuple[int | None, float | None]:
+    """BACKTEST LABEL ONLY, built from box-score presence in an *already-completed* game —
+    explicitly sanctioned for training data by the task this implements, but must NEVER be
+    reused for live Stage 2 (app/models_ml/nba_key_players.py:get_key_player_availability),
+    which is pre-game and reads only player_injury_status. Kept in this script, not in
+    app/models_ml/, specifically so it can't be imported into the live path by accident.
+
+    played_names_index: build once via index_played_names(player_game_log) — see its
+    docstring for why this isn't just the raw DataFrame."""
+    key_players = team_key_players_by_team_season.get((team_abbr, season_year))
+    if not key_players:
+        return None, None
+
+    played_names = played_names_index.get((game_id, team_abbr), set())
+
+    available_count = 0
+    per_combined = 0.0
+    for key_player in key_players:
+        if key_player["player_name"].lower() in played_names:
+            available_count += 1
+            per_combined += key_player["per"]
+    return available_count, per_combined
+
+
+async def _load_team_key_players() -> dict[tuple[str, int], list[dict]]:
+    """Real team_key_players rows (Stage 1, written by ml/training/compute_key_players.py),
+    joined to the team's abbreviation so training can look them up the same way it looks up
+    everything else — by TEAM_ABBREVIATION, matching nba_api's own game-log shape."""
+    from sqlalchemy import select
+
+    from app.core.database import async_session_factory
+    from app.fixtures.models import Team, TeamKeyPlayer
+
+    by_team_season: dict[tuple[str, int], list[dict]] = {}
+    async with async_session_factory() as db:
+        rows = (
+            await db.execute(
+                select(TeamKeyPlayer, Team.short_name).join(Team, Team.id == TeamKeyPlayer.team_id)
+            )
+        ).all()
+
+    for key_player, abbreviation in rows:
+        key = (abbreviation, key_player.season_year)
+        by_team_season.setdefault(key, []).append(
+            {"player_name": key_player.player_name, "per": key_player.per}
+        )
+    return by_team_season
+
+
+def build_training_examples(
+    games: pd.DataFrame,
+    odds: pd.DataFrame,
+    player_game_log: pd.DataFrame,
+    team_key_players_by_team_season: dict,
+) -> pd.DataFrame:
     """One row per game (from the home team's perspective) — features via
     assemble_from_game_log (the same function run_predictions.py's live path calls through
     assemble_from_live_db), label = 1 if home team won."""
@@ -65,6 +140,7 @@ def build_training_examples(games: pd.DataFrame, odds: pd.DataFrame) -> pd.DataF
     odds_lookup = {
         (row.date, row.home_short, row.away_short): row.home_odds for row in best_odds.itertuples()
     }
+    played_names_index = index_played_names(player_game_log)
 
     rows = []
     for game_id, group in games.groupby("GAME_ID"):
@@ -79,14 +155,31 @@ def build_training_examples(games: pd.DataFrame, odds: pd.DataFrame) -> pd.DataF
 
         game_date = home_row["GAME_DATE"]
         season = home_row["SEASON"]
+        season_year = int(season.split("-")[0])
         home_abbr = home_row["TEAM_ABBREVIATION"]
         away_abbr = away_row["TEAM_ABBREVIATION"]
 
         home_odds = odds_lookup.get((str(game_date), home_abbr, away_abbr))
         moneyline_prob = (1 / home_odds) if home_odds else None
 
+        key_avail_home, key_per_home = historical_key_player_availability(
+            played_names_index, team_key_players_by_team_season, home_abbr, season_year, game_id
+        )
+        key_avail_away, key_per_away = historical_key_player_availability(
+            played_names_index, team_key_players_by_team_season, away_abbr, season_year, game_id
+        )
+
         features = assemble_from_game_log(
-            games, game_date, season, home_abbr, away_abbr, moneyline_prob
+            games,
+            game_date,
+            season,
+            home_abbr,
+            away_abbr,
+            moneyline_prob,
+            key_players_available_home=key_avail_home,
+            key_players_available_away=key_avail_away,
+            key_players_per_combined_home=key_per_home,
+            key_players_per_combined_away=key_per_away,
         )
         features["label"] = 1 if home_row["WL"] == "W" else 0
         features["season"] = season
@@ -155,7 +248,12 @@ async def _register_model(artefact_path: Path, rps: float, accuracy: float) -> N
         print(f"registered models_registry row: {version} (is_active=True)")
 
 
-def main() -> None:
+async def main_async() -> None:
+    # Everything DB-touching (_load_team_key_players, _register_model) runs inside this one
+    # asyncio.run() call — two separate asyncio.run() calls in the same process previously
+    # crashed here (confirmed live: 'NoneType' object has no attribute 'send', a Windows/
+    # asyncpg pool-across-event-loops issue, same root cause documented in CLAUDE.md for the
+    # pytest test suite) after training itself had already completed successfully.
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
 
     games = pd.read_parquet(DATA_DIR / "nba_game_log.parquet")
@@ -165,9 +263,14 @@ def main() -> None:
         if odds_path.exists()
         else pd.DataFrame(columns=["date", "home_short", "away_short", "home_odds"])
     )
+    player_game_log = pd.read_parquet(DATA_DIR / "nba_player_game_log.parquet")
+
+    print("loading team_key_players (Stage 1 — run compute_key_players.py first if empty)...")
+    team_key_players_by_team_season = await _load_team_key_players()
+    print(f"  {len(team_key_players_by_team_season)} (team, season) entries loaded")
 
     print("assembling training examples (this walks every game with a leakage-safe filter)...")
-    examples = build_training_examples(games, odds)
+    examples = build_training_examples(games, odds, player_game_log, team_key_players_by_team_season)
     print(
         f"{len(examples)} examples, moneyline available for {examples['home_odds'].notna().sum()}"
     )
@@ -255,7 +358,11 @@ def main() -> None:
             mlflow.log_metric("flat_stake_roi_home_picks", flat_stake_roi)
         mlflow.log_artifact(str(artefact_path))
 
-    asyncio.run(_register_model(artefact_path, rps, accuracy))
+    await _register_model(artefact_path, rps, accuracy)
+
+
+def main() -> None:
+    asyncio.run(main_async())
 
 
 if __name__ == "__main__":

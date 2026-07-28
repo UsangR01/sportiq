@@ -20,7 +20,17 @@ Real logic exists for: auth (`POST /auth/register|login|refresh`, Argon2id + JWT
 
 **`NBAModel` is a real, trained model** — see "ML training" below. `run_predictions.py` produces genuine `Prediction` rows (verified against the real Pistons-vs-Suns fixture: home_prob 0.565, confidence MEDIUM); `GET /fixtures/{id}` shows real odds and a real prediction joined together. `/picks` itself still won't show that particular fixture — it's `completed` with a January kickoff (a historical fixture kept around for cross-task verification), and `/picks` correctly only returns `scheduled` fixtures in the next 7 days; that's the filter working, not a gap.
 
-Stubbed (signature + schema exist, body is `NotImplementedError`/`501`, pending real API keys or a trained model): `GET /history`, `GET /stats/model`, `fetch_odds` on every adapter except TheRundown, `fetch_injuries` on every adapter, `TheRundownAdapter.fetch_fixtures`/`.fetch_team_stats`, `APIFootballAdapter`/`RotoWireAdapter`/`SportsDataIOAdapter` entirely, `FootballModel` (`app/models_ml/`), and the model-inference parts of the Celery workers for football. `ingest_injuries.py` is a partial exception — its `ROTOWIRE_API_KEY`-absent/present branching and BallDontLie fallback are fully implemented per TDD §2.3, only the underlying HTTP calls are stubbed.
+**Big3/Top5 key player availability (TDD §3.3, §2.1) is real and fully wired**, in two stages that must never be merged into one query (see `app/models_ml/nba_key_players.py`'s module docstring):
+- **Stage 1** (season-level, backward-looking): `ml/training/compute_key_players.py` ranks each team's players by a trailing WS/48 approximation among a 26+ MPG pool (falling back to the 18-26 MPG band if fewer than 5 qualify), writing the Top 5 to `team_key_players` once per team/season. Re-runnable/idempotent (delete-then-insert per team+season). Run for real across all 6 seasons — e.g. Detroit Pistons 2025: Jalen Duren, Cade Cunningham, Tobias Harris, Ausar Thompson, Duncan Robinson.
+- **Stage 2** (pre-game, forward-looking, live production): `get_key_player_availability(db, team_id, season_year)` reads **only** `player_injury_status` (joined to `team_key_players` by player name, case-insensitive — the two tables share no ID space, same cross-provider mismatch pattern as fixtures/odds) and writes `TeamFeatures.key_players_available`/`.key_players_per_combined`. A player with zero injury-status rows at all counts as *available* (not on any injury report is itself informative); only a team with zero `team_key_players` rows for the season produces `(None, None)`. Computed at ingest time (`ingest_fixtures.py`) and again whenever the re-inference trigger fires.
+- **Re-inference trigger** (`ingest_injuries.py`) now checks `team_key_players` membership by name (not a salary-rank proxy) *and* an actual per-fixture 3-hour-before-tip-off window (`Fixture.kickoff_utc.between(now, now+3h)`, previously just "any fixture today") *and* actually dispatches `run_predictions.delay(...)` (previously logged only — dead code from before a trained model existed).
+- **The historical-training-label counterpart is a deliberately separate, non-reusable function**: `ml/training/train_nba.py`'s `historical_key_player_availability` derives an availability label from **completed-game box-score presence** (`nba_api` player-game-logs, cached via `collect_nba_data.py`'s `collect_player_game_log`) — fine for backtest labels, explicitly documented as **never** to be imported into the live Stage 2 path (and kept in `train_nba.py`, outside `nba_key_players.py`, specifically so it can't be accidentally imported live). `backend/tests/test_nba_key_players.py::test_stage2_follows_injury_status_not_box_score` asserts the two diverge on the same underlying facts (a player marked `OUT` in `player_injury_status` who nonetheless has real minutes in the box score) — this is the regression guard against Stage 2 ever drifting into target leakage.
+- `ws_48`/`per` are **explicitly simplified, documented approximations** (a PIE-based per-48 value formula; a Hollinger-style uPER rescaled to PER's 15.0 league-average convention) — not bit-exact Basketball-Reference/Hollinger reproductions.
+- Manually verified end-to-end with a synthetic `player_injury_status` row (no real RotoWire/BallDontLie injury access — see below): marking a real Top-5 player `OUT` dropped `key_players_available` 5→4, flowed through `_maybe_trigger_reinference` into `TeamFeatures`, and changed the feature vector `_run_predictions` actually saw.
+- A pre-existing, never-before-exercised bug was found and fixed while rebuilding `ingest_injuries.py`: `PlayerInjuryStatus(team_id=update.team_external_id, ...)` was assigning the injury provider's own external team ID directly into the internal UUID FK column (same bug class as earlier fixture/odds work) — fixed via a new `_resolve_team` helper that resolves through `Team.external_id` first. Never triggered before because both injury adapters (`RotoWireAdapter`, `BallDontLieAdapter.fetch_injuries`) were still `NotImplementedError` stubs.
+- **TDD §7's NBA cost-breakdown table is stale** — it still describes a "salary-weighted historical injury-impact proxy," language from before this feature replaced that design. Flagging it, not editing the TDD.
+
+Stubbed (signature + schema exist, body is `NotImplementedError`/`501`, pending real API keys or a trained model): `GET /history`, `GET /stats/model`, `fetch_odds` on every adapter except TheRundown, `fetch_injuries` on every adapter (`RotoWireAdapter` and `BallDontLieAdapter.fetch_injuries` — live-tested: BallDontLie's `/nba/v1/player_injuries` 401s on this key's plan, same paid-tier gate as `/season_averages`/`/standings`; no `ROTOWIRE_API_KEY` was ever provisioned), `TheRundownAdapter.fetch_fixtures`/`.fetch_team_stats`, `APIFootballAdapter`/`SportsDataIOAdapter` entirely, `FootballModel` (`app/models_ml/`), and the model-inference parts of the Celery workers for football. `ingest_injuries.py`'s re-inference trigger and DB-write logic are fully real and tested (see above) — only the underlying HTTP calls into RotoWire/BallDontLie are stubbed, so `player_injury_status` stays empty in practice until one of those exists.
 
 **Known divergences from the TDD, introduced deliberately while building — check these before assuming the docs are authoritative:**
 - `refresh_tokens` table and `users.expo_push_token` column exist in code but aren't in the TDD §2.1 schema listing (the TDD's own prose requires both — §4.3, §5.4).
@@ -39,7 +49,7 @@ Stubbed (signature + schema exist, body is `NotImplementedError`/`501`, pending 
 - `TeamStats`/`team_features` carry a `season_point_diff` column (season-long average point differential, distinct from the last-10 `attack_str`/`defence_str`) beyond the TDD §2.1 shape — the NBA model's `net_rating_diff` feature needs a longer-window signal alongside the short-term form one, and there was nowhere to source it from.
 - `app/adapters/balldontlie.py:fetch_h2h_win_rate` is a standalone function, **not** part of the `DataSourceAdapter` ABC — H2H is fixture-specific (needs both teams), not a generic per-team stat, so it doesn't fit `fetch_team_stats(team_id)`'s shape. Called directly by `app/models_ml/nba_features.py`, not through the adapter interface.
 - `BaseModel.__init__` gained a second `version` parameter (`app/models_ml/base.py`) — `Prediction.model_version` was originally being set to `model.artefact_path` (a raw filesystem path) because that was the only thing `BaseModel` carried; fixed to carry the `models_registry.version` string too.
-- The NBA model's feature set is **12, not TDD §3.3's 13** — see `app/models_ml/nba_features.py`'s module docstring for the full reasoning. Injury impact is omitted (no RotoWire subscription; BallDontLie's own injury endpoint 401s too). Pace differential is omitted even though it's computable at *training* time from `nba_api`'s box-score columns — BallDontLie's live `/games` response has no shooting stats to derive it from at serving time, and a feature that's real in training but permanently `None` in production is worse than not having it. `moneyline_implied_prob_home` is included but genuinely sparse (see below).
+- The NBA model's feature set is **16, not TDD §3.3's 13** — see `app/models_ml/nba_features.py`'s module docstring for the full reasoning. It now includes the 4 key-player-availability features (`key_players_available_home/away`, `key_players_per_combined_home/away` — see the Big3/Top5 section above), which the TDD's own §2.1 design added later, replacing a "salary-weighted injury-impact proxy" idea. Pace differential is still omitted even though it's computable at *training* time from `nba_api`'s box-score columns — BallDontLie's live `/games` response has no shooting stats to derive it from at serving time, and a feature that's real in training but permanently `None` in production is worse than not having it. `moneyline_implied_prob_home` is included but genuinely sparse (see below).
 
 **Known follow-ups, not yet fixed:**
 - `ingest_fixtures.py`'s team-features loop now caches `fetch_team_stats` per-run and `app/adapters/balldontlie.py`'s `_get_with_retry` backs off on 429 — but BallDontLie's free tier is still tight enough that a large batch of genuinely distinct teams (not just repeats within one run) can exhaust the retry budget. Fine for NBA's 30-team universe; revisit if this pattern gets reused for a sport with far more teams.
@@ -99,15 +109,27 @@ infra/{render.yaml,aws/}    # not yet created
 
 ### ML training (`ml/training/`)
 
-The only trained model so far is NBA's, produced by a two-script pipeline. Both scripts add `backend/` to `sys.path` themselves and explicitly `load_dotenv(BACKEND_DIR / ".env")` (see the `.env`-resolution gotcha above) — run from the repo root:
+The only trained model so far is NBA's, produced by a three-script pipeline. All three scripts add `backend/` to `sys.path` themselves and explicitly `load_dotenv(BACKEND_DIR / ".env")` (see the `.env`-resolution gotcha above) — run from the repo root:
 
 ```bash
-backend/.venv/Scripts/python ml/training/collect_nba_data.py   # ~14.5k game-log rows (6 seasons,
-                                                                 # nba_api) + a bounded real odds
-                                                                 # sample (60 dates, TheRundown) —
-                                                                 # caches to ml/data/*.parquet,
-                                                                 # skips re-fetching the game log
-                                                                 # if the parquet already exists
+backend/.venv/Scripts/python ml/training/compute_key_players.py # Stage 1 of the Big3/Top5
+                                                                 # feature (TDD §3.3): ranks
+                                                                 # each team's Top 5 by
+                                                                 # trailing WS/48 approximation,
+                                                                 # writes team_key_players for
+                                                                 # all 6 seasons. Run this
+                                                                 # before collect_nba_data.py/
+                                                                 # train_nba.py, or the 4 new
+                                                                 # key-player features train on
+                                                                 # an empty table.
+backend/.venv/Scripts/python ml/training/collect_nba_data.py   # ~14.5k game-log rows + ~154k
+                                                                 # player-game-log rows (6
+                                                                 # seasons, nba_api) + a bounded
+                                                                 # real odds sample (60 dates,
+                                                                 # TheRundown) — caches to
+                                                                 # ml/data/*.parquet, skips
+                                                                 # re-fetching whichever parquet
+                                                                 # files already exist
 backend/.venv/Scripts/python ml/training/train_nba.py          # Optuna (50 trials) -> isotonic
                                                                  # calibration -> joblib artefact
                                                                  # under ml/artifacts/ -> MLflow
@@ -115,9 +137,13 @@ backend/.venv/Scripts/python ml/training/train_nba.py          # Optuna (50 tria
                                                                  # models_registry row
 ```
 
-Real results from the last run (temporal split: train 2020-21..2023-24, validate 2024-25, test 2025-26): **68.0% test accuracy vs. a 55.4% "always pick home" baseline**, Brier/RPS 0.205, and a +6.9% flat-stake ROI on the 22 test-set games where a real bookmaker price existed and the model favoured home (small sample — directional, not a statistically robust claim).
+Real results from the last run (temporal split: train 2020-21..2023-24, validate 2024-25, test 2025-26, now with 16 features including key-player availability): **68.57% test accuracy vs. a 55.43% "always pick home" baseline**, Brier/RPS 0.2002, and a +20.9% flat-stake ROI on the 29 test-set games where a real bookmaker price existed and the model favoured home (small sample — directional, not a statistically robust claim; not a rigorously isolated before/after comparison against the prior 12-feature run, since the underlying data window shifted too).
 
-`app/models_ml/nba_features.py` is the single source of truth for the feature vector — `assemble_from_game_log` (training, from the cached parquet) and `assemble_from_live_db` (serving, from `TeamFeatures` + a live H2H call + the `Odds` table) must stay in lock-step, or the model sees different inputs live than it was trained on. See that module's docstring for the full 12-feature list and why it's 12, not TDD §3.3's 13.
+`app/models_ml/nba_features.py` is the single source of truth for the feature vector — `assemble_from_game_log` (training, from the cached parquet) and `assemble_from_live_db` (serving, from `TeamFeatures` + a live H2H call + the `Odds` table) must stay in lock-step, or the model sees different inputs live than it was trained on. See that module's docstring for the full 16-feature list and why it's 16, not TDD §3.3's 13.
+
+`train_nba.py`'s `historical_key_player_availability` builds a backtest label for the 4 key-player features from box-score presence (`index_played_names` pre-indexes the ~154k-row player-game-log into a `dict[(game_id, team_abbr), set[names]]` once — calling it per-row against the raw DataFrame instead was a real perf bug caught during this work, hanging the script past 5 minutes). This label is intentionally **not** the same code path as live Stage 2 (`get_key_player_availability`, `player_injury_status`-only) — see the Big3/Top5 section above.
+
+Windows-specific gotcha: `train_nba.py`'s `main()` must stay a single `asyncio.run(main_async())` wrapping the *entire* script. Two separate `asyncio.run()` calls in one process (e.g. one early for loading `team_key_players`, another later for `models_registry` registration) corrupt the shared `async_session_factory`/engine on this platform (`AttributeError: 'NoneType' object has no attribute 'send'`) — same root cause as the `tests/conftest.py` engine-dispose fixture below.
 
 ### Backend tooling (real — see backend/requirements.txt, pyproject.toml)
 

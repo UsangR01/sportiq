@@ -4,20 +4,30 @@
 point of this module existing separately: if the two paths ever compute a named feature
 differently, the model sees out-of-distribution inputs in production silently.
 
-Scope, relative to TDD §3.3's 13-feature NBA list — reduced to 12, both omissions
-deliberate and documented (not silently dropped):
-  - Injury impact (home/away, 2 features) is OMITTED entirely. No RotoWire subscription,
-    and BallDontLie's own injury endpoint 401s on our current tier too (see CLAUDE.md).
+Scope, relative to TDD §3.3's 13-feature NBA list — reduced to 12 and then back up to 16
+with the Big3/Top5 key-player availability feature (see app/models_ml/nba_key_players.py),
+every reduction deliberate and documented (not silently dropped):
   - Pace differential is OMITTED. It IS computable at training time from nba_api's game log
     (FGA/OREB/TOV/FTA give a standard possession estimate), but BallDontLie's live /games
     response only has final scores — no shooting/box-score stats. Including it would mean a
     real training feature that's permanently missing at serving time, which is worse than
     not having it: better to keep train/serve parity airtight than pad the feature count.
+  - "Salary-weighted injury impact" (the TDD's original 13th feature) no longer exists as a
+    concept — TDD §3.3 replaced it with the two-stage key-player availability feature below.
+  - Key-player availability (4 features: available/per-combined × home/away) — Stage 1
+    (team_key_players, season-level WS/48 ranking) and Stage 2 (player_injury_status lookup,
+    pre-game only — never a box score, that would be target leakage per TDD §3.3's PITFALL)
+    live in app/models_ml/nba_key_players.py. The historical training-label counterpart (box-
+    score presence, valid ONLY for backtest labels) is a distinctly-named function in
+    ml/training/train_nba.py, deliberately not in this module or importable into the live
+    path by accident.
 
-The remaining 12 (this module's FEATURE_NAMES, in order):
+The remaining 16 (this module's FEATURE_NAMES, in order):
   rest_days_home, rest_days_away, back_to_back_home, back_to_back_away,
   last10_win_rate_home, last10_win_rate_away, last10_point_diff_home,
   last10_point_diff_away, net_rating_diff, home_court_indicator, h2h_win_rate_home,
+  key_players_available_home, key_players_available_away,
+  key_players_per_combined_home, key_players_per_combined_away,
   moneyline_implied_prob_home.
 
 Missing data is represented as None throughout (never a fabricated neutral value) — XGBoost
@@ -41,6 +51,10 @@ FEATURE_NAMES = (
     "net_rating_diff",
     "home_court_indicator",
     "h2h_win_rate_home",
+    "key_players_available_home",
+    "key_players_available_away",
+    "key_players_per_combined_home",
+    "key_players_per_combined_away",
     "moneyline_implied_prob_home",
 )
 
@@ -95,13 +109,22 @@ def assemble_from_game_log(
     home_team: str,
     away_team: str,
     moneyline_implied_prob_home: float | None = None,
+    key_players_available_home: float | None = None,
+    key_players_available_away: float | None = None,
+    key_players_per_combined_home: float | None = None,
+    key_players_per_combined_away: float | None = None,
 ) -> dict:
     """games_df: the full multi-season game log (one row per team per game — nba_api's
     leaguegamelog shape), with an added SEASON column (e.g. "2023-24") and GAME_DATE as a
     real date (not string). home_team/away_team are TEAM_ABBREVIATION values.
 
     Strict leakage guard: every stat below is filtered to GAME_DATE < as_of_date — a game's
-    own result is never visible to its own feature vector."""
+    own result is never visible to its own feature vector.
+
+    key_players_available_*/key_players_per_combined_* are passed in, computed by the
+    caller (ml/training/train_nba.py's box-score-presence backtest-label function) — kept
+    out of this module deliberately, so that logic can never be mistaken for Stage 2's live
+    player_injury_status lookup (app/models_ml/nba_key_players.py)."""
     home_games = games_df[games_df["TEAM_ABBREVIATION"] == home_team]
     away_games = games_df[games_df["TEAM_ABBREVIATION"] == away_team]
 
@@ -128,6 +151,10 @@ def assemble_from_game_log(
         "net_rating_diff": net_rating_diff,
         "home_court_indicator": 1.0,
         "h2h_win_rate_home": _h2h_win_rate(home_games, as_of_date, away_team),
+        "key_players_available_home": key_players_available_home,
+        "key_players_available_away": key_players_available_away,
+        "key_players_per_combined_home": key_players_per_combined_home,
+        "key_players_per_combined_away": key_players_per_combined_away,
         "moneyline_implied_prob_home": moneyline_implied_prob_home,
     }
 
@@ -142,6 +169,11 @@ async def assemble_from_live_db(db, fixture, home_features, away_features) -> di
       it doesn't fit the generic TeamFeatures cache — see fetch_h2h_win_rate).
     - moneyline_implied_prob_home: a DB read from the Odds table (ingest_odds.py already
       populates this; no external call needed here).
+
+    key_players_available_*/key_players_per_combined_* are read straight off
+    home_features/away_features — app/workers/ingest_fixtures.py already computes and stores
+    them via app/models_ml/nba_key_players.py:get_key_player_availability (Stage 2, reading
+    only player_injury_status), so no additional query is needed here.
     """
     from sqlalchemy import select
 
@@ -223,5 +255,17 @@ async def assemble_from_live_db(db, fixture, home_features, away_features) -> di
         "net_rating_diff": net_rating_diff,
         "home_court_indicator": 1.0,
         "h2h_win_rate_home": h2h_win_rate_home,
+        "key_players_available_home": (
+            home_features.key_players_available if home_features else None
+        ),
+        "key_players_available_away": (
+            away_features.key_players_available if away_features else None
+        ),
+        "key_players_per_combined_home": (
+            home_features.key_players_per_combined if home_features else None
+        ),
+        "key_players_per_combined_away": (
+            away_features.key_players_per_combined if away_features else None
+        ),
         "moneyline_implied_prob_home": moneyline_implied_prob_home,
     }

@@ -109,6 +109,43 @@ class TeamFeatures(Base):
     # Not in TDD §2.1's schema listing — a season-long (not last-N) average point
     # differential, used as a "net rating" proxy by app/models_ml/nba_features.py.
     season_point_diff: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # TDD §3.3 "Big3/Top5 Key Player Availability Feature", Stage 2 — see
+    # app/models_ml/nba_key_players.py:get_key_player_availability. Computed at ingest time
+    # and again on the RotoWire re-inference trigger; only ever from player_injury_status,
+    # never from box-score/lineup data (that would be target leakage — see PITFALL in TDD §3.3).
+    key_players_available: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    key_players_per_combined: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class TeamKeyPlayer(Base):
+    """Season-level Top 5 key players per team (Big3/Big5 source) — TDD §2.1/§3.3. Stage 1
+    of the key-player availability feature: computed once per season from trailing WS/48
+    (backward-looking, leakage-safe), completely independent of any single game's box score
+    or who was actually available for a given game — that's Stage 2 (player_injury_status),
+    computed separately. See app/models_ml/nba_key_players.py."""
+
+    __tablename__ = "team_key_players"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    team_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("teams.id"), nullable=False
+    )
+    season_year: Mapped[int] = mapped_column(Integer, nullable=False)
+    player_rank: Mapped[int] = mapped_column(Integer, nullable=False)  # 1-5
+    # nba_api's own player ID — a different ID space from player_injury_status.player_id
+    # (RotoWire/BallDontLie). Stage 2 joins by player_name, not this column — see TDD §3.3.
+    player_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    player_name: Mapped[str] = mapped_column(String(150), nullable=False)
+    ws_48: Mapped[float] = mapped_column(Float, nullable=False)
+    per: Mapped[float] = mapped_column(Float, nullable=False)
+    mpg: Mapped[float] = mapped_column(Float, nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "team_id", "season_year", "player_rank", name="uq_team_key_players_team_season_rank"
+        ),
+    )
 
 
 class FixtureLiveState(Base):

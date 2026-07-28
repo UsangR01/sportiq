@@ -36,7 +36,7 @@ from app.adapters.therundown import (  # noqa: E402
     _map_event_to_odds_payloads,
 )
 from app.core.config import get_settings  # noqa: E402
-from nba_api.stats.endpoints import leaguegamelog  # noqa: E402
+from nba_api.stats.endpoints import leaguegamelog, playergamelogs  # noqa: E402
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
@@ -68,6 +68,27 @@ def collect_game_log() -> pd.DataFrame:
     games = pd.concat(frames, ignore_index=True)
     games["GAME_DATE"] = pd.to_datetime(games["GAME_DATE"]).dt.date
     return games
+
+
+def collect_player_game_log() -> pd.DataFrame:
+    """Bulk per-season player-level game log (one call/season, like collect_game_log) — used
+    ONLY by ml/training/train_nba.py's historical box-score-presence backtest label for the
+    key-player-availability feature. Never used for live Stage 2 (app/models_ml/
+    nba_key_players.py:get_key_player_availability reads only player_injury_status)."""
+    frames = []
+    for season in SEASONS:
+        print(f"fetching {season} player game log...")
+        result = playergamelogs.PlayerGameLogs(
+            season_nullable=season, season_type_nullable="Regular Season", timeout=30
+        )
+        df = result.get_data_frames()[0]
+        df["SEASON"] = season
+        frames.append(df)
+        time.sleep(0.3)
+
+    logs = pd.concat(frames, ignore_index=True)
+    logs["GAME_DATE"] = pd.to_datetime(logs["GAME_DATE"]).dt.date
+    return logs
 
 
 ODDS_REQUEST_DELAY_SECONDS = 5.0  # a first attempt at 60 back-to-back requests with no delay
@@ -144,16 +165,27 @@ def main() -> None:
         games.to_parquet(games_path, index=False)
         print(f"saved {len(games)} game-log rows to {games_path}")
 
-    most_recent_season = SEASONS[-1]
-    recent_dates = sorted(
-        games.loc[games["SEASON"] == most_recent_season, "GAME_DATE"].astype(str).unique()
-    )[-MAX_ODDS_DATES:]
-    print(f"pulling odds for {len(recent_dates)} dates from {most_recent_season}...")
+    player_log_path = DATA_DIR / "nba_player_game_log.parquet"
+    if player_log_path.exists():
+        print(f"{player_log_path} already exists, skipping nba_api re-fetch")
+    else:
+        player_log = collect_player_game_log()
+        player_log.to_parquet(player_log_path, index=False)
+        print(f"saved {len(player_log)} player-game-log rows to {player_log_path}")
 
-    odds = asyncio.run(collect_odds_sample(recent_dates))
     odds_path = DATA_DIR / "nba_odds_sample.parquet"
-    odds.to_parquet(odds_path, index=False)
-    print(f"saved {len(odds)} usable odds rows to {odds_path}")
+    if odds_path.exists():
+        print(f"{odds_path} already exists, skipping TheRundown re-fetch")
+    else:
+        most_recent_season = SEASONS[-1]
+        recent_dates = sorted(
+            games.loc[games["SEASON"] == most_recent_season, "GAME_DATE"].astype(str).unique()
+        )[-MAX_ODDS_DATES:]
+        print(f"pulling odds for {len(recent_dates)} dates from {most_recent_season}...")
+
+        odds = asyncio.run(collect_odds_sample(recent_dates))
+        odds.to_parquet(odds_path, index=False)
+        print(f"saved {len(odds)} usable odds rows to {odds_path}")
 
 
 if __name__ == "__main__":

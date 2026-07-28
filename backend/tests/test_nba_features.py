@@ -106,6 +106,10 @@ def test_feature_names_are_stable_and_ordered():
         "net_rating_diff",
         "home_court_indicator",
         "h2h_win_rate_home",
+        "key_players_available_home",
+        "key_players_available_away",
+        "key_players_per_combined_home",
+        "key_players_per_combined_away",
         "moneyline_implied_prob_home",
     )
 
