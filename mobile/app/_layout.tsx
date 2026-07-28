@@ -1,12 +1,13 @@
 import { QueryClientProvider } from "@tanstack/react-query";
 import { useFonts } from "expo-font";
-import { DarkTheme, DefaultTheme, Stack, ThemeProvider } from "expo-router";
+import { DarkTheme, DefaultTheme, router, Stack, ThemeProvider } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect } from "react";
 import "react-native-reanimated";
 
 import "../global.css";
 import { useColorScheme } from "@/components/useColorScheme";
+import { addNotificationTapListener } from "@/lib/notifications";
 import { queryClient } from "@/lib/queryClient";
 import { useAuthStore } from "@/store/authStore";
 import { usePreferencesStore } from "@/store/preferencesStore";
@@ -53,6 +54,16 @@ export default function RootLayout() {
       SplashScreen.hideAsync();
     }
   }, [loaded, authHydrated, preferencesHydrated]);
+
+  // Deep-links a tapped push notification straight to the fixture it's about (TDD §5.4) —
+  // notify_users.py's data payload is always {fixture_id}. A safe no-op wherever
+  // expo-notifications itself isn't available (Expo Go on Android, SDK 53+ — see
+  // lib/notifications.ts).
+  useEffect(() => {
+    return addNotificationTapListener((fixtureId) => {
+      router.push(`/fixture/${fixtureId}`);
+    });
+  }, []);
 
   if (!loaded || !authHydrated || !preferencesHydrated) {
     return null;

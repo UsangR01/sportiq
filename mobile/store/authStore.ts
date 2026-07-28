@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
 import * as authApi from "@/lib/api/auth";
+import { getBiometricRefreshToken, storeBiometricRefreshToken } from "@/lib/biometricAuth";
 import { clearTokens, hydrateTokens, setTokens, subscribe, type Tokens } from "@/lib/tokenStore";
 
 /** The access token's `sub` claim (the user id), read without verifying the signature — this
@@ -31,6 +32,7 @@ interface AuthState {
     password: string,
     guestSessionId?: string | null
   ) => Promise<void>;
+  loginWithBiometrics: (email: string) => Promise<void>;
   clearAuth: () => Promise<void>;
 }
 
@@ -70,6 +72,21 @@ export const useAuthStore = create<AuthState>((set) => {
     register: async (email, password, guestSessionId) => {
       const pair = await authApi.register(email, password, guestSessionId);
       await setTokens(pair.access_token, pair.refresh_token, email);
+    },
+
+    loginWithBiometrics: async (email) => {
+      // Reading this key itself triggers the native biometric prompt (SecureStore's
+      // requireAuthentication) — a null/thrown result means cancelled, not enrolled, or
+      // never enabled, all of which the caller should treat the same as "try again".
+      const biometricRefreshToken = await getBiometricRefreshToken();
+      if (!biometricRefreshToken) {
+        throw new Error("Biometric login isn't available.");
+      }
+      const pair = await authApi.refresh(biometricRefreshToken);
+      await setTokens(pair.access_token, pair.refresh_token, email);
+      // The backend rotates refresh tokens on every /auth/refresh — re-sync the vault so
+      // the next biometric login doesn't try to use the now-revoked one.
+      await storeBiometricRefreshToken(pair.refresh_token, email);
     },
 
     clearAuth: async () => {

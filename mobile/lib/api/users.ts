@@ -13,3 +13,10 @@ export function updatePreferences(
     body: JSON.stringify(body),
   });
 }
+
+export function updatePushToken(expoPushToken: string | null): Promise<void> {
+  return apiFetch<void>("/user/push-token", {
+    method: "PUT",
+    body: JSON.stringify({ expo_push_token: expoPushToken }),
+  });
+}

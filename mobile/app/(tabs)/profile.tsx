@@ -1,13 +1,27 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "expo-router";
-import { Pressable, Text, View } from "react-native";
+import { useEffect, useState } from "react";
+import { Pressable, Switch, Text, View } from "react-native";
 
-import { getPreferences } from "@/lib/api/users";
+import {
+  disableBiometricLogin,
+  enableBiometricLogin,
+  isBiometricHardwareAvailable,
+  isBiometricLoginEnabled,
+} from "@/lib/biometricAuth";
+import {
+  isPushNotificationsEnabled,
+  PushRegistrationError,
+  registerForPushNotificationsAsync,
+  setPushNotificationsEnabledFlag,
+} from "@/lib/notifications";
+import { getPreferences, updatePushToken } from "@/lib/api/users";
 import { useAuthStore } from "@/store/authStore";
 
 export default function ProfileScreen() {
   const email = useAuthStore((s) => s.email);
   const accessToken = useAuthStore((s) => s.accessToken);
+  const refreshToken = useAuthStore((s) => s.refreshToken);
   const clearAuth = useAuthStore((s) => s.clearAuth);
   const isGuest = accessToken === null;
 
@@ -16,6 +30,64 @@ export default function ProfileScreen() {
     queryFn: getPreferences,
     enabled: !isGuest,
   });
+
+  const [pushEnabled, setPushEnabled] = useState(false);
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushError, setPushError] = useState<string | null>(null);
+
+  const [biometricAvailable, setBiometricAvailable] = useState(false);
+  const [biometricEnabled, setBiometricEnabled] = useState(false);
+  const [biometricBusy, setBiometricBusy] = useState(false);
+  const [biometricError, setBiometricError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isGuest) return;
+    isPushNotificationsEnabled().then(setPushEnabled);
+    isBiometricHardwareAvailable().then(setBiometricAvailable);
+    isBiometricLoginEnabled().then(setBiometricEnabled);
+  }, [isGuest]);
+
+  async function onTogglePush(next: boolean) {
+    setPushError(null);
+    setPushBusy(true);
+    try {
+      if (next) {
+        const token = await registerForPushNotificationsAsync();
+        await updatePushToken(token);
+        await setPushNotificationsEnabledFlag(true);
+        setPushEnabled(true);
+      } else {
+        await updatePushToken(null);
+        await setPushNotificationsEnabledFlag(false);
+        setPushEnabled(false);
+      }
+    } catch (e) {
+      setPushError(
+        e instanceof PushRegistrationError ? e.message : "Couldn't update push notifications."
+      );
+    } finally {
+      setPushBusy(false);
+    }
+  }
+
+  async function onToggleBiometric(next: boolean) {
+    setBiometricError(null);
+    setBiometricBusy(true);
+    try {
+      if (next) {
+        if (!refreshToken || !email) throw new Error("Log in again before enabling this.");
+        await enableBiometricLogin(refreshToken, email);
+        setBiometricEnabled(true);
+      } else {
+        await disableBiometricLogin();
+        setBiometricEnabled(false);
+      }
+    } catch (e) {
+      setBiometricError(e instanceof Error ? e.message : "Couldn't update biometric login.");
+    } finally {
+      setBiometricBusy(false);
+    }
+  }
 
   if (isGuest) {
     return (
@@ -55,6 +127,30 @@ export default function ProfileScreen() {
         </View>
       )}
 
+      <View className="mb-6">
+        <ToggleRow
+          label="Push notifications"
+          value={pushEnabled}
+          busy={pushBusy}
+          onValueChange={onTogglePush}
+        />
+        {pushError && <Text className="mt-1 text-xs text-red-500">{pushError}</Text>}
+
+        {biometricAvailable && (
+          <>
+            <ToggleRow
+              label="Biometric login"
+              value={biometricEnabled}
+              busy={biometricBusy}
+              onValueChange={onToggleBiometric}
+            />
+            {biometricError && (
+              <Text className="mt-1 text-xs text-red-500">{biometricError}</Text>
+            )}
+          </>
+        )}
+      </View>
+
       <Pressable
         className="w-full rounded-lg border border-red-500 py-3"
         onPress={() => clearAuth()}
@@ -70,6 +166,25 @@ function Row({ label, value }: { label: string; value: string }) {
     <View className="mb-2 flex-row justify-between border-b border-gray-100 py-2 dark:border-gray-800">
       <Text className="text-gray-500 dark:text-gray-400">{label}</Text>
       <Text className="font-medium text-gray-900 dark:text-gray-100">{value}</Text>
+    </View>
+  );
+}
+
+function ToggleRow({
+  label,
+  value,
+  busy,
+  onValueChange,
+}: {
+  label: string;
+  value: boolean;
+  busy: boolean;
+  onValueChange: (next: boolean) => void;
+}) {
+  return (
+    <View className="flex-row items-center justify-between border-b border-gray-100 py-2 dark:border-gray-800">
+      <Text className="text-gray-700 dark:text-gray-300">{label}</Text>
+      <Switch value={value} disabled={busy} onValueChange={onValueChange} />
     </View>
   );
 }

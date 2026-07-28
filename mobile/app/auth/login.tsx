@@ -1,16 +1,38 @@
 import { router } from "expo-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
 
 import { ApiError } from "@/lib/api/client";
+import {
+  getBiometricEmail,
+  isBiometricHardwareAvailable,
+  isBiometricLoginEnabled,
+} from "@/lib/biometricAuth";
 import { useAuthStore } from "@/store/authStore";
 
 export default function LoginScreen() {
   const login = useAuthStore((s) => s.login);
+  const loginWithBiometrics = useAuthStore((s) => s.loginWithBiometrics);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  const [biometricEmail, setBiometricEmail] = useState<string | null>(null);
+  const [biometricSubmitting, setBiometricSubmitting] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      const [available, enabled, savedEmail] = await Promise.all([
+        isBiometricHardwareAvailable(),
+        isBiometricLoginEnabled(),
+        getBiometricEmail(),
+      ]);
+      if (available && enabled && savedEmail) {
+        setBiometricEmail(savedEmail);
+      }
+    })();
+  }, []);
 
   async function onSubmit() {
     setError(null);
@@ -25,9 +47,35 @@ export default function LoginScreen() {
     }
   }
 
+  async function onBiometricSubmit() {
+    if (!biometricEmail) return;
+    setError(null);
+    setBiometricSubmitting(true);
+    try {
+      await loginWithBiometrics(biometricEmail);
+      router.replace("/(tabs)/profile");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Biometric login failed. Try your password.");
+    } finally {
+      setBiometricSubmitting(false);
+    }
+  }
+
   return (
     <View className="flex-1 bg-white px-6 pt-8 dark:bg-black">
       <Text className="mb-6 text-2xl font-bold text-gray-900 dark:text-gray-100">Log In</Text>
+
+      {biometricEmail && (
+        <Pressable
+          disabled={biometricSubmitting}
+          onPress={onBiometricSubmit}
+          className="mb-6 rounded-lg border border-blue-600 py-3"
+        >
+          <Text className="text-center font-semibold text-blue-600">
+            {biometricSubmitting ? "Confirming…" : `Log in as ${biometricEmail}`}
+          </Text>
+        </Pressable>
+      )}
 
       <TextInput
         autoCapitalize="none"

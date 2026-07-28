@@ -19,6 +19,13 @@ export function login(email: string, password: string): Promise<TokenPair> {
   });
 }
 
+export function refresh(refreshToken: string): Promise<TokenPair> {
+  return rawFetch<TokenPair>("/auth/refresh", {
+    method: "POST",
+    body: JSON.stringify({ refresh_token: refreshToken }),
+  });
+}
+
 export function createGuestSession(): Promise<GuestSessionResponse> {
   return rawFetch<GuestSessionResponse>("/guest/session", { method: "POST" });
 }

@@ -1,8 +1,18 @@
 import asyncio
+import logging
 import uuid
 
+import requests
+from exponent_server_sdk import (
+    DeviceNotRegisteredError,
+    PushClient,
+    PushMessage,
+    PushServerError,
+    PushTicketError,
+)
 from sqlalchemy import select
 
+from app.core.config import get_settings
 from app.core.database import async_session_factory
 from app.fixtures.models import Fixture
 from app.odds.models import Odds
@@ -10,6 +20,8 @@ from app.picks.service import best_available_odds, best_outcome
 from app.predictions.models import ConfidenceTier, Prediction
 from app.users.models import User, UserPreference
 from app.workers.celery import celery_app
+
+logger = logging.getLogger(__name__)
 
 
 async def _recipients_for_pick(db, fixture: Fixture, min_odds_met: float) -> list[User]:
@@ -33,10 +45,37 @@ async def _recipients_for_pick(db, fixture: Fixture, min_odds_met: float) -> lis
     return rows
 
 
-async def _send_push(expo_push_token: str, title: str, body: str, data: dict) -> None:
-    """POST to https://exp.host/--/api/v2/push/send via exponent-server-sdk (TDD §5.4). Not
-    yet implemented — needs a configured Expo access token and real network access."""
-    raise NotImplementedError("Expo push send not yet implemented")
+def _push_client() -> PushClient:
+    settings = get_settings()
+    session = requests.Session()
+    session.headers.update(
+        {
+            "accept": "application/json",
+            "accept-encoding": "gzip, deflate",
+            "content-type": "application/json",
+        }
+    )
+    if settings.expo_access_token:
+        session.headers.update({"authorization": f"Bearer {settings.expo_access_token}"})
+    return PushClient(session=session)
+
+
+async def _send_push(db, user: User, title: str, body: str, data: dict) -> None:
+    """POSTs to https://exp.host/--/api/v2/push/send via exponent-server-sdk (TDD §5.4),
+    off the event loop since the SDK is synchronous (requests, not httpx). No
+    EXPO_ACCESS_TOKEN has been provisioned for this project (see CLAUDE.md) — Expo's push
+    API still accepts unauthenticated sends, just at a lower rate limit, so this can still
+    work without one. A stale/uninstalled-app token self-heals: DeviceNotRegisteredError
+    clears it so future notify runs stop retrying a dead token."""
+    message = PushMessage(to=user.expo_push_token, title=title, body=body, data=data)
+    try:
+        ticket = await asyncio.to_thread(_push_client().publish, message)
+        ticket.validate_response()
+    except DeviceNotRegisteredError:
+        user.expo_push_token = None
+        await db.commit()
+    except (PushServerError, PushTicketError) as exc:
+        logger.warning("Expo push send failed for user %s: %s", user.id, exc)
 
 
 async def _notify_new_pick(fixture_id: uuid.UUID, prediction_id: uuid.UUID) -> None:
@@ -75,7 +114,8 @@ async def _notify_new_pick(fixture_id: uuid.UUID, prediction_id: uuid.UUID) -> N
 
         for user in recipients:
             await _send_push(
-                expo_push_token=user.expo_push_token,
+                db,
+                user,
                 title="New high-confidence pick",
                 body=(
                     f"{outcome.selection} @ {outcome.odds} — "
