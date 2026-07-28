@@ -1,6 +1,6 @@
 import uuid
 
-from pydantic import BaseModel, ConfigDict, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 class RegisterRequest(BaseModel):
@@ -8,7 +8,12 @@ class RegisterRequest(BaseModel):
 
     email: EmailStr
     password: str
-    guest_session_id: uuid.UUID | None = None
+    # strict=True on the model would otherwise reject this field outright: pydantic-core's
+    # strict UUID validator requires an actual UUID instance, which no JSON body can ever
+    # supply (JSON has no UUID type) — every real client sending a guest_session_id here hit
+    # a 422 until this per-field override. Discovered live once a real client (the mobile
+    # app) first exercised the guest-session-migration path with a non-null id.
+    guest_session_id: uuid.UUID | None = Field(default=None, strict=False)
 
 
 class LoginRequest(BaseModel):

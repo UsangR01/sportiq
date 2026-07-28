@@ -8,9 +8,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `SportIQ-TDD.docx` — Technical Design Document v1.5
 - `keys.docx` — **contains live API keys, a database connection string with plaintext password, Redis URL, Sentry DSNs, and an app secret key. Gitignored. Never read its contents into a commit, a generated file, or a tool call whose output could be persisted/logged. Never add it to `.gitignore` exceptions.**
 - `backend/` — FastAPI backend scaffold (see "Backend implementation status" below).
-- `ml/` — NBA model training pipeline (see "ML training" below). No `mobile/` or `infra/` yet.
+- `ml/` — NBA model training pipeline (see "ML training" below).
+- `mobile/` — Expo/React Native app scaffold (see "Mobile implementation status" below). No `infra/` yet.
 
-The architecture section below is the *intended* design per the TDD/PRD. Where the real backend now exists, prefer reading the source over the docs; the docs still lead for anything not yet built (mobile, ML training, infra).
+The architecture section below is the *intended* design per the TDD/PRD. Where the real backend/mobile app now exist, prefer reading the source over the docs; the docs still lead for anything not yet built (ML training beyond NBA, infra).
 
 ## Backend implementation status
 
@@ -57,6 +58,34 @@ Stubbed (signature + schema exist, body is `NotImplementedError`/`501`, pending 
 - `models_registry.artefact_path` is stored as an absolute Windows path (`C:\Users\User\...`) — fine for this machine, not portable to a Linux container (the actual Render.com deploy target per TDD §7). Revisit before any real deployment — probably a relative path resolved against a configured models directory.
 - The training script's flat-stake ROI metric only covers home-side picks with real odds (n=22-30 depending on the run) — the collected odds sample only captured `home_odds`, not `away_odds`, so away-side picks aren't included. A real but small-sample, directionally-positive result (+6.9% to +14.4% across two runs); not a statistically robust claim.
 
+## Mobile implementation status
+
+`mobile/` is a real Expo Router app (SDK 57, TypeScript), scaffolded and live-tested end to end against the running backend (registration, login, logout, guest-session creation/migration, and every §5.2 screen route) — not just created and left unverified.
+
+**Real and wired to the live backend**: NativeWind v4 (Tailwind for RN), TanStack Query, Zustand, Expo SecureStore-backed JWT storage (`lib/tokenStore.ts` + `store/authStore.ts`), and a thin `lib/api/*.ts` client layer mirroring every real backend schema by hand (`lib/api/types.ts` — keep these in lock-step with `backend/app/*/schemas.py`, there's no shared codegen). All 9 TDD §5.2 routes exist: `(tabs)/index` (Home), `(tabs)/picks`, `(tabs)/live`, `(tabs)/profile`, `fixture/[id]`, `history/index`, `how-it-works/index`, `auth/login`, `auth/register`. Home/Picks/Live call real `GET /fixtures`/`GET /picks`/`GET /sports`; Profile calls real `GET/PUT /user/preferences` when authenticated; auth screens call real `POST /auth/register|login`; the odds-threshold slider (`@react-native-community/slider` + `expo-haptics`) drives a real `GET /picks?min_odds=` query.
+
+**A real backend bug was found and fixed via this integration testing**: `RegisterRequest` (`app/auth/schemas.py`) has `model_config = ConfigDict(strict=True)`, and pydantic-core's strict UUID validator rejects a JSON string outright — it demands an actual `UUID` instance, which no JSON body can ever supply. Every real client sending a non-null `guest_session_id` (the TDD §2.1 guest-migration-on-register flow) hit a 422 until this was caught — fixed with a per-field `Field(strict=False)` override, regression-tested in `backend/tests/test_auth_schemas.py`. This had zero test coverage before (no prior test, curl check, or client ever exercised registration with a real, non-null guest session id) — same "first real caller finds a latent bug" pattern as the fixture/odds/injury ID-mapping bugs above.
+
+**Deliberately deferred, not yet built** (still just `mobile/`'s own scaffold, not stubbed backend-style — there's no route/screen for these at all yet): the animated match tracker and Highlightly video embed (§5.3, both explicitly Phase-2/needs-a-license-or-WebSocket-feed anyway), push notifications (§5.4, needs `expo-notifications` + a real device/EAS build to test — meaningless on the web target used for verification), biometric login (`expo-local-authentication`), bottom sheets (`@gorhom/bottom-sheet` — the TDD's guest soft-gate is currently a plain banner + Link, not a modal sheet), and charts (Victory Native XL — the fixture-detail probability bar is a plain `View`-based bar, not a chart library). None of these packages are installed yet; add them when their screen is actually built, not preemptively.
+
+**Real bugs found and fixed while building the scaffold itself** (both are general React Native/Expo Router gotchas, not SportIQ-specific, but cost real debugging time):
+- A require cycle (`store/authStore.ts` → `lib/api/auth.ts` → `lib/api/client.ts` → `store/authStore.ts`, from the API client reading tokens out of the Zustand store directly) showed up as a Metro bundler warning. Fixed by extracting token state into `lib/tokenStore.ts` — a plain, non-React module with its own tiny pub-sub — so the API client depends on it one-directionally, and `authStore.ts` becomes a thin Zustand wrapper that subscribes to it for UI reactivity. The client's own refresh-on-401 flow writes through `tokenStore` directly (not through Zustand), which is exactly why the subscription is needed to keep the UI in sync with a rotation the UI itself didn't trigger.
+- `SportFilterChips`' horizontal `ScrollView` visibly stretched to fill half the screen — but only on screens where the `FlatList` below it was empty (Picks/Live with no matching fixtures), never on Home. Root cause: RN's `ScrollView` bakes `flexGrow: 1` into its base style; two `flexGrow: 1` siblings in a column flex container split whatever leftover space exists 50/50, and an empty `FlatList` leaves a lot of leftover space where a populated one doesn't. Fixed with `grow-0` on the chips `ScrollView`'s own className (not just its content container) — a real cross-platform footgun any future horizontal-scroller-above-a-list layout in this app could hit again.
+
+**Real, live-verified in a headless browser session (Playwright + the system's own Edge/Chromium install) against the actual running backend** — not just typechecked: Home renders real fixtures fetched from `GET /fixtures` (including the historical Pistons-vs-Suns fixture's real prediction probability bar and real BetMGM odds on `fixture/[id]`); Picks/Live correctly render their real empty states (no scheduled fixtures exist in the seed data, no fixtures are live); guest → register → authenticated Profile (real email, real `GET /user/preferences`) → logout → back to guest all round-tripped for real; `history/index` correctly surfaces the backend's real `501` as a friendly message instead of erroring. Zero console/runtime errors in the final pass.
+
+### Mobile dev commands
+
+```bash
+cd mobile
+cp .env.example .env              # EXPO_PUBLIC_API_URL — defaults to http://localhost:8000
+npm install
+npx expo start --web              # or --android / --ios (needs a device/emulator, untested so far)
+npx tsc --noEmit                  # typecheck — no ESLint/Jest configured yet, see "Not yet configured"
+```
+
+The backend must be running (`docker compose up -d && cd backend && uvicorn app.main:app`) and its `CORS_ORIGINS` must include the Expo web dev server's origin (`http://localhost:8081` by default) — `backend/.env.example` doesn't ship this by default since it's a mobile-dev-only concern, add it to your local `backend/.env`.
+
 ## External API research findings — ground truth, not TDD assumptions
 
 Live-tested against the real keys in `keys.docx` (minimal, quota-conscious calls) before implementing `BallDontLieAdapter`. Keep these in mind before touching any adapter — the TDD's own assumptions about at least one of these were wrong:
@@ -97,9 +126,10 @@ External APIs → Celery ingest workers → PostgreSQL + Redis → FastAPI (REST
 backend/app/{auth,fixtures,odds,picks,predictions,history,sports,users,core,workers,adapters,models_ml}/  # exists
 backend/alembic/            # exists — DB migrations
 docker-compose.yml          # exists — local Postgres 16 + Redis 7 (dev-only, not in TDD §9)
-mobile/app/                 # not yet created — Expo Router file-based routes: (tabs)/, fixture/[id], auth/
-mobile/components/          # not yet created
-mobile/lib/, mobile/store/  # not yet created
+mobile/app/                 # exists — Expo Router file-based routes: (tabs)/, fixture/[id], history/,
+                             # how-it-works/, auth/ (see "Mobile implementation status" above)
+mobile/components/          # exists — fixtures/ (FixtureCard, LiveBadge), SportFilterChips, GuestBanner
+mobile/lib/, mobile/store/  # exists — API client + per-resource modules, tokenStore, Zustand stores
 ml/training/                 # exists — collect_nba_data.py, train_nba.py (see "ML training" below)
 ml/data/, ml/artifacts/, ml/mlruns/  # exists — parquet cache, joblib artefacts, local MLflow store
 ml/notebooks/, ml/evaluation/  # not yet created (TDD §9 lists these; training/ came first)
@@ -168,8 +198,8 @@ Note the `PYTHONPATH=.` on the seed script — run directly (`python scripts/see
 
 ### Not yet configured
 
-- Mobile tests/lint: `Jest`, `ESLint` (via GitHub Actions on every PR) — no `mobile/` directory yet.
-- Mobile build/release: EAS Build/Update/Submit — no Expo project yet.
+- Mobile tests/lint: `Jest`, `ESLint` (via GitHub Actions on every PR) — not configured yet, though `mobile/` itself now exists (see "Mobile implementation status" above).
+- Mobile build/release: EAS Build/Update/Submit — no `eas.json`/EAS project set up yet; only tested via `expo start --web` so far, not a device/emulator/EAS build.
 - Deploy: Render.com for MVP (FastAPI web service, Celery worker, Celery beat, managed Postgres/Redis); AWS ECS/RDS/ElastiCache at Phase 2 scale — no `infra/` yet.
 - CI (`.github/workflows/`) — none yet.
 
