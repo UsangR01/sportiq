@@ -20,6 +20,8 @@ def test_build_game_log_df_one_row_per_team_per_fixture():
     class FakeFixture:
         def __init__(self, kickoff):
             self.kickoff_utc = kickoff
+            self.external_id = "fx-1"
+            self.season = "2026"
 
     class FakeLiveState:
         def __init__(self, home_score, away_score):
@@ -40,11 +42,15 @@ def test_build_game_log_df_one_row_per_team_per_fixture():
     assert away_row["GF"] == 1 and away_row["GA"] == 2 and away_row["WDL"] == "L"
     assert home_row["HOME_AWAY"] == "home"
     assert away_row["HOME_AWAY"] == "away"
+    assert home_row["FIXTURE_ID"] == "fx-1"
+    assert home_row["SEASON"] == 2026
 
 
 def test_build_game_log_df_draw():
     class FakeFixture:
         kickoff_utc = datetime(2026, 7, 20, tzinfo=UTC)
+        external_id = "fx-2"
+        season = "2026"
 
     class FakeLiveState:
         home_score = 1

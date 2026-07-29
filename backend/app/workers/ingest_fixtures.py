@@ -9,6 +9,7 @@ from app.core.database import async_session_factory
 from app.fixtures.models import Fixture, FixtureLiveState, FixtureStatus, Team, TeamFeatures
 from app.fixtures.service import get_or_create_team
 from app.history.models import MatchResult, Outcome
+from app.models_ml.elo import INITIAL_ELO, apply_match_result
 from app.models_ml.key_player_availability import get_key_player_availability
 from app.sports.models import League, Sport
 from app.workers.celery import celery_app
@@ -45,13 +46,20 @@ async def _upsert_live_state(db, fixture_id, payload: FixturePayload) -> None:
     live_state.last_updated_utc = datetime.now(UTC)
 
 
-async def _maybe_settle_outcome(db, fixture_id, payload: FixturePayload) -> None:
+async def _maybe_settle_outcome(
+    db, fixture_id, payload: FixturePayload, home_team: Team, away_team: Team
+) -> None:
     """Writes a real settled Outcome row once a fixture completes — the outcomes table TDD's
     own schema already defines but nothing has ever written to (GET /history's real blocker
     per CLAUDE.md: "no settled outcomes exist"). Idempotent: both this worker's daily backfill
     and ingest_live_scores.py's 5-minute poll can observe the same fixture completing, so this
     only ever inserts once. Aggregating these into /history itself (real model-performance
-    rollups) is a separate, larger task — not attempted here, just unblocking the raw data."""
+    rollups) is a separate, larger task — not attempted here, just unblocking the raw data.
+
+    Also updates both teams' real, persistent Elo rating (app/models_ml/elo.py) exactly once
+    per real completed match — this idempotency check is the natural single hook point for
+    that, since Elo state would otherwise be double-updated by the same daily-backfill +
+    live-poll overlap this function already guards against for the Outcome row."""
     if payload.status != "completed" or payload.home_score is None or payload.away_score is None:
         return
     existing = (
@@ -74,6 +82,12 @@ async def _maybe_settle_outcome(db, fixture_id, payload: FixturePayload) -> None
             result=result,
             settled_at=datetime.now(UTC),
         )
+    )
+
+    elo_home = home_team.elo_rating if home_team.elo_rating is not None else INITIAL_ELO
+    elo_away = away_team.elo_rating if away_team.elo_rating is not None else INITIAL_ELO
+    home_team.elo_rating, away_team.elo_rating = apply_match_result(
+        elo_home, elo_away, payload.home_score, payload.away_score
     )
 
 
@@ -141,7 +155,7 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
                 fixture = existing
 
             await _upsert_live_state(db, fixture.id, payload)
-            await _maybe_settle_outcome(db, fixture.id, payload)
+            await _maybe_settle_outcome(db, fixture.id, payload, home_team, away_team)
         await db.commit()
 
         # Team feature vectors, computed at ingest time for not-yet-played fixtures (TDD
@@ -200,11 +214,17 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
                         TeamFeatures.team_id == team_id, TeamFeatures.fixture_id == fixture.id
                     )
                 )
+                # team.elo_rating is the real, persistent, incrementally-updated value (see
+                # app/models_ml/elo.py) — stats.elo_rating from the stats adapter is always
+                # None (no provider carries Elo), so this is the only real source. A team with
+                # no completed, Elo-tracked match yet has never had this column touched
+                # (stays None) — genuinely missing, not defaulted to INITIAL_ELO here, so the
+                # model sees an honest gap rather than a fabricated neutral rating.
                 db.add(
                     TeamFeatures(
                         team_id=team_id,
                         fixture_id=fixture.id,
-                        elo_rating=stats.elo_rating,
+                        elo_rating=team.elo_rating,
                         attack_str=stats.attack_str,
                         defence_str=stats.defence_str,
                         form_pts_5=stats.form_pts_5,
@@ -216,6 +236,8 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
                         season_point_diff=stats.season_point_diff,
                         key_players_available=key_players_available,
                         key_players_per_combined=key_players_per_combined,
+                        win_streak=stats.win_streak,
+                        losing_streak=stats.losing_streak,
                     )
                 )
         await db.commit()

@@ -69,6 +69,14 @@ class TeamStats:
     # needs both a short-term-form signal (form_pts_5/attack_str/defence_str, last-N) and a
     # longer season-quality signal, and TeamFeatures had no season-long aggregate at all.
     season_point_diff: float | None = None
+    # Current consecutive-match streak, derived from the same recent-form data as form_pts_5
+    # (API-Football's "form" string; NBA has no equivalent source yet, stays None). Exactly one
+    # of the two is ever positive for a given team (a team is never both on a win streak and a
+    # losing streak) — kept as two separate fields rather than one signed value so a team with
+    # no streak at all (most recent match drawn) has an unambiguous (0, 0) rather than an
+    # overloaded 0 that could mean either "no streak" or "streak of length 0".
+    win_streak: float | None = None
+    losing_streak: float | None = None
 
 
 @dataclass(frozen=True)

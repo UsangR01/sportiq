@@ -157,11 +157,18 @@ async def test_upsert_live_state_no_ops_without_scores(seeded_fixture):
         assert row is None
 
 
+async def _get_teams(db, fixture):
+    home = (await db.execute(select(Team).where(Team.id == fixture.home_team_id))).scalar_one()
+    away = (await db.execute(select(Team).where(Team.id == fixture.away_team_id))).scalar_one()
+    return home, away
+
+
 async def test_maybe_settle_outcome_writes_real_result(seeded_fixture):
     _sport, fixture = seeded_fixture
     async with async_session_factory() as db:
+        home, away = await _get_teams(db, fixture)
         await _maybe_settle_outcome(
-            db, fixture.id, make_payload(status="completed", home_score=3, away_score=1)
+            db, fixture.id, make_payload(status="completed", home_score=3, away_score=1), home, away
         )
         await db.commit()
 
@@ -174,16 +181,37 @@ async def test_maybe_settle_outcome_writes_real_result(seeded_fixture):
         assert outcome.result == MatchResult.HOME_WIN
 
 
+async def test_maybe_settle_outcome_updates_elo(seeded_fixture):
+    _sport, fixture = seeded_fixture
+    async with async_session_factory() as db:
+        home, away = await _get_teams(db, fixture)
+        assert home.elo_rating is None
+        assert away.elo_rating is None
+        await _maybe_settle_outcome(
+            db, fixture.id, make_payload(status="completed", home_score=3, away_score=1), home, away
+        )
+        await db.commit()
+
+    async with async_session_factory() as db:
+        home, away = await _get_teams(db, fixture)
+        # Home team won as the pre-match favourite-by-default (both start at INITIAL_ELO, a
+        # win against an equally-rated opponent always raises the winner's rating).
+        assert home.elo_rating > 1500.0
+        assert away.elo_rating < 1500.0
+
+
 async def test_maybe_settle_outcome_is_idempotent(seeded_fixture):
     _sport, fixture = seeded_fixture
     payload = make_payload(status="completed", home_score=2, away_score=2)
     async with async_session_factory() as db:
-        await _maybe_settle_outcome(db, fixture.id, payload)
+        home, away = await _get_teams(db, fixture)
+        await _maybe_settle_outcome(db, fixture.id, payload, home, away)
         await db.commit()
     async with async_session_factory() as db:
-        await _maybe_settle_outcome(
-            db, fixture.id, payload
-        )  # a second worker run observing the same completion
+        home, away = await _get_teams(db, fixture)
+        elo_home_after_first = home.elo_rating
+        # a second worker run observing the same completion
+        await _maybe_settle_outcome(db, fixture.id, payload, home, away)
         await db.commit()
 
     async with async_session_factory() as db:
@@ -194,13 +222,17 @@ async def test_maybe_settle_outcome_is_idempotent(seeded_fixture):
         )
         assert len(outcomes) == 1
         assert outcomes[0].result == MatchResult.DRAW
+        home, _away = await _get_teams(db, fixture)
+        # Elo must not be double-applied on the second, idempotent-no-op call.
+        assert home.elo_rating == elo_home_after_first
 
 
 async def test_maybe_settle_outcome_skips_non_completed(seeded_fixture):
     _sport, fixture = seeded_fixture
     async with async_session_factory() as db:
+        home, away = await _get_teams(db, fixture)
         await _maybe_settle_outcome(
-            db, fixture.id, make_payload(status="live", home_score=1, away_score=0)
+            db, fixture.id, make_payload(status="live", home_score=1, away_score=0), home, away
         )
         await db.commit()
 

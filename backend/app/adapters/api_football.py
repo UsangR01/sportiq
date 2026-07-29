@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
 import httpx
@@ -119,6 +120,25 @@ def _parse_form_points(form: str | None) -> float | None:
     return sum(values) / len(values)
 
 
+def _parse_streaks(form: str | None) -> tuple[float | None, float | None]:
+    """Same "WWDLW..." form string (most-recent last), read backward from the end to find the
+    team's current consecutive streak. A draw at the most recent match breaks both streaks
+    (0, 0) — a draw is neither a win nor a loss, so no streak of either kind survives it."""
+    if not form:
+        return None, None
+    if form[-1] == "D":
+        return 0.0, 0.0
+    target = form[-1]
+    streak = 0
+    for c in reversed(form):
+        if c != target:
+            break
+        streak += 1
+    if target == "W":
+        return float(streak), 0.0
+    return 0.0, float(streak)
+
+
 def _compute_team_stats(team_external_id: str, stats: dict) -> TeamStats:
     """Derives everything real /teams/statistics provides (form, goals-average, home/away
     win rate) — confirmed live (see CLAUDE.md): no elo_rating/xg fields exist in this
@@ -152,9 +172,11 @@ def _compute_team_stats(team_external_id: str, stats: dict) -> TeamStats:
         goals.get("against", {}).get("average", {}).get("total") if has_played else None
     )
 
+    win_streak, losing_streak = _parse_streaks(stats.get("form"))
+
     return TeamStats(
         team_external_id=team_external_id,
-        elo_rating=None,
+        elo_rating=None,  # see Team.elo_rating for the real, persistent source of this now
         attack_str=float(attack_str_raw) if attack_str_raw is not None else None,
         defence_str=float(defence_str_raw) if defence_str_raw is not None else None,
         form_pts_5=_parse_form_points(stats.get("form")),
@@ -164,6 +186,8 @@ def _compute_team_stats(team_external_id: str, stats: dict) -> TeamStats:
         home_win_rate=home_win_rate,
         away_win_rate=away_win_rate,
         season_point_diff=None,
+        win_streak=win_streak,
+        losing_streak=losing_streak,
     )
 
 
@@ -403,13 +427,14 @@ class APIFootballAdapter(DataSourceAdapter):
 H2H_LOOKBACK_MEETINGS = 10  # API-Football's own default page size for this endpoint
 
 
-async def fetch_h2h_win_rate(home_external_id: str, away_external_id: str) -> float | None:
-    """Football-specific helper, not part of the DataSourceAdapter ABC — mirrors
-    app/adapters/balldontlie.py:fetch_h2h_win_rate's role (fixture-specific, needs both
-    teams, doesn't fit fetch_team_stats(team_id)'s shape). Unlike NBA, API-Football has a
-    dedicated head-to-head endpoint (/fixtures/headtohead) rather than requiring a manual
-    search through one team's own fixture history — simpler and a real, direct provider
-    feature, not a workaround."""
+@dataclass(frozen=True)
+class H2HStats:
+    win_rate_home: float
+    avg_goals_scored_home: float
+    avg_goals_allowed_home: float
+
+
+async def _fetch_h2h_meetings(home_external_id: str, away_external_id: str) -> list[dict]:
     api_key = get_settings().api_football_key
     async with httpx.AsyncClient(
         base_url=BASE_URL, headers={"x-apisports-key": api_key}, timeout=15.0
@@ -423,19 +448,98 @@ async def fetch_h2h_win_rate(home_external_id: str, away_external_id: str) -> fl
         )
         response.raise_for_status()
     meetings = response.json().get("response", [])
+    return [fx for fx in meetings if fx["fixture"]["status"]["short"] in ("FT", "AET", "PEN")]
 
-    completed = [fx for fx in meetings if fx["fixture"]["status"]["short"] in ("FT", "AET", "PEN")]
+
+def _goals_from_home_side_perspective(fx: dict, home_external_id: str) -> tuple[int, int] | None:
+    """Returns (goals_scored_by_home_external_id, goals_conceded), regardless of which side of
+    THIS particular past meeting home_external_id played on — a team's own H2H scoring record
+    against an opponent shouldn't silently flip depending on historical home/away assignment."""
+    home_goals = fx["goals"]["home"]
+    away_goals = fx["goals"]["away"]
+    if home_goals is None or away_goals is None:
+        return None
+    if str(fx["teams"]["home"]["id"]) == home_external_id:
+        return home_goals, away_goals
+    return away_goals, home_goals
+
+
+async def fetch_h2h_win_rate(home_external_id: str, away_external_id: str) -> float | None:
+    """Football-specific helper, not part of the DataSourceAdapter ABC — mirrors
+    app/adapters/balldontlie.py:fetch_h2h_win_rate's role (fixture-specific, needs both
+    teams, doesn't fit fetch_team_stats(team_id)'s shape). Unlike NBA, API-Football has a
+    dedicated head-to-head endpoint (/fixtures/headtohead) rather than requiring a manual
+    search through one team's own fixture history — simpler and a real, direct provider
+    feature, not a workaround."""
+    completed = await _fetch_h2h_meetings(home_external_id, away_external_id)
     if not completed:
         return None
 
     def home_side_won(fx: dict) -> bool:
-        home_goals = fx["goals"]["home"]
-        away_goals = fx["goals"]["away"]
-        if home_goals is None or away_goals is None:
+        scored = _goals_from_home_side_perspective(fx, home_external_id)
+        if scored is None:
             return False
-        is_home_team_home_side = str(fx["teams"]["home"]["id"]) == home_external_id
-        if is_home_team_home_side:
-            return home_goals > away_goals
-        return away_goals > home_goals
+        return scored[0] > scored[1]
 
     return sum(1 for fx in completed if home_side_won(fx)) / len(completed)
+
+
+async def fetch_h2h_stats(home_external_id: str, away_external_id: str) -> H2HStats | None:
+    """Richer H2H than fetch_h2h_win_rate: the same /fixtures/headtohead response already
+    carries real goals per meeting, so average goals scored/allowed vs this specific opponent
+    (not just win rate) comes for free from a call this codebase was already making."""
+    completed = await _fetch_h2h_meetings(home_external_id, away_external_id)
+    if not completed:
+        return None
+
+    wins = 0
+    scored_total = 0
+    allowed_total = 0
+    counted = 0
+    for fx in completed:
+        goals = _goals_from_home_side_perspective(fx, home_external_id)
+        if goals is None:
+            continue
+        scored, allowed = goals
+        scored_total += scored
+        allowed_total += allowed
+        counted += 1
+        if scored > allowed:
+            wins += 1
+
+    if counted == 0:
+        return None
+    return H2HStats(
+        win_rate_home=wins / counted,
+        avg_goals_scored_home=scored_total / counted,
+        avg_goals_allowed_home=allowed_total / counted,
+    )
+
+
+async def fetch_lineup_presence(fixture_external_id: str) -> dict[str, set[str]]:
+    """Real box-score/lineup presence for ONE already-completed fixture — {team_external_id:
+    {lowercased player names who actually played}}. One-off, real-time equivalent of
+    ml/training/collect_football_data.py:collect_lineups for a single fixture, used ONLY by
+    app/workers/backfill_predictions.py's retrodiction path when a completed fixture is newer
+    than the cached training parquet's collection snapshot (so its lineup was never collected
+    in bulk). Never call this pre-game — see
+    app/models_ml/historical_key_players.py's module docstring for why lineup presence is only
+    ever safe to use once a fixture's outcome is already known."""
+    api_key = get_settings().api_football_key
+    async with httpx.AsyncClient(
+        base_url=BASE_URL, headers={"x-apisports-key": api_key}, timeout=15.0
+    ) as client:
+        response = await client.get("/fixtures/players", params={"fixture": fixture_external_id})
+        response.raise_for_status()
+
+    by_team: dict[str, set[str]] = {}
+    for team_block in response.json().get("response", []):
+        team_id = str(team_block["team"]["id"])
+        names = set()
+        for player_row in team_block.get("players", []):
+            stats = player_row.get("statistics", [{}])[0]
+            minutes = stats.get("games", {}).get("minutes")
+            if minutes:
+                names.add(player_row["player"]["name"].lower())
+        by_team[team_id] = names
+    return by_team

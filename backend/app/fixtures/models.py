@@ -41,6 +41,13 @@ class Team(Base):
     name: Mapped[str] = mapped_column(String(150), nullable=False)
     short_name: Mapped[str] = mapped_column(String(50), nullable=True)
     external_id: Mapped[str] = mapped_column(String(100), nullable=True)
+    # Real, persistent Elo state (app/models_ml/elo.py) — NULL until this team's first
+    # Elo-tracked match completes (initializes to elo.INITIAL_ELO at that point), updated
+    # incrementally exactly once per real completed fixture
+    # (app/workers/ingest_fixtures.py:_maybe_settle_outcome). Distinct from
+    # TeamFeatures.elo_rating, which is a point-in-time snapshot of this value taken at
+    # ingest time for a specific upcoming fixture — this column is the live running value.
+    elo_rating: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class Fixture(Base):
@@ -116,6 +123,11 @@ class TeamFeatures(Base):
     # never from box-score/lineup data (that would be target leakage — see PITFALL in TDD §3.3).
     key_players_available: Mapped[int | None] = mapped_column(Integer, nullable=True)
     key_players_per_combined: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Real consecutive-match streak feature (app/models_ml/football_features.py), sourced from
+    # TeamStats.win_streak/.losing_streak (see app/adapters/api_football.py:_parse_streaks) —
+    # None for sports/adapters with no streak source yet (NBA).
+    win_streak: Mapped[float | None] = mapped_column(Float, nullable=True)
+    losing_streak: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class TeamKeyPlayer(Base):

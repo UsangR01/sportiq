@@ -6,14 +6,14 @@ the thin API-fetching + DB-writing wrapper; the pure ranking logic lives in
 app/models_ml/football_key_players.py. Run once per season; safe to re-run (upserts by
 deleting and re-inserting each team+season's rows).
 
-Scope: EPL gets the full 5-season historical window (2021-2025) backing the first real
-trained model (see CLAUDE.md's scope decision). Brasileirão gets only its current
-(mid-season, calendar-year) season — added so live fixtures/predictions for an
-actually-in-season league have real Stage 2 availability data, without a full retrain (the
-registered FootballModel itself stays EPL-trained; Stage 1 for Brasileirão only feeds
-key_players_available/.per_combined, which the model already treats as optional/nullable
-inputs). The other 3 European leagues' Sport/League rows are seeded and generically
-supported but have no Stage 1 data collected yet.
+Scope: both EPL and Brasileirão now get the full 5-season historical window (2021-2025) — the
+retrodiction rebuild (see CLAUDE.md, "past-game predictions use real historical data + real
+lineup presence") needs Stage 1 key players for Brasileirão's historical seasons too, not just
+its current one, to identify who each team's key players actually were in a given past season.
+2026 stays in Brasileirão's list on top of that (its current, mid-season, calendar-year season
+— needed for live fixtures/predictions, since a season only just underway wouldn't otherwise
+have a Stage 1 row yet). The other 3 European leagues' Sport/League rows are seeded and
+generically supported but have no Stage 1 data collected yet.
 
 Usage (from repo root):
     backend/.venv/Scripts/python ml/training/compute_football_key_players.py
@@ -44,14 +44,15 @@ from app.fixtures.service import get_or_create_team  # noqa: E402
 from app.models_ml.football_key_players import select_top5  # noqa: E402
 from app.sports.models import League, Sport  # noqa: E402
 
-# (league_slug, [seasons]) — EPL's full historical window for the trained model, Brasileirão's
-# current season only (see module docstring for why).
+# (league_slug, [seasons]) — see module docstring for why Brasileirão now matches EPL's
+# historical depth (plus its own current season on top).
 TARGET_LEAGUES: list[tuple[str, list[int]]] = [
     ("epl", [2021, 2022, 2023, 2024, 2025]),
-    ("brasileirao", [2026]),
+    ("brasileirao", [2021, 2022, 2023, 2024, 2025, 2026]),
 ]
 
 MAX_PAGES = 30  # safety cap on /players pagination per team
+MAX_RETRIES = 5  # mirrors collect_football_data.py's _get_with_retry backoff-on-429 pattern
 
 
 def _client() -> httpx.AsyncClient:
@@ -61,13 +62,30 @@ def _client() -> httpx.AsyncClient:
     )
 
 
+async def _get_with_retry(client: httpx.AsyncClient, path: str, params: dict) -> httpx.Response:
+    import asyncio
+
+    response = None
+    for attempt in range(MAX_RETRIES):
+        response = await client.get(path, params=params)
+        if response.status_code == 429 and attempt < MAX_RETRIES - 1:
+            retry_after = response.headers.get("Retry-After")
+            delay = float(retry_after) if retry_after else min(2**attempt, 30)
+            print(f"  429 on {path}, backing off {delay:.0f}s")
+            await asyncio.sleep(delay)
+            continue
+        response.raise_for_status()
+        return response
+    response.raise_for_status()
+    return response
+
+
 async def _fetch_teams(
     client: httpx.AsyncClient, league_id: int, season: int
 ) -> list[dict]:
-    response = await client.get(
-        "/teams", params={"league": league_id, "season": season}
+    response = await _get_with_retry(
+        client, "/teams", {"league": league_id, "season": season}
     )
-    response.raise_for_status()
     return [row["team"] for row in response.json().get("response", [])]
 
 
@@ -80,10 +98,9 @@ async def _fetch_team_players(
     live, see CLAUDE.md)."""
     players: list[dict] = []
     for page in range(1, MAX_PAGES + 1):
-        response = await client.get(
-            "/players", params={"team": team_id, "season": season, "page": page}
+        response = await _get_with_retry(
+            client, "/players", {"team": team_id, "season": season, "page": page}
         )
-        response.raise_for_status()
         payload = response.json()
         for row in payload.get("response", []):
             player = row["player"]

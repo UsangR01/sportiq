@@ -1,6 +1,17 @@
-"""Train the first real football 1X2 model (TDD §3.2/§3.5), scoped to EPL only (see
-CLAUDE.md's scope decision — the other 4 leagues are seeded/generically supported but not
-part of this training run).
+"""Train the football 1X2 model (TDD §3.2/§3.5), now pooling real historical data across EPL
+AND Brasileirão (see CLAUDE.md — the other 3 European leagues are still seeded/generically
+supported but have no historical training data collected). Brasileirão was added specifically
+to give the retrodiction feature (app/workers/backfill_predictions.py) and the model itself
+more real data to learn from — both leagues' fixtures/lineups feed the same pooled train/val/
+test split below rather than two separate models, since features are goal-rate/point-based
+(normalized), not raw-goal-count-based, so pooling across leagues with different scoring
+levels is not expected to introduce a systematic bias.
+
+New in this pass, adopted from the user's own prior NBA notebook's feature-engineering ideas
+(feature_engineering.ipynb / "Running - NBA Games Prediction Project.ipynb", both added to the
+repo root) — see app/models_ml/football_features.py's module docstring for the full feature
+list: real iterative Elo ratings (elo_diff), win streaks (win_streak_home/away), and richer
+H2H (avg goals scored/allowed vs the specific opponent, not just win rate).
 
 Two-layer stack per TDD §3.2:
   - Layer 1: two XGBoost Poisson regressors (objective="count:poisson"), one per side,
@@ -19,10 +30,13 @@ out-of-fold Layer-1 predictions for the training split too (e.g. via k-fold), bu
 materially larger amount of code for a first real version; flagging this rather than silently
 accepting a subtly-optimistic Layer 2 training signal.
 
-Temporal split (same 5-season window ml/training/compute_football_key_players.py uses):
-  - train: 2021-22, 2022-23, 2023-24 (3 seasons)
-  - validate: 2024-25
-  - test: 2025-26 (the most recently completed season)
+Temporal split (same 5-season window ml/training/compute_football_key_players.py uses, applied
+identically to both leagues since Brasileirão's season is labeled by the same integer year
+convention as EPL's start-year, just on a different calendar — see
+app/adapters/api_football.py:CALENDAR_YEAR_SEASON_LEAGUES):
+  - train: 2021, 2022, 2023 (3 seasons)
+  - validate: 2024
+  - test: 2025 (the most recently completed season)
 Fewer seasons than NBA's 6 (4 train + 1 val + 1 test) — a deliberate, documented scope cut
 tied to the subscription's real ~1-month time limit and the added per-fixture lineup-call
 cost (see collect_football_data.py); not a data-availability limitation (API-Football itself
@@ -52,14 +66,24 @@ import mlflow  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import xgboost as xgb  # noqa: E402
+from app.models_ml.elo import compute_elo_history  # noqa: E402
 from app.models_ml.football import FootballModel  # noqa: E402
 from app.models_ml.football_features import FEATURE_NAMES, assemble_from_game_log  # noqa: E402
+from app.models_ml.historical_key_players import (  # noqa: E402
+    historical_key_player_availability,
+    index_played_names,
+    load_team_key_players_by_team_season,
+)
 from sklearn.isotonic import IsotonicRegression  # noqa: E402
 from sklearn.metrics import accuracy_score, log_loss  # noqa: E402
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 ML_DIR = Path(__file__).resolve().parent.parent
 ARTIFACT_DIR = ML_DIR / "artifacts"
+
+# EPL has real TheRundown odds coverage; Brasileirão doesn't (confirmed live, see CLAUDE.md) —
+# only EPL contributes to build_training_examples' moneyline_implied_prob_home/ROI metric.
+LEAGUES = ["epl", "brasileirao"]
 
 TRAIN_SEASONS = [2021, 2022, 2023]
 VAL_SEASON = 2024
@@ -69,74 +93,14 @@ CLASSES = FootballModel.CLASSES  # ("home", "draw", "away") — fixes the label 
 LABEL_BY_CLASS = {cls: i for i, cls in enumerate(CLASSES)}
 
 
-def index_played_names(lineups: pd.DataFrame) -> dict[tuple[int, str], set[str]]:
-    """(FIXTURE_ID, TEAM_ID) -> lowercased names who appeared with real minutes — the football
-    analogue of ml/training/train_nba.py's index_played_names, built from
-    collect_football_data.py's already-minutes-filtered lineup rows."""
-    index: dict[tuple[int, str], set[str]] = {}
-    for fixture_id, team_id, name in zip(
-        lineups["FIXTURE_ID"], lineups["TEAM_ID"], lineups["PLAYER_NAME"].str.lower(), strict=False
-    ):
-        index.setdefault((fixture_id, team_id), set()).add(name)
-    return index
-
-
-def historical_key_player_availability(
-    played_names_index: dict[tuple[int, str], set[str]],
-    team_key_players_by_team_season: dict,
-    team_id: str,
-    season: int,
-    fixture_id: int,
-) -> tuple[int | None, float | None]:
-    """BACKTEST LABEL ONLY, built from lineup presence in an *already-completed* fixture —
-    mirrors ml/training/train_nba.py:historical_key_player_availability's role and warning
-    exactly: must NEVER be reused for live Stage 2
-    (app/models_ml/key_player_availability.py:get_key_player_availability), which is pre-game
-    and reads only player_injury_status. Kept in this script, not in app/models_ml/,
-    specifically so it can't be imported into the live path by accident."""
-    key_players = team_key_players_by_team_season.get((team_id, season))
-    if not key_players:
-        return None, None
-
-    played_names = played_names_index.get((fixture_id, team_id), set())
-
-    available_count = 0
-    combined = 0.0
-    for key_player in key_players:
-        if key_player["player_name"].lower() in played_names:
-            available_count += 1
-            combined += key_player["combined_metric"]
-    return available_count, combined
-
-
 async def _load_team_key_players() -> dict[tuple[str, int], list[dict]]:
-    """Real team_key_players rows (Stage 1, written by
-    ml/training/compute_football_key_players.py), joined to the team's own API-Football
-    external_id — football teams don't have a reliable cross-provider abbreviation the way
-    NBA's do, so this joins by external_id instead of short_name (see
-    app/fixtures/models.py:Team)."""
-    from sqlalchemy import select
-
+    """Thin wrapper around the shared app/models_ml/historical_key_players.py loader — needs
+    its own async_session_factory() context since that module's function takes an already-open
+    db session (backfill_predictions.py already has one open when it calls it directly)."""
     from app.core.database import async_session_factory
-    from app.fixtures.models import Team, TeamKeyPlayer
 
-    by_team_season: dict[tuple[str, int], list[dict]] = {}
     async with async_session_factory() as db:
-        rows = (
-            await db.execute(
-                select(TeamKeyPlayer, Team.external_id).join(Team, Team.id == TeamKeyPlayer.team_id)
-            )
-        ).all()
-
-    for key_player, external_id in rows:
-        key = (external_id, key_player.season_year)
-        by_team_season.setdefault(key, []).append(
-            {
-                "player_name": key_player.player_name,
-                "combined_metric": key_player.combined_metric,
-            }
-        )
-    return by_team_season
+        return await load_team_key_players_by_team_season(db)
 
 
 def ranked_probability_score(probs: np.ndarray, actual_label: int, n_classes: int = 3) -> float:
@@ -164,7 +128,23 @@ def build_training_examples(
     team_codes: API-Football team_id -> its own 3-letter code, used only to join against
     TheRundown's teams_normalized.abbreviation for the odds sample — a best-effort
     cross-provider match (see collect_football_data.py:_fetch_team_codes), not a guaranteed
-    one; unmatched fixtures simply get moneyline_implied_prob_home=None."""
+    one; unmatched fixtures simply get moneyline_implied_prob_home=None.
+
+    games may pool multiple leagues (see LEAGUES) — elo_history is computed once here, up
+    front, over the FULL pooled game log (see app/models_ml/elo.py: this must be a single
+    chronological walk, not re-derived per row); safe to pool across leagues since team IDs
+    never collide between them (no team plays in both), so each team's Elo state only ever
+    evolves from its own league's matches."""
+    # A real, non-masked-sentinel data-quality issue found while adding this pooled retrain:
+    # a small number of rows in the collected odds sample carry an implausibly extreme decimal
+    # price (e.g. 100.0, matching an American +9900 line) — not the known masked-book 0.0001
+    # sentinel (_american_to_decimal already filters that), just a bad/stale real quote from one
+    # of the 3 unlocked affiliates. Left in, .max() picks these as "best odds" and both the ROI
+    # metric and moneyline_implied_prob_home training feature get a nonsensical near-zero
+    # implied probability. 15.0 decimal (~6.25% implied) is a generous cap — no real EPL/
+    # Brasileirão moneyline is plausibly longer than that.
+    PLAUSIBLE_MAX_DECIMAL_ODDS = 15.0
+    odds = odds[odds["home_odds"] <= PLAUSIBLE_MAX_DECIMAL_ODDS]
     best_odds = odds.groupby(["date", "home_short", "away_short"], as_index=False)[
         "home_odds"
     ].max()
@@ -172,6 +152,7 @@ def build_training_examples(
         (row.date, row.home_short, row.away_short): row.home_odds for row in best_odds.itertuples()
     }
     played_names_index = index_played_names(lineups)
+    elo_history = compute_elo_history(games)
 
     rows = []
     for (fixture_id, season), group in games.groupby(["FIXTURE_ID", "SEASON"]):
@@ -202,6 +183,10 @@ def build_training_examples(
             played_names_index, team_key_players_by_team_season, away_id, season, fixture_id
         )
 
+        elo_home = elo_history.get((fixture_id, home_id))
+        elo_away = elo_history.get((fixture_id, away_id))
+        elo_diff = (elo_home - elo_away) if elo_home is not None and elo_away is not None else None
+
         features = assemble_from_game_log(
             games,
             game_date,
@@ -212,6 +197,7 @@ def build_training_examples(
             key_players_available_away=key_avail_away,
             key_players_per_combined_home=key_per_home,
             key_players_per_combined_away=key_per_away,
+            elo_diff=elo_diff,
         )
         features["label"] = LABEL_BY_CLASS[
             "home" if home_row["WDL"] == "W" else ("draw" if home_row["WDL"] == "D" else "away")
@@ -272,19 +258,31 @@ async def main_async() -> None:
     # why two separate asyncio.run() calls in one process is unsafe on this platform.
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
 
-    games = pd.read_parquet(DATA_DIR / "football_game_log.parquet")
-    lineups = pd.read_parquet(DATA_DIR / "football_lineups.parquet")
-    team_codes = dict(
-        zip(
-            pd.read_parquet(DATA_DIR / "football_team_codes.parquet")["team_id"],
-            pd.read_parquet(DATA_DIR / "football_team_codes.parquet")["code"],
-            strict=False,
-        )
+    games = pd.concat(
+        [pd.read_parquet(DATA_DIR / f"football_game_log_{league}.parquet") for league in LEAGUES],
+        ignore_index=True,
     )
-    odds_path = DATA_DIR / "football_odds_sample.parquet"
+    lineups = pd.concat(
+        [pd.read_parquet(DATA_DIR / f"football_lineups_{league}.parquet") for league in LEAGUES],
+        ignore_index=True,
+    )
+    team_codes: dict[str, str] = {}
+    for league in LEAGUES:
+        codes_path = DATA_DIR / f"football_team_codes_{league}.parquet"
+        if codes_path.exists():
+            codes_df = pd.read_parquet(codes_path)
+            team_codes.update(dict(zip(codes_df["team_id"], codes_df["code"], strict=False)))
+
+    # Odds: EPL only (see module docstring) — a league with no *_odds_sample.parquet at all
+    # (Brasileirão) simply contributes nothing here, not an error.
+    odds_frames = []
+    for league in LEAGUES:
+        odds_path = DATA_DIR / f"football_odds_sample_{league}.parquet"
+        if odds_path.exists():
+            odds_frames.append(pd.read_parquet(odds_path))
     odds = (
-        pd.read_parquet(odds_path)
-        if odds_path.exists()
+        pd.concat(odds_frames, ignore_index=True)
+        if odds_frames
         else pd.DataFrame(columns=["date", "home_short", "away_short", "home_odds"])
     )
 

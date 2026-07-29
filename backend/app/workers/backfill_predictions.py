@@ -8,34 +8,68 @@ ingest time), which for a past game reflects form as of NOW rather than as of th
 actual kickoff — using it would leak information from every game that happened AFTER the one
 being predicted, including the game's own eventual outcome once enough time has passed.
 
-Instead this builds a real, leakage-safe "game log" from our own DB's completed fixtures
-(exactly the shape app/models_ml/football_features.py:assemble_from_game_log already expects
-and already filters strictly to GAME_DATE < as_of_date internally — the same function
-ml/training/train_football.py used to train the model) — so the historical and retrodicted
-feature-assembly code paths are the same code, not just the same idea.
+Rebuilt (see CLAUDE.md) to use ALL real available historical data for the season, not just our
+own DB's thin ~7-day fixture window: the same multi-season parquet cache
+ml/training/train_football.py trains on (ml/data/football_game_log_{league}.parquet, one real
+season set per league — currently EPL and Brasileirão, see collect_football_data.py) is loaded
+here as the base game log, with any of our own DB's completed fixtures not already present in
+that cache appended on top (keeps retrodiction fresh between historical-collection runs without
+needing to re-run the full collection). Leagues with no cached parquet yet (the other 3
+European leagues) fall back to DB-only history — thinner, but still real, same honest gap
+pattern as before this rebuild.
 
-Real, honest limitation: our own DB's fixture history only goes back as far as
-FIXTURE_HISTORY_DAYS (7 days, see ingest_fixtures.py) plus however long ingestion has been
-running since. A fixture near the start of that window has little or no prior in-DB history
-to compute rolling form from — its features come back mostly/entirely None, and the model's
-own missing-data handling (not a fabricated neutral value) determines the output. This
-naturally improves as more days of real ingestion accumulate.
+Real, honest limitation, reduced but not eliminated by the above: a brand-new league/team with
+no cached historical seasons AND little DB history yet still gets sparse/None rolling-form
+features — the model's own missing-data handling (never a fabricated neutral value) covers it.
 
-Key-player availability and moneyline-implied-probability are always None here: Stage 1/2's
-own data only reflects current-season standing, not "as of that specific past date", and no
-historical odds are ever ingested (ingest_odds.py only ever looks forward) — both are real,
-same-shaped gaps as the "no elo/xG" omissions already documented elsewhere, not fabricated.
+Key-player availability now uses REAL BOX-SCORE/LINEUP PRESENCE (who literally played), not
+Stage 2's pre-game player_injury_status — legitimate here specifically because a retrodicted
+fixture's outcome is already known and this is a one-off backtest-style prediction, never a
+forecast (explicit user go-ahead; adopted from the Big5/Big3 approach in the user's own prior
+NBA notebook). See app/models_ml/historical_key_players.py's module docstring for why this is
+a clearly separate code path from the live Stage 2 lookup, mirroring the same
+historical-label-vs-live-Stage-2 separation already established for NBA
+(ml/training/train_nba.py vs app/models_ml/key_player_availability.py). Lineup presence for a
+fixture not already in the cached parquet is fetched live, once, via
+app/adapters/api_football.py:fetch_lineup_presence — a real API call, but only ever made for a
+fixture whose outcome has already happened, same "retrodiction can afford real per-fixture
+calls that live serving can't" tradeoff as this whole rebuild.
+
+elo_diff now uses the same real, persistent Elo state serving does (app/models_ml/elo.py,
+Team.elo_rating) rather than being omitted — a completed fixture's two teams' CURRENT Elo
+overstates what they were rated at kickoff (some drift from later real matches), a small,
+accepted imprecision given Elo moves gradually and this is a one-off backtest display value,
+not a forecast being staked on.
+
+Moneyline-implied-probability stays None here: no historical odds exist for arbitrary past DB
+fixtures beyond EPL's bounded training-time sample (see collect_football_data.py), which isn't
+indexed for point lookups by fixture — a real, same-shaped gap as before this rebuild.
+
+Known follow-up, not attempted here: existing Prediction rows created by the OLD, thinner
+version of this worker (before this rebuild) are left as-is — _retrodict_league only fills
+fixtures with NO prediction at all, and there's no schema field distinguishing "a real live
+pre-game forecast" from "an old thin retrodiction" for an already-completed fixture, so
+blindly regenerating every existing row risked silently discarding genuine pre-game forecasts
+along with the ones actually worth upgrading. A real backfill of specifically the old-style
+retrodictions would need that provenance distinction added first.
 """
 
 import asyncio
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pandas as pd
 from sqlalchemy import select
 
+from app.adapters.api_football import fetch_lineup_presence
 from app.core.database import async_session_factory
 from app.fixtures.models import Fixture, FixtureLiveState, FixtureStatus, Team
+from app.models_ml.elo import compute_elo_history
 from app.models_ml.football_features import assemble_from_game_log
+from app.models_ml.historical_key_players import (
+    historical_key_player_availability,
+    load_team_key_players_by_team_season,
+)
 from app.models_ml.runner import ModelRunner
 from app.predictions.models import Prediction
 from app.predictions.service import confidence_tier_for_probability
@@ -44,18 +78,21 @@ from app.workers.celery import celery_app
 
 _model_runner = ModelRunner()
 
+DATA_DIR = Path(__file__).resolve().parents[3] / "ml" / "data"
+
 
 def _build_game_log_df(
     completed_rows: list[tuple[Fixture, FixtureLiveState, str, str]],
 ) -> pd.DataFrame:
     """Pure, DB-free — one row per team per fixture, the same TEAM_ID/OPPONENT_ID/GAME_DATE/
-    GF/GA/WDL/HOME_AWAY shape ml/training/collect_football_data.py produces, so
-    assemble_from_game_log's internal filtering/rolling logic needs no changes at all to work
-    against our own DB's fixture history instead of the training-time parquet cache."""
+    GF/GA/WDL/HOME_AWAY/FIXTURE_ID/SEASON shape ml/training/collect_football_data.py produces,
+    so assemble_from_game_log's internal filtering/rolling logic (and elo.compute_elo_history)
+    need no changes at all to work against our own DB's fixture history."""
     rows = []
     for fixture, live_state, home_ext_id, away_ext_id in completed_rows:
         game_date = fixture.kickoff_utc.date()
         home_goals, away_goals = live_state.home_score, live_state.away_score
+        fixture_ext_id = fixture.external_id
 
         def wdl(gf: int, ga: int) -> str:
             if gf > ga:
@@ -66,6 +103,8 @@ def _build_game_log_df(
 
         rows.append(
             {
+                "FIXTURE_ID": fixture_ext_id,
+                "SEASON": int(fixture.season),
                 "GAME_DATE": game_date,
                 "TEAM_ID": home_ext_id,
                 "OPPONENT_ID": away_ext_id,
@@ -77,6 +116,8 @@ def _build_game_log_df(
         )
         rows.append(
             {
+                "FIXTURE_ID": fixture_ext_id,
+                "SEASON": int(fixture.season),
                 "GAME_DATE": game_date,
                 "TEAM_ID": away_ext_id,
                 "OPPONENT_ID": home_ext_id,
@@ -87,8 +128,73 @@ def _build_game_log_df(
             }
         )
     return pd.DataFrame(
-        rows, columns=["GAME_DATE", "TEAM_ID", "OPPONENT_ID", "HOME_AWAY", "GF", "GA", "WDL"]
+        rows,
+        columns=[
+            "FIXTURE_ID",
+            "SEASON",
+            "GAME_DATE",
+            "TEAM_ID",
+            "OPPONENT_ID",
+            "HOME_AWAY",
+            "GF",
+            "GA",
+            "WDL",
+        ],
     )
+
+
+def _load_cached_history(league_slug: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Real multi-season game log + lineups from ml/training/collect_football_data.py's
+    cache, if this league has one collected yet (currently epl/brasileirao — see CLAUDE.md).
+    Returns empty frames (not an error) for a league with no cache, so callers fall back
+    gracefully to DB-only history."""
+    games_path = DATA_DIR / f"football_game_log_{league_slug}.parquet"
+    lineups_path = DATA_DIR / f"football_lineups_{league_slug}.parquet"
+
+    games = (
+        pd.read_parquet(games_path)
+        if games_path.exists()
+        else pd.DataFrame(
+            columns=[
+                "FIXTURE_ID",
+                "SEASON",
+                "GAME_DATE",
+                "TEAM_ID",
+                "OPPONENT_ID",
+                "HOME_AWAY",
+                "GF",
+                "GA",
+                "WDL",
+            ]
+        )
+    )
+    lineups = (
+        pd.read_parquet(lineups_path)
+        if lineups_path.exists()
+        else pd.DataFrame(columns=["FIXTURE_ID", "TEAM_ID", "PLAYER_NAME"])
+    )
+    return games, lineups
+
+
+async def _lineup_presence_for_fixture(
+    lineups: pd.DataFrame, fixture_external_id: str
+) -> dict[str, set[str]]:
+    """{team_external_id: {lowercased played names}} for one fixture — from the cached
+    parquet if already collected there, else one real live fetch (fixture_external_id is a
+    provider ID that's a string in our DB but an int in the cached parquet's own dtype, so
+    both are tried)."""
+    cached = lineups[
+        (lineups["FIXTURE_ID"] == fixture_external_id)
+        | (lineups["FIXTURE_ID"].astype(str) == str(fixture_external_id))
+    ]
+    if not cached.empty:
+        by_team: dict[str, set[str]] = {}
+        names_lower = cached["PLAYER_NAME"].str.lower()
+        for team_id, name in zip(cached["TEAM_ID"], names_lower, strict=False):
+            by_team.setdefault(str(team_id), set()).add(name)
+        return by_team
+
+    return await fetch_lineup_presence(fixture_external_id)
 
 
 async def _retrodict_league(sport: Sport, league: League) -> None:
@@ -121,7 +227,22 @@ async def _retrodict_league(sport: Sport, league: League) -> None:
             )
             for fixture, live_state in completed
         ]
-        game_log = _build_game_log_df([r for r in rows if r[2] is not None and r[3] is not None])
+        rows = [r for r in rows if r[2] is not None and r[3] is not None]
+
+        cached_games, cached_lineups = _load_cached_history(league.slug)
+        db_game_log = _build_game_log_df(rows)
+        # Append only DB fixtures not already in the cached parquet (by external fixture id) —
+        # avoids duplicate rows double-weighting rolling-form/Elo for a fixture collected both
+        # ways, while still picking up anything completed since the last historical collection
+        # run.
+        cached_fixture_ids = (
+            set(cached_games["FIXTURE_ID"].astype(str)) if not cached_games.empty else set()
+        )
+        new_rows = db_game_log[~db_game_log["FIXTURE_ID"].astype(str).isin(cached_fixture_ids)]
+        game_log = pd.concat([cached_games, new_rows], ignore_index=True)
+
+        team_key_players_by_team_season = await load_team_key_players_by_team_season(db)
+        elo_history = compute_elo_history(game_log) if not game_log.empty else {}
 
         existing_prediction_fixture_ids = set(
             (
@@ -140,8 +261,30 @@ async def _retrodict_league(sport: Sport, league: League) -> None:
         for fixture, _live_state, home_ext, away_ext in rows:
             if fixture.id in existing_prediction_fixture_ids:
                 continue
-            if home_ext is None or away_ext is None:
-                continue
+
+            season = int(fixture.season)
+            fixture_ext = fixture.external_id
+
+            played_by_team = await _lineup_presence_for_fixture(cached_lineups, fixture_ext)
+            # historical_key_player_availability expects a (fixture_id, team_id) -> names
+            # index, not a per-fixture dict — build a tiny one-fixture index inline rather than
+            # importing index_played_names for a shape that's already resolved.
+            played_names_index = {
+                (fixture_ext, team_id): names for team_id, names in played_by_team.items()
+            }
+
+            key_avail_home, key_per_home = historical_key_player_availability(
+                played_names_index, team_key_players_by_team_season, home_ext, season, fixture_ext
+            )
+            key_avail_away, key_per_away = historical_key_player_availability(
+                played_names_index, team_key_players_by_team_season, away_ext, season, fixture_ext
+            )
+
+            elo_home = elo_history.get((fixture_ext, home_ext))
+            elo_away = elo_history.get((fixture_ext, away_ext))
+            elo_diff = (
+                (elo_home - elo_away) if elo_home is not None and elo_away is not None else None
+            )
 
             features = assemble_from_game_log(
                 game_log,
@@ -149,10 +292,11 @@ async def _retrodict_league(sport: Sport, league: League) -> None:
                 home_ext,
                 away_ext,
                 moneyline_implied_prob_home=None,
-                key_players_available_home=None,
-                key_players_available_away=None,
-                key_players_per_combined_home=None,
-                key_players_per_combined_away=None,
+                key_players_available_home=key_avail_home,
+                key_players_available_away=key_avail_away,
+                key_players_per_combined_home=key_per_home,
+                key_players_per_combined_away=key_per_away,
+                elo_diff=elo_diff,
             )
             result = model.predict(features)
             probability = max(result.home_prob, result.away_prob, result.draw_prob or 0.0)

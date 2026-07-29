@@ -1,15 +1,22 @@
-"""One-off historical data collection for football model training (TDD §3.2/§3.5), scoped to
-EPL only for the first real trained model (see CLAUDE.md's scope decision) — the other 4
-leagues are seeded and generically supported but not yet part of training data collection.
+"""One-off historical data collection for football model training (TDD §3.2/§3.5).
+
+Originally EPL-only (see CLAUDE.md's first scope decision); now also collects Brasileirão
+real multi-season history so retrodicted predictions for completed Brasileirão fixtures can
+draw on genuine historical form/Elo/streaks instead of only our live DB's thin (7-day) recent
+window — see app/workers/backfill_predictions.py and CLAUDE.md for why this mattered enough to
+justify the extra ~1,900 API calls per league.
 
 Mirrors ml/training/collect_nba_data.py's structure: fetches real fixtures/results (this
 script's own game log, not nba_api — API-Football is football's fixtures/stats source),
 real per-fixture lineups (the "box score" for the historical key-player-availability backtest
 label — used ONLY for that label, never live, same leakage-guard separation as NBA), and a
-bounded real TheRundown odds sample.
+bounded real TheRundown odds sample (EPL only — TheRundown has zero Brazil-league coverage,
+confirmed live; Brasileirão's own real API-Football odds coverage doesn't extend to historical
+dates on this endpoint, so historical moneyline stays None for Brasileirão training examples,
+same honest "genuinely sparse" pattern already documented for NBA).
 
-Caches to local parquet under ml/data/ so re-running train_football.py doesn't re-hit either
-API.
+Caches to local parquet under ml/data/, one file set per league, so re-running train_football.py
+doesn't re-hit either API.
 
 Usage (from repo root):
     backend/.venv/Scripts/python ml/training/collect_football_data.py
@@ -17,7 +24,6 @@ Usage (from repo root):
 
 import asyncio
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -43,12 +49,18 @@ from app.core.config import get_settings  # noqa: E402
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
-TARGET_LEAGUE_SLUG = "epl"
-TARGET_LEAGUE_ID = LEAGUE_IDS[TARGET_LEAGUE_SLUG]
-RUNDOWN_EPL_SPORT_ID = 11
-
-# Same 5-season window ml/training/compute_football_key_players.py uses.
+# Same 5-season window ml/training/compute_football_key_players.py uses for EPL. Brasileirão
+# only needs its own real seasons collected here too — Stage 1 key players for it were already
+# computed separately (current season only, see compute_football_key_players.py); this is
+# about the MATCH RESULTS history (Elo/streaks/rolling-form/H2H), a different concern.
 SEASONS = [2021, 2022, 2023, 2024, 2025]
+
+# rundown_sport_id is None where TheRundown has no real coverage (Brasileirão) — historical
+# odds collection is simply skipped for that league, not faked.
+LEAGUE_CONFIGS: dict[str, dict] = {
+    "epl": {"league_id": LEAGUE_IDS["epl"], "rundown_sport_id": 11},
+    "brasileirao": {"league_id": LEAGUE_IDS["brasileirao"], "rundown_sport_id": None},
+}
 
 MAX_RETRIES = 5
 
@@ -79,7 +91,7 @@ def _football_client() -> httpx.AsyncClient:
     )
 
 
-async def _fetch_team_codes(client: httpx.AsyncClient, season: int) -> dict[str, str]:
+async def _fetch_team_codes(client: httpx.AsyncClient, league_id: int, season: int) -> dict[str, str]:
     """team external id (str) -> API-Football's own 3-letter `code` field — used as a
     best-effort join key against TheRundown's teams_normalized.abbreviation for the odds
     sample below. Not verified to match TheRundown's convention exactly for every club (the
@@ -87,7 +99,7 @@ async def _fetch_team_codes(client: httpx.AsyncClient, season: int) -> dict[str,
     BallDontLie vs TheRundown for NBA) — a best-effort match, not a guaranteed one; unmatched
     fixtures simply get no real odds/moneyline feature, same graceful-miss behavior as every
     other cross-provider join in this codebase."""
-    response = await client.get("/teams", params={"league": TARGET_LEAGUE_ID, "season": season})
+    response = await client.get("/teams", params={"league": league_id, "season": season})
     response.raise_for_status()
     return {
         str(row["team"]["id"]): row["team"]["code"]
@@ -96,8 +108,8 @@ async def _fetch_team_codes(client: httpx.AsyncClient, season: int) -> dict[str,
     }
 
 
-async def collect_game_log() -> tuple[pd.DataFrame, dict[str, str]]:
-    """One row per team per completed EPL fixture — the football analogue of
+async def collect_game_log(league_slug: str, league_id: int) -> tuple[pd.DataFrame, dict[str, str]]:
+    """One row per team per completed fixture — the football analogue of
     collect_nba_data.py's leaguegamelog pull, built from API-Football's /fixtures rather than
     nba_api (football has no equivalent free/offline bulk endpoint). Also returns a
     team_id -> code mapping (see _fetch_team_codes) for the odds-matching step below."""
@@ -105,12 +117,12 @@ async def collect_game_log() -> tuple[pd.DataFrame, dict[str, str]]:
     team_codes: dict[str, str] = {}
     async with _football_client() as client:
         for season in SEASONS:
-            team_codes.update(await _fetch_team_codes(client, season))
-            print(f"fetching EPL {season}-{season + 1} fixtures...")
+            team_codes.update(await _fetch_team_codes(client, league_id, season))
+            print(f"fetching {league_slug} {season}-{season + 1} fixtures...")
             response = await _get_with_retry(
                 client,
                 "/fixtures",
-                {"league": TARGET_LEAGUE_ID, "season": season, "status": "FT-AET-PEN"},
+                {"league": league_id, "season": season, "status": "FT-AET-PEN"},
             )
             fixtures = response.json().get("response", [])
             print(f"  {len(fixtures)} completed fixtures")
@@ -136,6 +148,7 @@ async def collect_game_log() -> tuple[pd.DataFrame, dict[str, str]]:
 
                 rows.append(
                     {
+                        "LEAGUE": league_slug,
                         "SEASON": season,
                         "FIXTURE_ID": fixture_id,
                         "GAME_DATE": game_date,
@@ -149,6 +162,7 @@ async def collect_game_log() -> tuple[pd.DataFrame, dict[str, str]]:
                 )
                 rows.append(
                     {
+                        "LEAGUE": league_slug,
                         "SEASON": season,
                         "FIXTURE_ID": fixture_id,
                         "GAME_DATE": game_date,
@@ -167,18 +181,15 @@ async def collect_game_log() -> tuple[pd.DataFrame, dict[str, str]]:
 
 async def collect_lineups(fixture_ids: list[int]) -> pd.DataFrame:
     """Per-fixture lineup/appearance data (games.minutes > 0) — the football "box score",
-    used ONLY by ml/training/train_football.py's historical key-player-availability backtest
-    label. Never used for live Stage 2 (app/models_ml/key_player_availability.py reads only
-    player_injury_status). One call per fixture — the real, unavoidable cost of this endpoint
-    (confirmed live: no bulk-by-league-and-date equivalent for lineups the way /injuries has,
-    see CLAUDE.md), which is why the EPL-only scope decision keeps this to ~1,900 calls rather
-    than ~9,500 across all 5 leagues."""
+    used by ml/training/train_football.py's historical key-player-availability backtest label
+    AND (per the user's explicit go-ahead — no leakage concern for a one-off backtest on
+    already-known outcomes) by app/workers/backfill_predictions.py's retrodiction path. One
+    call per fixture — the real, unavoidable cost of this endpoint (confirmed live: no
+    bulk-by-league-and-date equivalent for lineups the way /injuries has, see CLAUDE.md)."""
     rows = []
     async with _football_client() as client:
         for i, fixture_id in enumerate(fixture_ids):
-            response = await _get_with_retry(
-                client, "/fixtures/players", {"fixture": fixture_id}
-            )
+            response = await _get_with_retry(client, "/fixtures/players", {"fixture": fixture_id})
             for team_block in response.json().get("response", []):
                 team_id = str(team_block["team"]["id"])
                 for player_row in team_block.get("players", []):
@@ -204,10 +215,12 @@ ODDS_MAX_RETRIES = 3
 MAX_ODDS_DATES = 60
 
 
-async def _get_odds_page(client: httpx.AsyncClient, date_str: str) -> dict | None:
+async def _get_odds_page(
+    client: httpx.AsyncClient, rundown_sport_id: int, date_str: str
+) -> dict | None:
     for attempt in range(ODDS_MAX_RETRIES):
         response = await client.get(
-            f"/sports/{RUNDOWN_EPL_SPORT_ID}/events/{date_str}", params={"include": "scores"}
+            f"/sports/{rundown_sport_id}/events/{date_str}", params={"include": "scores"}
         )
         if response.status_code == 429 and attempt < ODDS_MAX_RETRIES - 1:
             retry_after = response.headers.get("Retry-After")
@@ -222,7 +235,7 @@ async def _get_odds_page(client: httpx.AsyncClient, date_str: str) -> dict | Non
     return None
 
 
-async def collect_odds_sample(game_dates: list[str]) -> pd.DataFrame:
+async def collect_odds_sample(rundown_sport_id: int, game_dates: list[str]) -> pd.DataFrame:
     api_key = get_settings().therundown_api_key
     rows = []
 
@@ -232,7 +245,7 @@ async def collect_odds_sample(game_dates: list[str]) -> pd.DataFrame:
         timeout=15.0,
     ) as client:
         for date_str in game_dates:
-            payload = await _get_odds_page(client, date_str)
+            payload = await _get_odds_page(client, rundown_sport_id, date_str)
             await asyncio.sleep(ODDS_REQUEST_DELAY_SECONDS)
             if payload is None:
                 continue
@@ -252,34 +265,40 @@ async def collect_odds_sample(game_dates: list[str]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["date", "home_short", "away_short", "home_odds"])
 
 
-def main() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+def collect_league(league_slug: str) -> None:
+    config = LEAGUE_CONFIGS[league_slug]
+    league_id = config["league_id"]
+    rundown_sport_id = config["rundown_sport_id"]
 
-    games_path = DATA_DIR / "football_game_log.parquet"
-    codes_path = DATA_DIR / "football_team_codes.parquet"
+    games_path = DATA_DIR / f"football_game_log_{league_slug}.parquet"
+    codes_path = DATA_DIR / f"football_team_codes_{league_slug}.parquet"
     if games_path.exists():
         print(f"{games_path} already exists, skipping API-Football re-fetch")
         games = pd.read_parquet(games_path)
     else:
-        games, team_codes = asyncio.run(collect_game_log())
+        games, team_codes = asyncio.run(collect_game_log(league_slug, league_id))
         games.to_parquet(games_path, index=False)
         print(f"saved {len(games)} game-log rows to {games_path}")
-        pd.DataFrame(
-            [{"team_id": k, "code": v} for k, v in team_codes.items()]
-        ).to_parquet(codes_path, index=False)
+        pd.DataFrame([{"team_id": k, "code": v} for k, v in team_codes.items()]).to_parquet(
+            codes_path, index=False
+        )
         print(f"saved {len(team_codes)} team codes to {codes_path}")
 
-    lineups_path = DATA_DIR / "football_lineups.parquet"
+    lineups_path = DATA_DIR / f"football_lineups_{league_slug}.parquet"
     if lineups_path.exists():
         print(f"{lineups_path} already exists, skipping API-Football re-fetch")
     else:
         fixture_ids = sorted(games["FIXTURE_ID"].unique().tolist())
-        print(f"collecting lineups for {len(fixture_ids)} fixtures (1 call each)...")
+        print(f"collecting lineups for {len(fixture_ids)} {league_slug} fixtures (1 call each)...")
         lineups = asyncio.run(collect_lineups(fixture_ids))
         lineups.to_parquet(lineups_path, index=False)
         print(f"saved {len(lineups)} lineup-presence rows to {lineups_path}")
 
-    odds_path = DATA_DIR / "football_odds_sample.parquet"
+    if rundown_sport_id is None:
+        print(f"{league_slug}: no TheRundown coverage — skipping historical odds collection")
+        return
+
+    odds_path = DATA_DIR / f"football_odds_sample_{league_slug}.parquet"
     if odds_path.exists():
         print(f"{odds_path} already exists, skipping TheRundown re-fetch")
     else:
@@ -287,10 +306,16 @@ def main() -> None:
         recent_dates = sorted(
             games.loc[games["SEASON"] == most_recent_season, "GAME_DATE"].astype(str).unique()
         )[-MAX_ODDS_DATES:]
-        print(f"pulling odds for {len(recent_dates)} dates from EPL {most_recent_season}...")
-        odds = asyncio.run(collect_odds_sample(recent_dates))
+        print(f"pulling odds for {len(recent_dates)} dates from {league_slug} {most_recent_season}...")
+        odds = asyncio.run(collect_odds_sample(rundown_sport_id, recent_dates))
         odds.to_parquet(odds_path, index=False)
         print(f"saved {len(odds)} usable odds rows to {odds_path}")
+
+
+def main() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    for league_slug in LEAGUE_CONFIGS:
+        collect_league(league_slug)
 
 
 if __name__ == "__main__":

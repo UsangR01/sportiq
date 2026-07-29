@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 from app.adapters.factory import AdapterFactory
 from app.core.database import async_session_factory
-from app.fixtures.models import Fixture, FixtureStatus
+from app.fixtures.models import Fixture, FixtureStatus, Team
 from app.sports.models import League, Sport
 from app.workers.celery import celery_app
 from app.workers.ingest_fixtures import _maybe_settle_outcome, _upsert_live_state
@@ -55,7 +55,14 @@ async def _ingest_live_scores_for_league(sport: Sport, league: League) -> None:
                 fixture.status = new_status
 
             await _upsert_live_state(db, fixture.id, payload)
-            await _maybe_settle_outcome(db, fixture.id, payload)
+            home_team = (
+                await db.execute(select(Team).where(Team.id == fixture.home_team_id))
+            ).scalar_one_or_none()
+            away_team = (
+                await db.execute(select(Team).where(Team.id == fixture.away_team_id))
+            ).scalar_one_or_none()
+            if home_team is not None and away_team is not None:
+                await _maybe_settle_outcome(db, fixture.id, payload, home_team, away_team)
 
         await db.commit()
 

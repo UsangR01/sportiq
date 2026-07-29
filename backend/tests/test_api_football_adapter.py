@@ -11,11 +11,13 @@ from app.adapters.api_football import (
     LEAGUE_IDS,
     _compute_team_stats,
     _current_football_season,
+    _goals_from_home_side_perspective,
     _map_fixture_to_payload,
     _map_injury_to_update,
     _map_odds_response_to_payloads,
     _map_status,
     _parse_form_points,
+    _parse_streaks,
 )
 
 
@@ -172,6 +174,10 @@ def test_compute_team_stats_from_real_shape():
     assert result.attack_str == 2.1
     assert result.defence_str == 0.8
     assert result.form_pts_5 == 2.0
+    # "WWDLW" (most-recent last) -> most recent result is a win, immediately preceded by a
+    # loss, so the current win streak is exactly 1.
+    assert result.win_streak == 1.0
+    assert result.losing_streak == 0.0
 
 
 def test_compute_team_stats_no_fixtures_played_returns_none_rates():
@@ -181,6 +187,53 @@ def test_compute_team_stats_no_fixtures_played_returns_none_rates():
     assert result.away_win_rate is None
     assert result.attack_str is None
     assert result.form_pts_5 is None
+    assert result.win_streak is None
+    assert result.losing_streak is None
+
+
+def test_parse_streaks_win_streak():
+    assert _parse_streaks("LLWWW") == (3.0, 0.0)
+
+
+def test_parse_streaks_losing_streak():
+    assert _parse_streaks("WWLLL") == (0.0, 3.0)
+
+
+def test_parse_streaks_most_recent_draw_breaks_both_streaks():
+    assert _parse_streaks("WWWWD") == (0.0, 0.0)
+
+
+def test_parse_streaks_none_or_empty():
+    assert _parse_streaks(None) == (None, None)
+    assert _parse_streaks("") == (None, None)
+
+
+def test_goals_from_home_side_perspective_when_queried_team_was_away():
+    fx = {
+        "fixture": {"status": {"short": "FT"}},
+        "teams": {"home": {"id": 50}, "away": {"id": 33}},
+        "goals": {"home": 2, "away": 1},
+    }
+    # team 33 played AWAY in this historical meeting — its own goals are fx["goals"]["away"].
+    assert _goals_from_home_side_perspective(fx, "33") == (1, 2)
+
+
+def test_goals_from_home_side_perspective_when_queried_team_was_home():
+    fx = {
+        "fixture": {"status": {"short": "FT"}},
+        "teams": {"home": {"id": 33}, "away": {"id": 50}},
+        "goals": {"home": 2, "away": 1},
+    }
+    assert _goals_from_home_side_perspective(fx, "33") == (2, 1)
+
+
+def test_goals_from_home_side_perspective_missing_goals_returns_none():
+    fx = {
+        "fixture": {"status": {"short": "FT"}},
+        "teams": {"home": {"id": 33}, "away": {"id": 50}},
+        "goals": {"home": None, "away": None},
+    }
+    assert _goals_from_home_side_perspective(fx, "33") is None
 
 
 ODDS_ROW = {

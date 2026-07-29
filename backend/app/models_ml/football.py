@@ -27,11 +27,16 @@ class FootballModel(BaseModel):
         "form_pts_home",
         "form_pts_away",
         "h2h_win_rate_home",
+        "h2h_avg_goals_scored_home",
+        "h2h_avg_goals_allowed_home",
         "key_players_available_home",
         "key_players_available_away",
         "key_players_per_combined_home",
         "key_players_per_combined_away",
         "moneyline_implied_prob_home",
+        "elo_diff",
+        "win_streak_home",
+        "win_streak_away",
     )
     # Fixed order — must match train_football.py's label encoding.
     CLASSES = ("home", "draw", "away")
