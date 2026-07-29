@@ -79,6 +79,9 @@ def test_map_game_to_fixture_payload():
     assert payload.season == "2025"
     assert payload.status == "completed"
     assert payload.kickoff_utc == datetime(2026, 1, 15, 19, 0, tzinfo=UTC)
+    assert payload.home_score == 118
+    assert payload.away_score == 111
+    assert payload.match_minute is None  # BallDontLie has no clock-minute field
 
 
 def test_map_game_to_fixture_payload_scheduled():
@@ -87,6 +90,8 @@ def test_map_game_to_fixture_payload_scheduled():
     )
     payload = _map_game_to_fixture_payload(game)
     assert payload.status == "scheduled"
+    assert payload.home_score is None
+    assert payload.away_score is None
 
 
 def test_compute_team_stats_home_and_away_split():

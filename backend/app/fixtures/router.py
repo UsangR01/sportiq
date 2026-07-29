@@ -54,6 +54,7 @@ def _to_summary(
     home_name: str,
     away_name: str,
     best_pick: BestPick | None = None,
+    live_state: LiveStateResponse | None = None,
 ) -> FixtureSummary:
     return FixtureSummary(
         id=fixture.id,
@@ -67,7 +68,28 @@ def _to_summary(
         status=fixture.status.value,
         season=fixture.season,
         best_pick=best_pick,
+        live_state=live_state,
     )
+
+
+async def _bulk_live_states(db: AsyncSession, fixture_ids: list) -> dict:
+    """Bulk-fetch FixtureLiveState for a whole page of /fixtures results — same one-query-not-
+    N pattern as _bulk_best_picks, so the Home feed can show a score inline without a
+    per-fixture round trip."""
+    if not fixture_ids:
+        return {}
+    rows = (
+        (
+            await db.execute(
+                select(FixtureLiveState).where(FixtureLiveState.fixture_id.in_(fixture_ids))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {
+        row.fixture_id: LiveStateResponse.model_validate(row, from_attributes=True) for row in rows
+    }
 
 
 async def _bulk_best_picks(db: AsyncSession, fixture_ids: list) -> dict:
@@ -159,8 +181,15 @@ async def list_fixtures(
     stmt = stmt.order_by(Fixture.kickoff_utc).limit(limit).offset(offset)
 
     rows = (await db.execute(stmt)).all()
-    best_picks = await _bulk_best_picks(db, [row[0].id for row in rows])
-    return [_to_summary(*row, best_pick=best_picks.get(row[0].id)) for row in rows]
+    fixture_ids = [row[0].id for row in rows]
+    best_picks = await _bulk_best_picks(db, fixture_ids)
+    live_states = await _bulk_live_states(db, fixture_ids)
+    return [
+        _to_summary(
+            *row, best_pick=best_picks.get(row[0].id), live_state=live_states.get(row[0].id)
+        )
+        for row in rows
+    ]
 
 
 async def _load_fixture_or_404(fixture_id: uuid.UUID, db: AsyncSession):
@@ -209,13 +238,19 @@ async def get_fixture(fixture_id: uuid.UUID, db: AsyncSession = Depends(get_db))
 
     return FixtureDetail(
         **_to_summary(
-            fixture, sport_slug, league_slug, league_name, league_country, home_name, away_name
+            fixture,
+            sport_slug,
+            league_slug,
+            league_name,
+            league_country,
+            home_name,
+            away_name,
+            live_state=(
+                LiveStateResponse.model_validate(live_state_row, from_attributes=True)
+                if live_state_row
+                else None
+            ),
         ).model_dump(),
-        live_state=(
-            LiveStateResponse.model_validate(live_state_row, from_attributes=True)
-            if live_state_row
-            else None
-        ),
         odds=[OddsLineResponse.model_validate(o, from_attributes=True) for o in odds_rows],
         prediction=(
             PredictionResponse(

@@ -40,6 +40,16 @@ class FixturePayload:
     home_team_short_name: str | None = None
     away_team_short_name: str | None = None
     status: str = "scheduled"  # "scheduled" | "live" | "completed" — matches FixtureStatus
+    # Not part of the original shape — needed to show a score inline (Home feed, fixture
+    # detail) instead of requiring a separate live-scores source. Real for both adapters that
+    # implement fetch_fixtures for real (API-Football, BallDontLie) since their /fixtures-
+    # equivalent endpoints already carry goals/scores for any in-progress or completed game;
+    # None for a fixture that hasn't started.
+    home_score: int | None = None
+    away_score: int | None = None
+    # Elapsed match minute — real for API-Football (fixture.status.elapsed), None where the
+    # provider doesn't expose it (BallDontLie's /games has no equivalent field).
+    match_minute: int | None = None
 
 
 @dataclass(frozen=True)
@@ -87,8 +97,13 @@ class DataSourceAdapter(ABC):
 
     @abstractmethod
     async def fetch_fixtures(
-        self, sport: str, league: str, days_ahead: int
-    ) -> list[FixturePayload]: ...
+        self, sport: str, league: str, days_ahead: int, days_back: int = 0
+    ) -> list[FixturePayload]:
+        """days_back is optional (default 0, the original forward-only behavior) — used by
+        ingest_fixtures.py to backfill recently-completed fixtures for browsing/score display,
+        and by ingest_live_scores.py to re-poll a narrow window around "now" for in-progress
+        games. Queries from (now - days_back) to (now + days_ahead)."""
+        ...
 
     @abstractmethod
     async def fetch_team_stats(

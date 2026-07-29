@@ -1,82 +1,82 @@
+"""Live score polling (TDD §2.3) — previously an unreachable stub because TheRundown's own
+scores endpoint doesn't map onto any DataSourceAdapter ABC method (see the module's prior
+history in git). Real now via a different route: fetch_fixtures (the stats/fixtures
+adapter — API-Football for football, BallDontLie for NBA) already returns live goals/status
+for any fixture in its queried date range, since that's the same endpoint ingest_fixtures.py
+uses for the daily backfill. Re-querying a narrow window around "now" every 5 minutes catches
+score/status changes for fixtures already in our DB, without needing a dedicated live-scores
+adapter method at all.
+"""
+
 import asyncio
-from datetime import UTC, datetime
 
 from sqlalchemy import select
 
+from app.adapters.factory import AdapterFactory
 from app.core.database import async_session_factory
 from app.fixtures.models import Fixture, FixtureStatus
-from app.history.models import MatchResult
+from app.sports.models import League, Sport
 from app.workers.celery import celery_app
+from app.workers.ingest_fixtures import _maybe_settle_outcome, _upsert_live_state
 
-LIVE_STATE_CACHE_TTL_SECONDS = 6 * 60
+# +/-1 day around "now" — wide enough to catch a fixture that kicked off late yesterday (UTC)
+# and is still in progress, or one about to start in the next few hours, without re-querying
+# a fixture's provider-side data any more often than every 5 minutes (TDD §2.3's schedule).
+LIVE_SCORES_WINDOW_DAYS = 1
 
 
-def _result_for_scores(home_score: int, away_score: int) -> MatchResult:
-    if home_score > away_score:
-        return MatchResult.HOME_WIN
-    if away_score > home_score:
-        return MatchResult.AWAY_WIN
-    return MatchResult.DRAW
+async def _ingest_live_scores_for_league(sport: Sport, league: League) -> None:
+    adapter = AdapterFactory.get_stats_adapter(sport.slug)
+
+    async with async_session_factory() as db:
+        payloads = await adapter.fetch_fixtures(
+            sport=sport.slug,
+            league=league.slug,
+            days_ahead=LIVE_SCORES_WINDOW_DAYS,
+            days_back=LIVE_SCORES_WINDOW_DAYS,
+        )
+
+        for payload in payloads:
+            # Only update fixtures we already know about — a fixture this poll discovers for
+            # the first time is ingest_fixtures.py's job (team creation, feature computation),
+            # not this one's; it'll be picked up on the next daily run.
+            fixture = (
+                await db.execute(
+                    select(Fixture).where(
+                        Fixture.sport_id == sport.id, Fixture.external_id == payload.external_id
+                    )
+                )
+            ).scalar_one_or_none()
+            if fixture is None:
+                continue
+
+            new_status = FixtureStatus(payload.status)
+            if fixture.status != new_status:
+                fixture.status = new_status
+
+            await _upsert_live_state(db, fixture.id, payload)
+            await _maybe_settle_outcome(db, fixture.id, payload)
+
+        await db.commit()
 
 
 async def _ingest_live_scores() -> None:
-    now = datetime.now(UTC)
-
     async with async_session_factory() as db:
-        candidates = (
-            (
+        sports = (await db.execute(select(Sport).where(Sport.active.is_(True)))).scalars().all()
+        leagues_by_sport = {
+            sport.id: (
                 await db.execute(
-                    select(Fixture).where(
-                        Fixture.status.in_([FixtureStatus.SCHEDULED, FixtureStatus.LIVE]),
-                        Fixture.kickoff_utc <= now,
-                    )
+                    select(League).where(League.sport_id == sport.id, League.active.is_(True))
                 )
             )
             .scalars()
             .all()
-        )
+            for sport in sports
+        }
 
-        for _fixture in candidates:
-            # TheRundown's scores endpoint (GET /v2/sports/{sport_id}/events/{date}
-            # ?include=scores, TDD §2.3) doesn't map onto any of the 4 DataSourceAdapter
-            # methods (TDD §2.2's KEY note only defines fetch_odds/fetch_fixtures/
-            # fetch_team_stats/fetch_injuries) — the adapter interface has no live-score
-            # method yet. Not implemented.
-            raise NotImplementedError(
-                "Live score fetching has no corresponding DataSourceAdapter method yet"
-            )
-
-            # Once a real fetch exists, the upsert/transition/cache logic is exactly this:
-            # live_state = await db.get(FixtureLiveState, fixture.id)
-            # if live_state is None:
-            #     live_state = FixtureLiveState(
-            #         fixture_id=fixture.id, home_score=0, away_score=0, status="live"
-            #     )
-            #     db.add(live_state)
-            # live_state.home_score = ...
-            # live_state.away_score = ...
-            # live_state.match_minute = ...
-            # live_state.period = ...
-            # live_state.status = ...
-            # live_state.last_updated_utc = now
-            # fixture.status = (
-            #     FixtureStatus.LIVE
-            #     if live_state.status != "completed"
-            #     else FixtureStatus.COMPLETED
-            # )
-            # await redis.set(
-            #     f"live:{fixture.id}", json.dumps({...}), ex=LIVE_STATE_CACHE_TTL_SECONDS
-            # )
-            # if fixture.status == FixtureStatus.COMPLETED:
-            #     db.add(Outcome(
-            #         fixture_id=fixture.id, home_score=live_state.home_score,
-            #         away_score=live_state.away_score,
-            #         result=_result_for_scores(live_state.home_score, live_state.away_score),
-            #         settled_at=now,
-            #     ))
-            #     # "model performance metrics are updated" (TDD §2.3) — deferred until
-            #     # /stats/model aggregation is implemented (app/history/router.py).
-        await db.commit()
+    for sport in sports:
+        for league in leagues_by_sport[sport.id]:
+            await _ingest_live_scores_for_league(sport, league)
 
 
 @celery_app.task(name="app.workers.ingest_live_scores.ingest_live_scores")

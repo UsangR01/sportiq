@@ -1,18 +1,80 @@
 import asyncio
+from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
-from app.adapters.base import TeamStats
+from app.adapters.base import FixturePayload, TeamStats
 from app.adapters.factory import AdapterFactory
 from app.core.database import async_session_factory
-from app.fixtures.models import Fixture, FixtureStatus, Team, TeamFeatures
+from app.fixtures.models import Fixture, FixtureLiveState, FixtureStatus, Team, TeamFeatures
 from app.fixtures.service import get_or_create_team
+from app.history.models import MatchResult, Outcome
 from app.models_ml.key_player_availability import get_key_player_availability
 from app.sports.models import League, Sport
 from app.workers.celery import celery_app
 
 FEATURE_LOOKAHEAD_DAYS = 7
 FEATURE_WINDOW_MATCHES = 10
+# How far back to backfill completed fixtures for browsing/score display — symmetric with the
+# forward lookahead above. Nothing ingested fixtures before this (only ever forward-looking),
+# so a fresh backfill of the current window is needed once, not just going forward.
+FIXTURE_HISTORY_DAYS = 7
+
+
+async def _upsert_live_state(db, fixture_id, payload: FixturePayload) -> None:
+    """Real score storage for both in-progress and completed fixtures — FixtureLiveState
+    already had the right shape (home_score/away_score/match_minute/period/status/
+    last_updated_utc) for this, just nothing ever wrote to it (TDD's live-scores ingestion was
+    a documented gap — see app/workers/ingest_live_scores.py). A completed fixture's row
+    simply stops being updated once the game ends, which is exactly the desired "final score"
+    behavior — no separate settlement step needed just to show a number inline."""
+    if payload.home_score is None and payload.away_score is None:
+        return
+
+    live_state = (
+        await db.execute(select(FixtureLiveState).where(FixtureLiveState.fixture_id == fixture_id))
+    ).scalar_one_or_none()
+    if live_state is None:
+        live_state = FixtureLiveState(fixture_id=fixture_id, home_score=0, away_score=0, status="")
+        db.add(live_state)
+
+    live_state.home_score = payload.home_score or 0
+    live_state.away_score = payload.away_score or 0
+    live_state.match_minute = payload.match_minute
+    live_state.status = payload.status
+    live_state.last_updated_utc = datetime.now(UTC)
+
+
+async def _maybe_settle_outcome(db, fixture_id, payload: FixturePayload) -> None:
+    """Writes a real settled Outcome row once a fixture completes — the outcomes table TDD's
+    own schema already defines but nothing has ever written to (GET /history's real blocker
+    per CLAUDE.md: "no settled outcomes exist"). Idempotent: both this worker's daily backfill
+    and ingest_live_scores.py's 5-minute poll can observe the same fixture completing, so this
+    only ever inserts once. Aggregating these into /history itself (real model-performance
+    rollups) is a separate, larger task — not attempted here, just unblocking the raw data."""
+    if payload.status != "completed" or payload.home_score is None or payload.away_score is None:
+        return
+    existing = (
+        await db.execute(select(Outcome).where(Outcome.fixture_id == fixture_id))
+    ).scalar_one_or_none()
+    if existing is not None:
+        return
+
+    if payload.home_score > payload.away_score:
+        result = MatchResult.HOME_WIN
+    elif payload.away_score > payload.home_score:
+        result = MatchResult.AWAY_WIN
+    else:
+        result = MatchResult.DRAW
+    db.add(
+        Outcome(
+            fixture_id=fixture_id,
+            home_score=payload.home_score,
+            away_score=payload.away_score,
+            result=result,
+            settled_at=datetime.now(UTC),
+        )
+    )
 
 
 async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
@@ -22,7 +84,10 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
 
     async with async_session_factory() as db:
         fixture_payloads = await adapter.fetch_fixtures(
-            sport=sport.slug, league=league.slug, days_ahead=FEATURE_LOOKAHEAD_DAYS
+            sport=sport.slug,
+            league=league.slug,
+            days_ahead=FEATURE_LOOKAHEAD_DAYS,
+            days_back=FIXTURE_HISTORY_DAYS,
         )
 
         for payload in fixture_payloads:
@@ -54,18 +119,18 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
             )
 
             if existing is None:
-                db.add(
-                    Fixture(
-                        sport_id=sport.id,
-                        league_id=league.id,
-                        external_id=payload.external_id,
-                        home_team_id=home_team.id,
-                        away_team_id=away_team.id,
-                        kickoff_utc=payload.kickoff_utc,
-                        status=FixtureStatus(payload.status),
-                        season=payload.season,
-                    )
+                fixture = Fixture(
+                    sport_id=sport.id,
+                    league_id=league.id,
+                    external_id=payload.external_id,
+                    home_team_id=home_team.id,
+                    away_team_id=away_team.id,
+                    kickoff_utc=payload.kickoff_utc,
+                    status=FixtureStatus(payload.status),
+                    season=payload.season,
                 )
+                db.add(fixture)
+                await db.flush()  # populate fixture.id for the live-state upsert below
             else:
                 # TODO: TDD §2.3 says "cancelled/postponed fixtures are updated", but the
                 # fixtures.status enum in §2.1 only defines scheduled|live|completed — no
@@ -73,12 +138,25 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
                 new_status = FixtureStatus(payload.status)
                 if existing.status != new_status:
                     existing.status = new_status
+                fixture = existing
+
+            await _upsert_live_state(db, fixture.id, payload)
+            await _maybe_settle_outcome(db, fixture.id, payload)
         await db.commit()
 
-        # Team feature vectors, computed at ingest time for fixtures in the next 7 days
-        # (TDD §2.3) — last 10 matches, xG, H2H via the stats adapter.
+        # Team feature vectors, computed at ingest time for not-yet-played fixtures (TDD
+        # §2.3) — last 10 matches, xG, H2H via the stats adapter. Completed fixtures (now
+        # real thanks to the backfill above) don't need pre-game features or a prediction —
+        # skipping them avoids wasted fetch_team_stats calls on games that already happened.
         upcoming = (
-            (await db.execute(select(Fixture).where(Fixture.league_id == league.id)))
+            (
+                await db.execute(
+                    select(Fixture).where(
+                        Fixture.league_id == league.id,
+                        Fixture.status != FixtureStatus.COMPLETED,
+                    )
+                )
+            )
             .scalars()
             .all()
         )
@@ -110,6 +188,18 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
                     db, team_id, int(fixture.season)
                 )
 
+                # Re-running this worker (daily, per TDD §2.3) for the same not-yet-played
+                # fixture previously inserted a brand-new TeamFeatures row every time — no
+                # dedup existed at all, so a fixture ingested repeatedly over several days
+                # before kickoff would accumulate multiple rows and _run_predictions.py's
+                # .scalar_one_or_none() lookup would eventually raise MultipleResultsFound.
+                # Delete-then-insert per (team_id, fixture_id), same idiom already used for
+                # team_key_players.
+                await db.execute(
+                    delete(TeamFeatures).where(
+                        TeamFeatures.team_id == team_id, TeamFeatures.fixture_id == fixture.id
+                    )
+                )
                 db.add(
                     TeamFeatures(
                         team_id=team_id,

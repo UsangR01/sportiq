@@ -4,6 +4,7 @@ import * as Haptics from "expo-haptics";
 import { useMemo, useRef, useState } from "react";
 import { Platform, RefreshControl, SectionList, Text, View } from "react-native";
 
+import { DayStrip, type DaySelection } from "@/components/DayStrip";
 import { FixtureCard } from "@/components/fixtures/FixtureCard";
 import { GuestBanner } from "@/components/GuestBanner";
 import { SportFilterChips } from "@/components/SportFilterChips";
@@ -15,6 +16,17 @@ import { useAuthStore } from "@/store/authStore";
 import { usePreferencesStore } from "@/store/preferencesStore";
 
 const DEFAULT_MIN_PROBABILITY = 0.55;
+// A full day across every league can easily exceed the old flat-list default of 50 — 200 is
+// the backend's own ceiling (app/fixtures/router.py's `limit` Query(..., le=200)).
+const FIXTURES_PAGE_LIMIT = 200;
+
+function dayBounds(date: Date): { from: string; to: string } {
+  const from = new Date(date);
+  from.setHours(0, 0, 0, 0);
+  const to = new Date(date);
+  to.setHours(23, 59, 59, 999);
+  return { from: from.toISOString(), to: to.toISOString() };
+}
 
 interface LeagueSection {
   title: string;
@@ -72,11 +84,30 @@ export default function HomeScreen() {
   // when this changes.
   const [minProbability, setMinProbability] = useState(DEFAULT_MIN_PROBABILITY);
   const hasStartedSliding = useRef(false);
+  // Defaults to "today" — the backend only ever backfills/looks ahead 7 days either way
+  // (see components/DayStrip.tsx), so this always starts inside real, populated data.
+  const [daySelection, setDaySelection] = useState<DaySelection>(() => ({ date: new Date() }));
 
   const sportsQuery = useQuery({ queryKey: ["sports"], queryFn: listSports });
+  const dayKey = daySelection === "live" ? "live" : daySelection.date.toDateString();
   const fixturesQuery = useQuery({
-    queryKey: ["fixtures", "home", sportFilter],
-    queryFn: () => listFixtures({ sport_slug: sportFilter ?? undefined, limit: 50 }),
+    queryKey: ["fixtures", "home", sportFilter, dayKey],
+    queryFn: () => {
+      if (daySelection === "live") {
+        return listFixtures({
+          sport_slug: sportFilter ?? undefined,
+          status: "live",
+          limit: FIXTURES_PAGE_LIMIT,
+        });
+      }
+      const { from, to } = dayBounds(daySelection.date);
+      return listFixtures({
+        sport_slug: sportFilter ?? undefined,
+        date_from: from,
+        date_to: to,
+        limit: FIXTURES_PAGE_LIMIT,
+      });
+    },
   });
 
   const sections = useMemo(() => groupByLeague(fixturesQuery.data ?? []), [fixturesQuery.data]);
@@ -126,6 +157,7 @@ export default function HomeScreen() {
         selected={sportFilter}
         onSelect={setSportFilter}
       />
+      <DayStrip selected={daySelection} onSelect={setDaySelection} />
       {isGuest && <GuestBanner />}
       <SectionList
         sections={sections}
@@ -159,7 +191,7 @@ export default function HomeScreen() {
             </Text>
           ) : (
             <Text className="mt-8 text-center text-gray-400">
-              No upcoming fixtures for this filter.
+              No fixtures for this day/filter.
             </Text>
           )
         }

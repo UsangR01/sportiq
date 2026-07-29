@@ -53,11 +53,23 @@ def _current_football_season(league: str, now: datetime | None = None) -> int:
     return now.year if now.month >= 7 else now.year - 1
 
 
+#  Confirmed live on a real matchday (see CLAUDE.md): API-Football genuinely returns "PST"
+# for a real postponed fixture, not a hypothetical edge case — 4 real Brasileirão fixtures
+# were postponed while backfilling for this feature. fixtures.status has no
+# cancelled/postponed value (a pre-existing, documented TDD §2.1/§2.3 gap — see CLAUDE.md),
+# so these map to "scheduled" as the least-misleading available bucket rather than falling
+# through to the old blanket "anything else is live" default, which would show a LIVE badge
+# with no score for a match that isn't actually happening.
+_NOT_ACTUALLY_LIVE_STATUSES = {"PST", "CANC", "ABD", "SUSP", "INT", "TBD", "AWD", "WO"}
+
+
 def _map_status(short_status: str) -> str:
     """API-Football's fixture.status.short: "NS" (not started) before kickoff, "FT"/"AET"/
-    "PEN" once finished, anything else (1H/HT/2H/ET/BT/P/SUSP/INT/LIVE) is in progress.
+    "PEN" once finished, "PST"/"CANC"/etc. are real non-live states our schema can't represent
+    precisely yet (see _NOT_ACTUALLY_LIVE_STATUSES), anything else (1H/HT/2H/ET/BT/P) is
+    genuinely in progress.
     """
-    if short_status == "NS":
+    if short_status == "NS" or short_status in _NOT_ACTUALLY_LIVE_STATUSES:
         return "scheduled"
     if short_status in ("FT", "AET", "PEN"):
         return "completed"
@@ -70,6 +82,7 @@ def _map_fixture_to_payload(fixture: dict, league_slug: str) -> FixturePayload:
     fx = fixture["fixture"]
     league = fixture["league"]
     teams = fixture["teams"]
+    goals = fixture.get("goals", {})
     return FixturePayload(
         external_id=str(fx["id"]),
         league_external_id=league_slug,
@@ -87,6 +100,9 @@ def _map_fixture_to_payload(fixture: dict, league_slug: str) -> FixturePayload:
         home_team_short_name=teams["home"].get("name"),
         away_team_short_name=teams["away"].get("name"),
         status=_map_status(fx["status"]["short"]),
+        home_score=goals.get("home"),
+        away_score=goals.get("away"),
+        match_minute=fx["status"].get("elapsed"),
     )
 
 
@@ -300,7 +316,7 @@ class APIFootballAdapter(DataSourceAdapter):
         return payloads
 
     async def fetch_fixtures(
-        self, sport: str, league: str, days_ahead: int
+        self, sport: str, league: str, days_ahead: int, days_back: int = 0
     ) -> list[FixturePayload]:
         league_id = LEAGUE_IDS.get(league)
         if league_id is None:
@@ -310,7 +326,7 @@ class APIFootballAdapter(DataSourceAdapter):
         params = {
             "league": league_id,
             "season": _current_football_season(league, now),
-            "from": now.date().isoformat(),
+            "from": (now - timedelta(days=days_back)).date().isoformat(),
             "to": (now + timedelta(days=days_ahead)).date().isoformat(),
         }
         async with self._client() as client:

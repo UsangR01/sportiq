@@ -21,6 +21,15 @@ export interface BestPick {
   odds: number | null;
 }
 
+export interface LiveStateResponse {
+  home_score: number;
+  away_score: number;
+  match_minute: number | null;
+  period: string | null;
+  status: string;
+  last_updated_utc: string;
+}
+
 export interface FixtureSummary {
   id: string;
   sport_slug: string;
@@ -33,15 +42,7 @@ export interface FixtureSummary {
   status: "scheduled" | "live" | "completed";
   season: string;
   best_pick: BestPick | null;
-}
-
-export interface LiveStateResponse {
-  home_score: number;
-  away_score: number;
-  match_minute: number | null;
-  period: string | null;
-  status: string;
-  last_updated_utc: string;
+  live_state: LiveStateResponse | null;
 }
 
 export interface OddsLineResponse {
@@ -75,7 +76,6 @@ export interface TeamFeaturesResponse {
 }
 
 export interface FixtureDetail extends FixtureSummary {
-  live_state: LiveStateResponse | null;
   odds: OddsLineResponse[];
   prediction: PredictionResponse | null;
   home_team_form: TeamFeaturesResponse | null;

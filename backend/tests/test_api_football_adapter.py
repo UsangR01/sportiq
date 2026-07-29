@@ -24,13 +24,14 @@ def make_fixture(**overrides):
         "fixture": {
             "id": 1208021,
             "date": "2026-08-22T14:00:00+00:00",
-            "status": {"long": "Not Started", "short": "NS"},
+            "status": {"long": "Not Started", "short": "NS", "elapsed": None},
         },
         "league": {"id": 39, "season": 2026},
         "teams": {
             "home": {"id": 33, "name": "Manchester United"},
             "away": {"id": 42, "name": "Arsenal"},
         },
+        "goals": {"home": None, "away": None},
     }
     fixture.update(overrides)
     return fixture
@@ -68,6 +69,15 @@ def test_map_status_live():
     assert _map_status("HT") == "live"
 
 
+def test_map_status_postponed_is_not_live():
+    # Confirmed live on a real matchday: API-Football genuinely returns "PST" for a real
+    # postponed fixture. The old blanket "anything else is live" fallback would have shown a
+    # LIVE badge with no score for a match that isn't actually happening.
+    assert _map_status("PST") == "scheduled"
+    assert _map_status("CANC") == "scheduled"
+    assert _map_status("SUSP") == "scheduled"
+
+
 def test_map_fixture_to_payload():
     payload = _map_fixture_to_payload(make_fixture(), "epl")
 
@@ -80,14 +90,36 @@ def test_map_fixture_to_payload():
     assert payload.season == "2026"
     assert payload.status == "scheduled"
     assert payload.kickoff_utc == datetime(2026, 8, 22, 14, 0, tzinfo=UTC)
+    assert payload.home_score is None
+    assert payload.away_score is None
+    assert payload.match_minute is None
 
 
 def test_map_fixture_to_payload_completed():
     fixture = make_fixture(
-        fixture={"id": 1, "date": "2026-01-15T15:00:00+00:00", "status": {"short": "FT"}}
+        fixture={"id": 1, "date": "2026-01-15T15:00:00+00:00", "status": {"short": "FT"}},
+        goals={"home": 2, "away": 1},
     )
     payload = _map_fixture_to_payload(fixture, "epl")
     assert payload.status == "completed"
+    assert payload.home_score == 2
+    assert payload.away_score == 1
+
+
+def test_map_fixture_to_payload_live_with_elapsed_minute():
+    fixture = make_fixture(
+        fixture={
+            "id": 2,
+            "date": "2026-08-22T14:00:00+00:00",
+            "status": {"short": "1H", "elapsed": 37},
+        },
+        goals={"home": 1, "away": 0},
+    )
+    payload = _map_fixture_to_payload(fixture, "epl")
+    assert payload.status == "live"
+    assert payload.home_score == 1
+    assert payload.away_score == 0
+    assert payload.match_minute == 37
 
 
 def test_current_football_season_after_july_uses_current_year():

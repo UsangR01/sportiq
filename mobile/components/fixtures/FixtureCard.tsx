@@ -14,6 +14,52 @@ const SELECTION_LABEL: Record<"home" | "draw" | "away", string> = {
 // threshold (e.g. the Live tab's plain list) can omit the prop entirely.
 const DEFAULT_MIN_PROBABILITY = 0.55;
 
+function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
+  const { live_state, status } = fixture;
+  if (!live_state) return null;
+  return (
+    <View className="items-center">
+      <Text className="text-lg font-bold text-gray-900 dark:text-gray-100">
+        {live_state.home_score} – {live_state.away_score}
+      </Text>
+      {status === "live" && live_state.match_minute != null && (
+        <Text className="text-xs text-red-500">{live_state.match_minute}&apos;</Text>
+      )}
+    </View>
+  );
+}
+
+function PredictionBadge({
+  fixture,
+  minProbability,
+}: {
+  fixture: FixtureSummary;
+  minProbability: number;
+}) {
+  const pick = fixture.best_pick;
+  if (!pick) return null;
+  const isHighlighted = pick.probability >= minProbability;
+
+  if (isHighlighted) {
+    return (
+      <View className="items-center rounded-lg bg-blue-600 px-3 py-2">
+        <Text className="text-xs font-bold text-white">{SELECTION_LABEL[pick.selection]}</Text>
+        <Text className="text-xs text-blue-100">
+          {Math.round(pick.probability * 100)}%{pick.odds ? ` · ${pick.odds.toFixed(2)}` : ""}
+        </Text>
+      </View>
+    );
+  }
+  return (
+    <View className="items-end">
+      <Text className="text-xs uppercase text-gray-400">Details</Text>
+      <Text className="text-sm text-gray-600 dark:text-gray-400">
+        {pick.odds ? pick.odds.toFixed(2) : "—"}
+      </Text>
+    </View>
+  );
+}
+
 export function FixtureCard({
   fixture,
   minProbability = DEFAULT_MIN_PROBABILITY,
@@ -26,8 +72,7 @@ export function FixtureCard({
 }) {
   const kickoff = new Date(fixture.kickoff_utc);
   const isLive = fixture.status === "live";
-  const pick = fixture.best_pick;
-  const isHighlighted = pick !== null && pick.probability >= minProbability;
+  const isCompleted = fixture.status === "completed";
 
   return (
     <Link href={`/fixture/${fixture.id}`} asChild>
@@ -36,6 +81,8 @@ export function FixtureCard({
           <View className="mb-1 flex-row items-center">
             {isLive ? (
               <LiveBadge />
+            ) : isCompleted ? (
+              <Text className="text-xs font-semibold uppercase text-gray-400">Full-time</Text>
             ) : (
               <Text className="text-xs text-gray-400">
                 {kickoff.toLocaleDateString()}{" "}
@@ -51,25 +98,11 @@ export function FixtureCard({
           </Text>
         </View>
 
-        {pick ? (
-          isHighlighted ? (
-            <View className="items-center rounded-lg bg-blue-600 px-3 py-2">
-              <Text className="text-xs font-bold text-white">
-                {SELECTION_LABEL[pick.selection]}
-              </Text>
-              <Text className="text-xs text-blue-100">
-                {Math.round(pick.probability * 100)}%{pick.odds ? ` · ${pick.odds.toFixed(2)}` : ""}
-              </Text>
-            </View>
-          ) : (
-            <View className="items-end">
-              <Text className="text-xs uppercase text-gray-400">Details</Text>
-              <Text className="text-sm text-gray-600 dark:text-gray-400">
-                {pick.odds ? pick.odds.toFixed(2) : "—"}
-              </Text>
-            </View>
-          )
-        ) : null}
+        {isLive || isCompleted ? (
+          <ScoreBadge fixture={fixture} />
+        ) : (
+          <PredictionBadge fixture={fixture} minProbability={minProbability} />
+        )}
       </Pressable>
     </Link>
   );

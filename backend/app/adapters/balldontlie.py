@@ -53,6 +53,10 @@ def _map_game_to_fixture_payload(game: dict) -> FixturePayload:
         home_team_short_name=home.get("abbreviation"),
         away_team_short_name=away.get("abbreviation"),
         status=_map_status(game.get("status", ""), game.get("period")),
+        home_score=game.get("home_team_score"),
+        away_score=game.get("visitor_team_score"),
+        # BallDontLie's "period" is a quarter number (1-4, OT beyond), not a clock minute —
+        # a different unit from match_minute, so left None rather than mismapped.
     )
 
 
@@ -175,11 +179,11 @@ class BallDontLieAdapter(DataSourceAdapter):
         raise NotImplementedError("BallDontLie does not provide odds — use TheRundownAdapter")
 
     async def fetch_fixtures(
-        self, sport: str, league: str, days_ahead: int
+        self, sport: str, league: str, days_ahead: int, days_back: int = 0
     ) -> list[FixturePayload]:
         now = datetime.now(UTC)
         params = {
-            "start_date": now.date().isoformat(),
+            "start_date": (now - timedelta(days=days_back)).date().isoformat(),
             "end_date": (now + timedelta(days=days_ahead)).date().isoformat(),
             "per_page": 100,
         }

@@ -25,7 +25,7 @@ class RotoWireAdapter(DataSourceAdapter):
         raise NotImplementedError("RotoWire does not provide odds — use TheRundownAdapter")
 
     async def fetch_fixtures(
-        self, sport: str, league: str, days_ahead: int
+        self, sport: str, league: str, days_ahead: int, days_back: int = 0
     ) -> list[FixturePayload]:
         raise NotImplementedError("RotoWire does not provide fixtures")
 

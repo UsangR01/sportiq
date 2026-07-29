@@ -28,6 +28,15 @@ class BestPick(BaseModel):
     odds: float | None = None
 
 
+class LiveStateResponse(BaseModel):
+    home_score: int
+    away_score: int
+    match_minute: int | None = None
+    period: str | None = None
+    status: str
+    last_updated_utc: datetime
+
+
 class FixtureSummary(BaseModel):
     id: uuid.UUID
     sport_slug: str
@@ -40,15 +49,11 @@ class FixtureSummary(BaseModel):
     status: str
     season: str
     best_pick: BestPick | None = None
-
-
-class LiveStateResponse(BaseModel):
-    home_score: int
-    away_score: int
-    match_minute: int | None = None
-    period: str | None = None
-    status: str
-    last_updated_utc: datetime
+    # Present for both in-progress and completed fixtures (see
+    # app/workers/ingest_fixtures.py:_upsert_live_state) — null for a fixture that hasn't
+    # started. Surfaced in the list view too, not just fixture detail, so the Home feed can
+    # show a score inline without a per-fixture call.
+    live_state: LiveStateResponse | None = None
 
 
 class OddsLineResponse(BaseModel):
@@ -70,7 +75,6 @@ class PredictionResponse(BaseModel):
 
 
 class FixtureDetail(FixtureSummary):
-    live_state: LiveStateResponse | None = None
     odds: list[OddsLineResponse] = []
     prediction: PredictionResponse | None = None
     home_team_form: TeamFeaturesResponse | None = None
