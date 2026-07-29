@@ -18,6 +18,7 @@ _STATS_ADAPTERS: dict[str, type[DataSourceAdapter]] = {
 # Sport-specific, optional injury adapters. Absent entries mean "no injury feed for this sport".
 _INJURY_ADAPTERS: dict[str, type[DataSourceAdapter]] = {
     "nba": RotoWireAdapter,
+    "football": APIFootballAdapter,
 }
 
 

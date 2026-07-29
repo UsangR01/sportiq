@@ -162,8 +162,8 @@ async def compute_and_store_season(season: str) -> None:
                         player_rank=rank,
                         player_id=player["player_id"],
                         player_name=player["player_name"],
-                        ws_48=player["ws_48"],
-                        per=player["per"],
+                        rank_metric=player["ws_48"],
+                        combined_metric=player["per"],
                         mpg=player["mpg"],
                         computed_at=now,
                     )

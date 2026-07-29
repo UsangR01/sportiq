@@ -16,7 +16,7 @@ ODDS_CACHE_TTL_SECONDS = 10 * 60
 ODDS_LOOKAHEAD_DAYS = 7
 
 
-async def _resolve_fixture(db, sport_id, payload: OddsPayload) -> Fixture | None:
+async def _resolve_fixture(db, sport_id, league_id, payload: OddsPayload) -> Fixture | None:
     """Fast path: this odds-provider event was already matched to a fixture on a previous
     run. Otherwise match by team abbreviation + kickoff time and persist the mapping — the
     odds provider (always TheRundown) and the stats/fixtures provider for a sport
@@ -42,6 +42,7 @@ async def _resolve_fixture(db, sport_id, payload: OddsPayload) -> Fixture | None
         payload.home_team_short_name,
         payload.away_team_short_name,
         payload.kickoff_utc,
+        league_id=league_id,
     )
     if fixture is not None and fixture.odds_provider_external_id is None:
         fixture.odds_provider_external_id = payload.fixture_external_id
@@ -60,7 +61,7 @@ async def _ingest_odds_for_league(sport: Sport, league: League) -> None:
         for payload in payloads:
             # Events for a game we haven't ingested fixtures for yet (or can't match) are
             # skipped rather than guessed — matches ingest_fixtures.py's dedupe philosophy.
-            fixture = await _resolve_fixture(db, sport.id, payload)
+            fixture = await _resolve_fixture(db, sport.id, league.id, payload)
             if fixture is None:
                 continue
 

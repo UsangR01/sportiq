@@ -17,12 +17,8 @@ from sqlalchemy import delete
 
 from app.core.database import async_session_factory
 from app.fixtures.models import InjurySource, InjuryStatus, PlayerInjuryStatus, Team, TeamKeyPlayer
-from app.models_ml.nba_key_players import (
-    compute_uper,
-    compute_ws48_approx,
-    get_key_player_availability,
-    select_top5,
-)
+from app.models_ml.key_player_availability import get_key_player_availability
+from app.models_ml.nba_key_players import compute_uper, compute_ws48_approx, select_top5
 from app.sports.models import League, Sport
 
 # ml/training/ isn't normally on backend's import path — inserted here (mirroring how the
@@ -146,8 +142,8 @@ async def seeded_team_and_key_players():
                     player_rank=rank,
                     player_id=f"nba-api-{rank}",
                     player_name=name,
-                    ws_48=0.15,
-                    per=per,
+                    rank_metric=0.15,
+                    combined_metric=per,
                     mpg=30.0,
                     computed_at=now,
                 )

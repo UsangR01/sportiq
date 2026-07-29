@@ -44,26 +44,31 @@ async def find_fixture_by_abbreviations_and_time(
     away_abbreviation: str | None,
     kickoff_utc: datetime,
     tolerance_hours: int = 24,
+    league_id=None,
 ) -> Fixture | None:
     """Matches an odds-provider event to one of our existing fixtures by team short_name
     (abbreviation) plus a kickoff-time window — the odds provider (always TheRundown, per
     TDD §6.2) and the stats/fixtures provider (BallDontLie for NBA, API-Football for
     football) use different ID spaces for the same real-world game; there's no shared ID to
     join on directly. Returns None (never guesses) if either abbreviation is missing or
-    nothing matches — the caller should skip that event rather than mis-attribute odds."""
+    nothing matches — the caller should skip that event rather than mis-attribute odds.
+
+    league_id is optional and was never needed for NBA (one league per sport_id), but
+    football has 5 leagues sharing one sport_id — two teams in different leagues could in
+    principle share an abbreviation, which would make the plain sport_id-scoped query below
+    ambiguous (MultipleResultsFound). Callers that know the league (ingest_odds.py, inside a
+    per-league loop) should pass it; omitting it preserves the exact prior NBA behavior."""
     if not home_abbreviation or not away_abbreviation:
         return None
 
-    home_team = (
-        await db.execute(
-            select(Team).where(Team.sport_id == sport_id, Team.short_name == home_abbreviation)
-        )
-    ).scalar_one_or_none()
-    away_team = (
-        await db.execute(
-            select(Team).where(Team.sport_id == sport_id, Team.short_name == away_abbreviation)
-        )
-    ).scalar_one_or_none()
+    home_query = select(Team).where(Team.sport_id == sport_id, Team.short_name == home_abbreviation)
+    away_query = select(Team).where(Team.sport_id == sport_id, Team.short_name == away_abbreviation)
+    if league_id is not None:
+        home_query = home_query.where(Team.league_id == league_id)
+        away_query = away_query.where(Team.league_id == league_id)
+
+    home_team = (await db.execute(home_query)).scalar_one_or_none()
+    away_team = (await db.execute(away_query)).scalar_one_or_none()
     if home_team is None or away_team is None:
         return None
 

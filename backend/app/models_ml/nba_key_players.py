@@ -1,16 +1,18 @@
-"""Big3/Top5 key player availability feature (TDD §2.1/§3.3). Two deliberately separate
-stages, computed at two separate times, per the TDD's own design:
+"""Big3/Top5 key player availability feature (TDD §2.1/§3.3), NBA's Stage 1. See
+app/models_ml/football_key_players.py for football's Stage 1 counterpart, and
+app/models_ml/key_player_availability.py for the shared, sport-agnostic Stage 2 that both
+sports use unchanged.
 
 Stage 1 (season-level, backward-looking, leakage-safe): compute_uper/compute_ws48_approx/
 select_top5 — pure functions, no network/DB, run offline by ml/training/compute_key_players.py
 once per season. Ranks players by trailing WS/48 among a 26+ MPG pool (falling back to 18-26
-MPG if fewer than 5 qualify) and writes the result to team_key_players.
+MPG if fewer than 5 qualify) and writes the result to team_key_players (rank_metric=ws_48,
+combined_metric=per — see TeamKeyPlayer's docstring for why those columns are named
+generically).
 
-Stage 2 (pre-game, forward-looking): get_key_player_availability — reads ONLY
-player_injury_status (RotoWire, or the BallDontLie fallback), joined to team_key_players by
-player name (the two tables have no shared player ID space — see CLAUDE.md). Never reads a
-box score, lineup table, or any record of who actually played: that reflects an outcome, not
-a forecast, and using it as a live pre-game input would be target leakage (TDD §3.3 PITFALL).
+Stage 2 (pre-game, forward-looking) lives in app/models_ml/key_player_availability.py, not
+here — it's identical DB-query logic regardless of sport (reads only player_injury_status,
+joined to team_key_players by player name), so it isn't duplicated per sport.
 
 The historical training-label counterpart — "did this named Top-5 player appear in this
 *already-completed* game's box score" — is intentionally NOT in this module. It lives in
@@ -21,7 +23,10 @@ WS/48 and PER here are simplified, clearly-labelled approximations, not the exac
 Basketball-Reference/Hollinger formulas — see each function's docstring.
 """
 
-from sqlalchemy import func, select
+# Re-exported for backward compatibility with existing imports
+# (app.models_ml.nba_key_players.get_key_player_availability) — the real implementation now
+# lives in key_player_availability.py since it's shared, unchanged, by football too.
+from app.models_ml.key_player_availability import get_key_player_availability  # noqa: F401
 
 MPG_HIGH_BAND = 26.0
 MPG_LOW_BAND = 18.0
@@ -83,56 +88,3 @@ def select_top5(players: list[dict]) -> list[dict]:
 
     ranked = sorted(candidates, key=lambda p: p["ws_48"], reverse=True)
     return ranked[:TOP_N]
-
-
-async def get_key_player_availability(
-    db, team_id, season_year: int
-) -> tuple[int | None, float | None]:
-    """Stage 2. Returns (key_players_available, key_players_per_combined). (None, None) only
-    when this team has no team_key_players rows at all for the season (Stage 1 never ran for
-    them) — that's genuinely unknown, unlike a per-player missing injury-status row (see
-    below). Must only ever query player_injury_status — never a box score/lineup table."""
-    from app.fixtures.models import PlayerInjuryStatus, TeamKeyPlayer
-
-    key_players = (
-        (
-            await db.execute(
-                select(TeamKeyPlayer).where(
-                    TeamKeyPlayer.team_id == team_id, TeamKeyPlayer.season_year == season_year
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    if not key_players:
-        return None, None
-
-    available_count = 0
-    per_combined = 0.0
-    for key_player in key_players:
-        status_row = (
-            (
-                await db.execute(
-                    select(PlayerInjuryStatus)
-                    .where(
-                        PlayerInjuryStatus.team_id == team_id,
-                        func.lower(PlayerInjuryStatus.player_name)
-                        == key_player.player_name.lower(),
-                    )
-                    .order_by(PlayerInjuryStatus.updated_at.desc())
-                )
-            )
-            .scalars()
-            .first()
-        )
-
-        # No record at all is treated as available: "not on any injury report" is itself
-        # informative in real sports-data convention — a deliberate interpretation, since the
-        # TDD only describes the case where a status row exists (see CLAUDE.md).
-        is_available = status_row is None or status_row.status.value in ("ACTIVE", "PROBABLE")
-        if is_available:
-            available_count += 1
-            per_combined += key_player.per
-
-    return available_count, per_combined

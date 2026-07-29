@@ -7,7 +7,7 @@ from app.adapters.factory import AdapterFactory
 from app.core.database import async_session_factory
 from app.fixtures.models import Fixture, FixtureStatus, Team, TeamFeatures
 from app.fixtures.service import get_or_create_team
-from app.models_ml.nba_key_players import get_key_player_availability
+from app.models_ml.key_player_availability import get_key_player_availability
 from app.sports.models import League, Sport
 from app.workers.celery import celery_app
 
@@ -98,19 +98,17 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
                     continue
                 if team.external_id not in team_stats_cache:
                     team_stats_cache[team.external_id] = await adapter.fetch_team_stats(
-                        team.external_id, n_matches=FEATURE_WINDOW_MATCHES
+                        team.external_id, n_matches=FEATURE_WINDOW_MATCHES, league=league.slug
                     )
                 stats = team_stats_cache[team.external_id]
 
-                # Stage 2 of TDD §3.3's key-player availability feature — NBA-only, since
-                # team_key_players (Stage 1) is only ever populated for NBA today. Reads
-                # exclusively from player_injury_status; never a box score (see
-                # app/models_ml/nba_key_players.py for why that distinction matters).
-                key_players_available, key_players_per_combined = None, None
-                if sport.slug == "nba":
-                    key_players_available, key_players_per_combined = (
-                        await get_key_player_availability(db, team_id, int(fixture.season))
-                    )
+                # Stage 2 of TDD §3.3's key-player availability feature — sport-agnostic (see
+                # app/models_ml/key_player_availability.py). Reads exclusively from
+                # player_injury_status, never a box score; returns (None, None) on its own for
+                # any team/season Stage 1 never ran for, so no per-sport gate is needed here.
+                key_players_available, key_players_per_combined = await get_key_player_availability(
+                    db, team_id, int(fixture.season)
+                )
 
                 db.add(
                     TeamFeatures(

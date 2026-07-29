@@ -29,7 +29,9 @@ class RotoWireAdapter(DataSourceAdapter):
     ) -> list[FixturePayload]:
         raise NotImplementedError("RotoWire does not provide fixtures")
 
-    async def fetch_team_stats(self, team_id: str, n_matches: int) -> TeamStats:
+    async def fetch_team_stats(
+        self, team_id: str, n_matches: int, league: str | None = None
+    ) -> TeamStats:
         raise NotImplementedError("RotoWire does not provide team stats")
 
     async def fetch_injuries(self, sport: str) -> list[InjuryUpdate]:

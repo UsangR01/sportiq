@@ -120,7 +120,7 @@ async def _load_team_key_players() -> dict[tuple[str, int], list[dict]]:
     for key_player, abbreviation in rows:
         key = (abbreviation, key_player.season_year)
         by_team_season.setdefault(key, []).append(
-            {"player_name": key_player.player_name, "per": key_player.per}
+            {"player_name": key_player.player_name, "per": key_player.combined_metric}
         )
     return by_team_season
 

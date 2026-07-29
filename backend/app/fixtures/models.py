@@ -25,6 +25,7 @@ class InjuryStatus(str, enum.Enum):
 class InjurySource(str, enum.Enum):
     ROTOWIRE = "rotowire"
     BALLDONTLIE = "balldontlie"
+    API_FOOTBALL = "api_football"
 
 
 class Team(Base):
@@ -119,10 +120,14 @@ class TeamFeatures(Base):
 
 class TeamKeyPlayer(Base):
     """Season-level Top 5 key players per team (Big3/Big5 source) — TDD §2.1/§3.3. Stage 1
-    of the key-player availability feature: computed once per season from trailing WS/48
-    (backward-looking, leakage-safe), completely independent of any single game's box score
-    or who was actually available for a given game — that's Stage 2 (player_injury_status),
-    computed separately. See app/models_ml/nba_key_players.py."""
+    of the key-player availability feature: computed once per season from a trailing,
+    sport-specific ranking metric (backward-looking, leakage-safe), completely independent of
+    any single game's box score or who was actually available for a given game — that's
+    Stage 2 (player_injury_status), computed separately. See app/models_ml/nba_key_players.py
+    (NBA: WS/48-approximation ranking, PER-approximation combined metric) and
+    app/models_ml/football_key_players.py (football: API-Football's own per-match `rating`
+    stat used as both — see that module for why a single real provider metric suffices there
+    where NBA had to hand-derive two separate approximations)."""
 
     __tablename__ = "team_key_players"
 
@@ -132,12 +137,16 @@ class TeamKeyPlayer(Base):
     )
     season_year: Mapped[int] = mapped_column(Integer, nullable=False)
     player_rank: Mapped[int] = mapped_column(Integer, nullable=False)  # 1-5
-    # nba_api's own player ID — a different ID space from player_injury_status.player_id
-    # (RotoWire/BallDontLie). Stage 2 joins by player_name, not this column — see TDD §3.3.
+    # The stats provider's own player ID (nba_api for NBA, API-Football for football) — a
+    # different ID space from player_injury_status.player_id (RotoWire/BallDontLie/
+    # API-Football injuries). Stage 2 joins by player_name, not this column — see TDD §3.3.
     player_id: Mapped[str] = mapped_column(String(100), nullable=False)
     player_name: Mapped[str] = mapped_column(String(150), nullable=False)
-    ws_48: Mapped[float] = mapped_column(Float, nullable=False)
-    per: Mapped[float] = mapped_column(Float, nullable=False)
+    # Renamed from ws_48/per (NBA-only names) to genuinely sport-agnostic names — NBA keeps
+    # writing its WS/48 approximation into rank_metric and PER approximation into
+    # combined_metric; football writes the same real `games.rating` value into both.
+    rank_metric: Mapped[float] = mapped_column(Float, nullable=False)
+    combined_metric: Mapped[float] = mapped_column(Float, nullable=False)
     mpg: Mapped[float] = mapped_column(Float, nullable=False)
     computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

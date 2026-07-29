@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, or_, select
 
+from app.adapters.api_football import APIFootballAdapter
 from app.adapters.balldontlie import BallDontLieAdapter
 from app.adapters.rotowire import RotoWireAdapter
 from app.core.config import get_settings
@@ -16,7 +17,7 @@ from app.fixtures.models import (
     TeamFeatures,
     TeamKeyPlayer,
 )
-from app.models_ml.nba_key_players import get_key_player_availability
+from app.models_ml.key_player_availability import get_key_player_availability
 from app.sports.models import Sport
 from app.workers.celery import celery_app
 
@@ -177,19 +178,56 @@ async def _ingest_injuries_balldontlie(db, sport: Sport) -> None:
     await db.commit()
 
 
+async def _ingest_injuries_api_football(db, sport: Sport) -> None:
+    """API-Football path (real, live-verified — see CLAUDE.md): fixture-scoped injury data,
+    bulk-queried by league+date inside the adapter for every one of the 5 football leagues.
+    Unlike RotoWire, there's no separate "is it game day" gate here — API-Football's
+    /injuries endpoint naturally returns nothing for dates with no real news yet (confirmed
+    live: empty for a genuinely future fixture), so an extra gate would just be redundant."""
+    adapter = APIFootballAdapter()
+    updates = await adapter.fetch_injuries(sport=sport.slug)
+
+    now = datetime.now(UTC)
+    for update in updates:
+        team = await _resolve_team(db, sport.id, update.team_external_id)
+        if team is None:
+            continue
+
+        db.add(
+            PlayerInjuryStatus(
+                sport_id=sport.id,
+                player_id=update.player_external_id,
+                team_id=team.id,
+                player_name=update.player_name,
+                status=update.status,
+                return_date=update.return_date,
+                salary_rank=update.salary_rank,
+                source=update.source,
+                updated_at=now,
+            )
+        )
+        await db.commit()
+
+        if update.status == "OUT":
+            await _maybe_trigger_reinference(db, sport, team.id, update.player_name)
+
+
 async def _ingest_injuries() -> None:
     settings = get_settings()
 
     async with async_session_factory() as db:
-        nba = (await db.execute(select(Sport).where(Sport.slug == "nba"))).scalar_one_or_none()
-        if nba is None:
-            return
+        sports = (await db.execute(select(Sport).where(Sport.active.is_(True)))).scalars().all()
 
-        if not settings.rotowire_api_key:
-            logger.warning("ROTOWIRE_API_KEY not set — using BallDontLie fallback")
-            await _ingest_injuries_balldontlie(db, nba)
-        else:
-            await _ingest_injuries_rotowire(db, nba)
+    for sport in sports:
+        async with async_session_factory() as db:
+            if sport.slug == "nba":
+                if not settings.rotowire_api_key:
+                    logger.warning("ROTOWIRE_API_KEY not set — using BallDontLie fallback")
+                    await _ingest_injuries_balldontlie(db, sport)
+                else:
+                    await _ingest_injuries_rotowire(db, sport)
+            elif sport.slug == "football":
+                await _ingest_injuries_api_football(db, sport)
 
 
 @celery_app.task(name="app.workers.ingest_injuries.ingest_injuries")

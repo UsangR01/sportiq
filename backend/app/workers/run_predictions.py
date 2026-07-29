@@ -20,11 +20,13 @@ async def _assemble_features(
     db, sport_slug: str, fixture: Fixture, home_features, away_features
 ) -> dict:
     """Dispatches to the sport-specific feature-assembly function, mirroring how
-    AdapterFactory/ModelRunner resolve sport-specific implementations by slug. Only NBA has
-    one so far (app/models_ml/nba_features.py) — football has no equivalent yet since
-    FootballModel itself is still unimplemented."""
+    AdapterFactory/ModelRunner resolve sport-specific implementations by slug."""
     if sport_slug == "nba":
         from app.models_ml.nba_features import assemble_from_live_db
+
+        return await assemble_from_live_db(db, fixture, home_features, away_features)
+    if sport_slug == "football":
+        from app.models_ml.football_features import assemble_from_live_db
 
         return await assemble_from_live_db(db, fixture, home_features, away_features)
     raise NotImplementedError(f"No feature-assembly function for sport={sport_slug!r} yet")

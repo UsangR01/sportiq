@@ -91,7 +91,14 @@ class DataSourceAdapter(ABC):
     ) -> list[FixturePayload]: ...
 
     @abstractmethod
-    async def fetch_team_stats(self, team_id: str, n_matches: int) -> TeamStats: ...
+    async def fetch_team_stats(
+        self, team_id: str, n_matches: int, league: str | None = None
+    ) -> TeamStats:
+        """league is optional and ignored by adapters that don't need it (e.g. BallDontLie
+        derives NBA's single league/season internally). API-Football needs it: a team's
+        league can't be inferred from team_id alone, and /teams/statistics requires both
+        league and season — see app/adapters/api_football.py."""
+        ...
 
     @abstractmethod
     async def fetch_injuries(self, sport: str) -> list[InjuryUpdate]: ...

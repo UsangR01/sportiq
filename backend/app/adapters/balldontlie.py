@@ -187,7 +187,11 @@ class BallDontLieAdapter(DataSourceAdapter):
             games = await _fetch_all_games(client, params)
         return [_map_game_to_fixture_payload(g) for g in games]
 
-    async def fetch_team_stats(self, team_id: str, n_matches: int) -> TeamStats:
+    async def fetch_team_stats(
+        self, team_id: str, n_matches: int, league: str | None = None
+    ) -> TeamStats:
+        # league is ignored — NBA has exactly one league, and _current_nba_season() already
+        # derives the season internally from the current date (see its own docstring).
         params = {"team_ids[]": team_id, "seasons[]": _current_nba_season(), "per_page": 100}
         async with self._client() as client:
             games = await _fetch_all_games(client, params)
