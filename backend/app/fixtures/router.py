@@ -9,6 +9,7 @@ from sqlalchemy.orm import aliased
 from app.core.database import get_db
 from app.fixtures.models import Fixture, FixtureLiveState, FixtureStatus, Team, TeamFeatures
 from app.fixtures.schemas import (
+    BestPick,
     FixtureDetail,
     FixtureSummary,
     LiveStateResponse,
@@ -17,6 +18,7 @@ from app.fixtures.schemas import (
     TeamFeaturesResponse,
 )
 from app.odds.models import Odds
+from app.picks.service import best_available_odds, best_outcome
 from app.predictions.models import Prediction
 from app.sports.models import League, Sport
 
@@ -27,7 +29,15 @@ def _fixture_query():
     home_team = aliased(Team)
     away_team = aliased(Team)
     return (
-        select(Fixture, Sport.slug, League.slug, home_team.name, away_team.name)
+        select(
+            Fixture,
+            Sport.slug,
+            League.slug,
+            League.name,
+            League.country,
+            home_team.name,
+            away_team.name,
+        )
         .join(Sport, Sport.id == Fixture.sport_id)
         .join(League, League.id == Fixture.league_id)
         .join(home_team, home_team.id == Fixture.home_team_id)
@@ -36,18 +46,92 @@ def _fixture_query():
 
 
 def _to_summary(
-    fixture: Fixture, sport_slug: str, league_slug: str, home_name: str, away_name: str
+    fixture: Fixture,
+    sport_slug: str,
+    league_slug: str,
+    league_name: str,
+    league_country: str | None,
+    home_name: str,
+    away_name: str,
+    best_pick: BestPick | None = None,
 ) -> FixtureSummary:
     return FixtureSummary(
         id=fixture.id,
         sport_slug=sport_slug,
         league_slug=league_slug,
+        league_name=league_name,
+        league_country=league_country,
         home_team=home_name,
         away_team=away_name,
         kickoff_utc=fixture.kickoff_utc,
         status=fixture.status.value,
         season=fixture.season,
+        best_pick=best_pick,
     )
+
+
+async def _bulk_best_picks(db: AsyncSession, fixture_ids: list) -> dict:
+    """Same selection/probability/odds math app/picks/service.py uses for /picks, computed in
+    bulk for a whole page of /fixtures results — one query each for odds and predictions
+    rather than a per-fixture round trip, mirroring app/picks/router.py's own bulk-fetch
+    pattern. Unlike /picks, this never filters fixtures out by odds threshold — every
+    fixture that has a real prediction gets a best_pick entry, odds or not (the mobile client
+    decides how prominently to surface it, e.g. by a probability threshold)."""
+    if not fixture_ids:
+        return {}
+
+    odds_rows = (
+        (await db.execute(select(Odds).where(Odds.fixture_id.in_(fixture_ids)))).scalars().all()
+    )
+    odds_by_fixture: dict = {}
+    for o in odds_rows:
+        odds_by_fixture.setdefault(o.fixture_id, []).append(
+            {"home_odds": o.home_odds, "draw_odds": o.draw_odds, "away_odds": o.away_odds}
+        )
+
+    prediction_rows = (
+        (await db.execute(select(Prediction).where(Prediction.fixture_id.in_(fixture_ids))))
+        .scalars()
+        .all()
+    )
+    latest_prediction_by_fixture: dict = {}
+    for p in prediction_rows:
+        existing = latest_prediction_by_fixture.get(p.fixture_id)
+        if existing is None or p.created_at > existing.created_at:
+            latest_prediction_by_fixture[p.fixture_id] = p
+
+    picks: dict = {}
+    for fixture_id, prediction in latest_prediction_by_fixture.items():
+        best_odds = best_available_odds(odds_by_fixture.get(fixture_id, []))
+        outcome = best_outcome(
+            prediction.home_prob,
+            prediction.draw_prob,
+            prediction.away_prob,
+            best_odds["home"],
+            best_odds["draw"],
+            best_odds["away"],
+        )
+        # best_outcome requires odds to pick a candidate (it's built for /picks' EV math,
+        # which needs both) — here we still want a badge when only a probability exists, so
+        # fall back to whichever probability is highest when no odds have landed yet.
+        if outcome is not None:
+            picks[fixture_id] = BestPick(
+                selection=outcome.selection, probability=outcome.probability, odds=outcome.odds
+            )
+        else:
+            candidates = [
+                ("home", prediction.home_prob, best_odds["home"]),
+                ("draw", prediction.draw_prob, best_odds["draw"]),
+                ("away", prediction.away_prob, best_odds["away"]),
+            ]
+            candidates = [c for c in candidates if c[1] is not None]
+            if candidates:
+                selection, probability, odds = max(candidates, key=lambda c: c[1])
+                picks[fixture_id] = BestPick(
+                    selection=selection, probability=probability, odds=odds
+                )
+
+    return picks
 
 
 @router.get("/fixtures", response_model=list[FixtureSummary])
@@ -75,7 +159,8 @@ async def list_fixtures(
     stmt = stmt.order_by(Fixture.kickoff_utc).limit(limit).offset(offset)
 
     rows = (await db.execute(stmt)).all()
-    return [_to_summary(*row) for row in rows]
+    best_picks = await _bulk_best_picks(db, [row[0].id for row in rows])
+    return [_to_summary(*row, best_pick=best_picks.get(row[0].id)) for row in rows]
 
 
 async def _load_fixture_or_404(fixture_id: uuid.UUID, db: AsyncSession):
@@ -88,8 +173,8 @@ async def _load_fixture_or_404(fixture_id: uuid.UUID, db: AsyncSession):
 
 @router.get("/fixtures/{fixture_id}", response_model=FixtureDetail)
 async def get_fixture(fixture_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    fixture, sport_slug, league_slug, home_name, away_name = await _load_fixture_or_404(
-        fixture_id, db
+    fixture, sport_slug, league_slug, league_name, league_country, home_name, away_name = (
+        await _load_fixture_or_404(fixture_id, db)
     )
 
     live_state_row = (
@@ -123,7 +208,9 @@ async def get_fixture(fixture_id: uuid.UUID, db: AsyncSession = Depends(get_db))
     ).scalar_one_or_none()
 
     return FixtureDetail(
-        **_to_summary(fixture, sport_slug, league_slug, home_name, away_name).model_dump(),
+        **_to_summary(
+            fixture, sport_slug, league_slug, league_name, league_country, home_name, away_name
+        ).model_dump(),
         live_state=(
             LiveStateResponse.model_validate(live_state_row, from_attributes=True)
             if live_state_row

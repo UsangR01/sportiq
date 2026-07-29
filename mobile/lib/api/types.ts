@@ -15,15 +15,24 @@ export interface SportResponse {
   league_count: number;
 }
 
+export interface BestPick {
+  selection: "home" | "draw" | "away";
+  probability: number;
+  odds: number | null;
+}
+
 export interface FixtureSummary {
   id: string;
   sport_slug: string;
   league_slug: string;
+  league_name: string;
+  league_country: string | null;
   home_team: string;
   away_team: string;
   kickoff_utc: string;
   status: "scheduled" | "live" | "completed";
   season: string;
+  best_pick: BestPick | null;
 }
 
 export interface LiveStateResponse {
