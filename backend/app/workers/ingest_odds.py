@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 from sqlalchemy import select
 
@@ -11,6 +12,8 @@ from app.fixtures.service import find_fixture_by_abbreviations_and_time
 from app.odds.models import Odds
 from app.sports.models import League, Sport
 from app.workers.celery import celery_app
+
+logger = logging.getLogger(__name__)
 
 ODDS_CACHE_TTL_SECONDS = 10 * 60
 ODDS_LOOKAHEAD_DAYS = 7
@@ -100,7 +103,13 @@ async def _ingest_odds() -> None:
 
     for sport in sports:
         for league in leagues_by_sport[sport.id]:
-            await _ingest_odds_for_league(sport, league)
+            try:
+                await _ingest_odds_for_league(sport, league)
+            except ValueError:
+                # A league TheRundown has no sport_id mapping for (e.g. Brasileirão —
+                # confirmed live it has no Brazil-league coverage at all, see CLAUDE.md)
+                # shouldn't block odds ingestion for every other league in this run.
+                logger.warning("No TheRundown odds coverage for league=%s — skipping", league.slug)
 
 
 @celery_app.task(name="app.workers.ingest_odds.ingest_odds")

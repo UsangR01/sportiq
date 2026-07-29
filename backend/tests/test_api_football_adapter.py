@@ -34,11 +34,21 @@ def make_fixture(**overrides):
     return fixture
 
 
-def test_league_ids_match_therundown_slugs():
-    # Must match app/adapters/therundown.py's _RUNDOWN_SPORT_IDS keys exactly or odds
-    # ingestion silently resolves to nothing for a league.
-    assert set(LEAGUE_IDS.keys()) == {"epl", "ligue1", "bundesliga", "laliga", "seriea"}
+def test_league_ids_match_therundown_slugs_where_covered():
+    # The 5 European leagues must match app/adapters/therundown.py's _RUNDOWN_SPORT_IDS keys
+    # exactly or odds ingestion silently resolves to nothing for a league. "brasileirao" is a
+    # deliberate exception — TheRundown has no Brazil-league coverage at all (confirmed live,
+    # see CLAUDE.md) — so it's excluded from this particular cross-check.
+    assert set(LEAGUE_IDS.keys()) == {
+        "epl",
+        "ligue1",
+        "bundesliga",
+        "laliga",
+        "seriea",
+        "brasileirao",
+    }
     assert LEAGUE_IDS["epl"] == 39
+    assert LEAGUE_IDS["brasileirao"] == 71
 
 
 def test_map_status_not_started():
@@ -79,11 +89,18 @@ def test_map_fixture_to_payload_completed():
 
 
 def test_current_football_season_after_july_uses_current_year():
-    assert _current_football_season(datetime(2026, 8, 1, tzinfo=UTC)) == 2026
+    assert _current_football_season("epl", datetime(2026, 8, 1, tzinfo=UTC)) == 2026
 
 
 def test_current_football_season_before_july_uses_previous_year():
-    assert _current_football_season(datetime(2026, 3, 1, tzinfo=UTC)) == 2025
+    assert _current_football_season("epl", datetime(2026, 3, 1, tzinfo=UTC)) == 2025
+
+
+def test_current_football_season_brasileirao_is_calendar_year():
+    # Brasileirão runs Jan-Dec of a single calendar year, unlike the European Aug-May
+    # convention — confirmed live: the 2026 season runs 2026-01-28 to 2026-12-02.
+    assert _current_football_season("brasileirao", datetime(2026, 3, 1, tzinfo=UTC)) == 2026
+    assert _current_football_season("brasileirao", datetime(2026, 11, 1, tzinfo=UTC)) == 2026
 
 
 def test_parse_form_points():

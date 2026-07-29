@@ -48,13 +48,16 @@ async def seed_nba() -> None:
 
 # slug/name/country must match both app/adapters/therundown.py's _RUNDOWN_SPORT_IDS keys and
 # app/adapters/api_football.py's LEAGUE_IDS keys exactly, or odds/fixture ingestion silently
-# resolve to nothing for that league.
+# resolve to nothing for that league. Brasileirão has no TheRundown odds coverage (confirmed
+# live — see CLAUDE.md) but that's a graceful no-op (ingest_odds.py), not a reason to exclude
+# it from fixture/stats/prediction ingestion, which don't depend on TheRundown at all.
 FOOTBALL_LEAGUES = [
     ("epl", "Premier League", "England"),
     ("ligue1", "Ligue 1", "France"),
     ("bundesliga", "Bundesliga", "Germany"),
     ("laliga", "La Liga", "Spain"),
     ("seriea", "Serie A", "Italy"),
+    ("brasileirao", "Série A", "Brazil"),
 ]
 
 

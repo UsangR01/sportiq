@@ -16,31 +16,47 @@ from app.core.config import get_settings
 # under x-apisports-key, no Bearer/host header needed on this host.
 BASE_URL = "https://v3.football.api-sports.io"
 
-# Real league IDs, confirmed live via GET /leagues?name=X&country=Y — must match
-# app/adapters/therundown.py's _RUNDOWN_SPORT_IDS keys exactly so odds ingestion resolves to
-# the same League.slug rows.
+# Real league IDs, confirmed live via GET /leagues?name=X&country=Y — the 5 European leagues
+# must match app/adapters/therundown.py's _RUNDOWN_SPORT_IDS keys exactly so odds ingestion
+# resolves to the same League.slug rows. "brasileirao" is a deliberate exception: confirmed
+# live (see CLAUDE.md) that TheRundown's own /sports list has no Brazil-league entry at all —
+# odds ingestion for this one league gracefully no-ops (see ingest_odds.py) rather than
+# raising, since fixtures/stats/injuries/predictions don't depend on odds coverage existing.
 LEAGUE_IDS: dict[str, int] = {
     "epl": 39,
     "ligue1": 61,
     "bundesliga": 78,
     "laliga": 140,
     "seriea": 135,
+    "brasileirao": 71,  # Brazil Serie A ("Brasileirão Betano") — confirmed live: id 71
 }
+
+# Leagues whose season runs on the calendar year (Jan-Dec) rather than the European Aug-May
+# convention — confirmed live for Brasileirão: current season "2026" runs 2026-01-28 to
+# 2026-12-02. Using the European convention here would compute the WRONG season year for
+# most of the year (e.g. any month before July would look back a full year too far).
+CALENDAR_YEAR_SEASON_LEAGUES = {"brasileirao"}
 
 INJURY_LOOKAHEAD_DAYS = 3  # how far ahead fetch_injuries looks for fixtures to check dates for
 
 
-def _current_football_season(now: datetime | None = None) -> int:
-    """API-Football labels a season by the year it starts (e.g. 2025 for "2025-26", which
-    runs roughly Aug 2025 - May 2026) — same start-year convention as BallDontLie's NBA
-    seasons, just on a European Aug-May calendar instead of Oct-Jun."""
+def _current_football_season(league: str, now: datetime | None = None) -> int:
+    """API-Football labels a season by the year it starts. For the 5 European leagues that's
+    Aug-May (e.g. 2025 for "2025-26") — same start-year convention as BallDontLie's NBA
+    seasons, just on a different calendar. Brasileirão instead runs Jan-Dec of a single
+    calendar year (see CALENDAR_YEAR_SEASON_LEAGUES) — a real distinction found live while
+    adding this league, not something either convention can be assumed from the other.
+    """
     now = now or datetime.now(UTC)
+    if league in CALENDAR_YEAR_SEASON_LEAGUES:
+        return now.year
     return now.year if now.month >= 7 else now.year - 1
 
 
 def _map_status(short_status: str) -> str:
     """API-Football's fixture.status.short: "NS" (not started) before kickoff, "FT"/"AET"/
-    "PEN" once finished, anything else (1H/HT/2H/ET/BT/P/SUSP/INT/LIVE) is in progress."""
+    "PEN" once finished, anything else (1H/HT/2H/ET/BT/P/SUSP/INT/LIVE) is in progress.
+    """
     if short_status == "NS":
         return "scheduled"
     if short_status in ("FT", "AET", "PEN"):
@@ -157,7 +173,8 @@ class APIFootballAdapter(DataSourceAdapter):
     """Football fixtures, team stats, injuries (TDD §2.2) — real Pro-tier implementation
     (confirmed live: 7500 req/day, active until 2026-08-29, see CLAUDE.md). fetch_odds stays
     unimplemented by design: odds is always TheRundown regardless of sport (TDD §6.2), and
-    API-Football's own /teams/statistics response confirms odds:false at every tier tested."""
+    API-Football's own /teams/statistics response confirms odds:false at every tier tested.
+    """
 
     def __init__(self) -> None:
         self._api_key = get_settings().api_football_key
@@ -180,7 +197,7 @@ class APIFootballAdapter(DataSourceAdapter):
         now = datetime.now(UTC)
         params = {
             "league": league_id,
-            "season": _current_football_season(now),
+            "season": _current_football_season(league, now),
             "from": now.date().isoformat(),
             "to": (now + timedelta(days=days_ahead)).date().isoformat(),
         }
@@ -201,7 +218,7 @@ class APIFootballAdapter(DataSourceAdapter):
 
         params = {
             "league": league_id,
-            "season": _current_football_season(),
+            "season": _current_football_season(league),
             "team": team_id,
         }
         async with self._client() as client:
@@ -214,15 +231,16 @@ class APIFootballAdapter(DataSourceAdapter):
         """Bulk per-league-per-date query (confirmed live: /injuries?league=X&season=Y&date=Z
         works without needing fixture IDs upfront) — matches the ABC's existing bulk-fetch
         shape rather than iterating fixture IDs one at a time. Looks at every date with a real
-        upcoming fixture across all 5 leagues in the next INJURY_LOOKAHEAD_DAYS days; genuinely
+        upcoming fixture across every league in LEAGUE_IDS in the next INJURY_LOOKAHEAD_DAYS
+        days (season computed per-league — see _current_football_season); genuinely
         returns nothing for dates too far out (confirmed live: real injury news doesn't exist
         that early — see CLAUDE.md), which is correct, not a bug."""
         now = datetime.now(UTC)
-        season = _current_football_season(now)
         updates: list[InjuryUpdate] = []
 
         async with self._client() as client:
-            for league_id in LEAGUE_IDS.values():
+            for league_slug, league_id in LEAGUE_IDS.items():
+                season = _current_football_season(league_slug, now)
                 fixtures_response = await client.get(
                     "/fixtures",
                     params={
@@ -270,7 +288,10 @@ async def fetch_h2h_win_rate(home_external_id: str, away_external_id: str) -> fl
     ) as client:
         response = await client.get(
             "/fixtures/headtohead",
-            params={"h2h": f"{home_external_id}-{away_external_id}", "last": H2H_LOOKBACK_MEETINGS},
+            params={
+                "h2h": f"{home_external_id}-{away_external_id}",
+                "last": H2H_LOOKBACK_MEETINGS,
+            },
         )
         response.raise_for_status()
     meetings = response.json().get("response", [])
