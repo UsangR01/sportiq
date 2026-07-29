@@ -14,9 +14,20 @@ const SELECTION_LABEL: Record<"home" | "draw" | "away", string> = {
 // threshold (e.g. the Live tab's plain list) can omit the prop entirely.
 const DEFAULT_MIN_PROBABILITY = 0.55;
 
+function actualResult(homeScore: number, awayScore: number): "home" | "draw" | "away" {
+  if (homeScore > awayScore) return "home";
+  if (homeScore < awayScore) return "away";
+  return "draw";
+}
+
 function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
-  const { live_state, status } = fixture;
+  const { live_state, status, best_pick } = fixture;
   if (!live_state) return null;
+
+  const isCompleted = status === "completed";
+  const actual = isCompleted ? actualResult(live_state.home_score, live_state.away_score) : null;
+  const wasCorrect = actual !== null && best_pick !== null && best_pick.selection === actual;
+
   return (
     <View className="items-center">
       <Text className="text-lg font-bold text-gray-900 dark:text-gray-100">
@@ -24,6 +35,22 @@ function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
       </Text>
       {status === "live" && live_state.match_minute != null && (
         <Text className="text-xs text-red-500">{live_state.match_minute}&apos;</Text>
+      )}
+      {/* Retrodicted prediction vs. the real result (see
+          app/workers/backfill_predictions.py) — colour is never the only signal (a
+          checkmark/cross is redundant with it) so this stays legible for colour-blind
+          users too. */}
+      {isCompleted && best_pick && (
+        <View
+          className={`mt-1 flex-row items-center rounded px-2 py-0.5 ${
+            wasCorrect ? "bg-green-600" : "bg-red-500"
+          }`}
+        >
+          <Text className="text-[10px] font-bold text-white">
+            {wasCorrect ? "✓" : "✗"} {SELECTION_LABEL[best_pick.selection]}{" "}
+            {Math.round(best_pick.probability * 100)}%
+          </Text>
+        </View>
       )}
     </View>
   );

@@ -220,6 +220,16 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
                 )
         await db.commit()
 
+    # Retrodicted predictions for newly-backfilled completed fixtures (TDD has no equivalent
+    # step — added so the Home feed can show "what the model would have called" alongside a
+    # real final score). Football only for now — see
+    # app/workers/backfill_predictions.py's module docstring for the leakage-safety design and
+    # why this is deliberately not the same code path as live inference.
+    if sport.slug == "football":
+        from app.workers.backfill_predictions import _retrodict_league
+
+        await _retrodict_league(sport, league)
+
 
 async def _ingest_fixtures() -> None:
     async with async_session_factory() as db:
