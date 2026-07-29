@@ -7,15 +7,22 @@ import { Platform, RefreshControl, SectionList, Text, View } from "react-native"
 import { DayStrip, type DaySelection } from "@/components/DayStrip";
 import { FixtureCard } from "@/components/fixtures/FixtureCard";
 import { GuestBanner } from "@/components/GuestBanner";
+import { CORNERS_LINES, GOALS_LINES, LineFilterChips, MarketFilterChips } from "@/components/MarketFilterChips";
 import { SportFilterChips } from "@/components/SportFilterChips";
 import { listFixtures } from "@/lib/api/fixtures";
 import { listSports } from "@/lib/api/sports";
-import type { FixtureSummary } from "@/lib/api/types";
+import type { FixtureSummary, PickMarket } from "@/lib/api/types";
 import { countryFlag } from "@/lib/countryFlags";
 import { useAuthStore } from "@/store/authStore";
 import { usePreferencesStore } from "@/store/preferencesStore";
 
-const DEFAULT_MIN_PROBABILITY = 0.55;
+// The Picks feed only ever surfaces "the best odds with the highest probability of winning" —
+// per the user's own words, NOT a general schedule browser. 60% is the floor they set
+// explicitly (previously 34%, which was only ever a client-side highlight threshold, not a
+// real filter — this is now a real server-side filter, see app/fixtures/router.py's
+// min_probability param).
+const MIN_PROBABILITY_FLOOR = 0.6;
+const DEFAULT_MIN_PROBABILITY = 0.6;
 // A full day across every league can easily exceed the old flat-list default of 50 — 200 is
 // the backend's own ceiling (app/fixtures/router.py's `limit` Query(..., le=200)).
 const FIXTURES_PAGE_LIMIT = 200;
@@ -73,17 +80,22 @@ function groupByLeague(fixtures: FixtureSummary[]): LeagueSection[] {
   return sections;
 }
 
-export default function HomeScreen() {
+export default function PicksScreen() {
   const isGuest = useAuthStore((s) => s.accessToken === null);
   const sportFilter = usePreferencesStore((s) => s.sportFilter);
   const setSportFilter = usePreferencesStore((s) => s.setSportFilter);
+  const minOdds = usePreferencesStore((s) => s.minOdds);
+  const setMinOdds = usePreferencesStore((s) => s.setMinOdds);
   const [refreshing, setRefreshing] = useState(false);
-  // Local, not persisted — this only controls which matches get a highlighted prediction
-  // badge vs. a plain odds line on this screen; the backend always returns every match's
-  // best_pick regardless (see app/fixtures/router.py), so nothing needs to be re-fetched
-  // when this changes.
+
   const [minProbability, setMinProbability] = useState(DEFAULT_MIN_PROBABILITY);
-  const hasStartedSliding = useRef(false);
+  const [market, setMarket] = useState<PickMarket>("all");
+  const [goalsLine, setGoalsLine] = useState<number>(GOALS_LINES[1]); // 2.5, the standard line
+  const line =
+    market === "goals_total" ? goalsLine : market === "corners_total" ? CORNERS_LINES[0] : undefined;
+
+  const hasStartedSlidingProb = useRef(false);
+  const hasStartedSlidingOdds = useRef(false);
   // Defaults to "today" — the backend only ever backfills/looks ahead 7 days either way
   // (see components/DayStrip.tsx), so this always starts inside real, populated data.
   const [daySelection, setDaySelection] = useState<DaySelection>(() => ({ date: new Date() }));
@@ -91,13 +103,15 @@ export default function HomeScreen() {
   const sportsQuery = useQuery({ queryKey: ["sports"], queryFn: listSports });
   const dayKey = daySelection === "live" ? "live" : daySelection.date.toDateString();
   const fixturesQuery = useQuery({
-    queryKey: ["fixtures", "home", sportFilter, dayKey],
+    queryKey: ["fixtures", "picks", sportFilter, dayKey, market, line, minProbability, minOdds],
     queryFn: () => {
+      const marketParams = { market, line, min_probability: minProbability, min_odds: minOdds };
       if (daySelection === "live") {
         return listFixtures({
           sport_slug: sportFilter ?? undefined,
           status: "live",
           limit: FIXTURES_PAGE_LIMIT,
+          ...marketParams,
         });
       }
       const { from, to } = dayBounds(daySelection.date);
@@ -106,6 +120,7 @@ export default function HomeScreen() {
         date_from: from,
         date_to: to,
         limit: FIXTURES_PAGE_LIMIT,
+        ...marketParams,
       });
     },
   });
@@ -118,37 +133,58 @@ export default function HomeScreen() {
     setRefreshing(false);
   }
 
-  // See app/(tabs)/picks.tsx for why onSlidingComplete is gated behind a real onSlidingStart
-  // (Android's SeekBar fires a spurious completion on mount otherwise).
-  function onSlidingStart() {
-    hasStartedSliding.current = true;
+  // @react-native-community/slider's Android SeekBar backing view fires onSlidingComplete
+  // once on mount with no real touch involved (confirmed live in an earlier phase of this
+  // project — it reported minimumValue). Only commit a completion preceded by a real
+  // onSlidingStart, same guard both sliders below need.
+  function onProbSlidingStart() {
+    hasStartedSlidingProb.current = true;
+  }
+  function onProbSlidingComplete(value: number) {
+    if (!hasStartedSlidingProb.current) return;
+    hasStartedSlidingProb.current = false;
+    setMinProbability(Math.round(value * 100) / 100);
+    if (Platform.OS !== "web") Haptics.selectionAsync();
   }
 
-  function onSlidingComplete(value: number) {
-    if (!hasStartedSliding.current) return;
-    hasStartedSliding.current = false;
-    setMinProbability(Math.round(value * 100) / 100);
-    if (Platform.OS !== "web") {
-      Haptics.selectionAsync();
-    }
+  function onOddsSlidingStart() {
+    hasStartedSlidingOdds.current = true;
+  }
+  function onOddsSlidingComplete(value: number) {
+    if (!hasStartedSlidingOdds.current) return;
+    hasStartedSlidingOdds.current = false;
+    setMinOdds(Math.round(value * 100) / 100);
+    if (Platform.OS !== "web") Haptics.selectionAsync();
   }
 
   return (
     <View className="flex-1 bg-white dark:bg-black">
       <View className="px-4 pt-2">
         <Text className="text-sm text-gray-500 dark:text-gray-400">
-          Highlight predictions above{" "}
+          Minimum probability:{" "}
           <Text className="font-semibold text-gray-900 dark:text-gray-100">
             {Math.round(minProbability * 100)}%
           </Text>
         </Text>
         <Slider
-          minimumValue={0.34}
-          maximumValue={0.9}
+          minimumValue={MIN_PROBABILITY_FLOOR}
+          maximumValue={0.95}
           step={0.01}
           value={minProbability}
-          onSlidingStart={onSlidingStart}
-          onSlidingComplete={onSlidingComplete}
+          onSlidingStart={onProbSlidingStart}
+          onSlidingComplete={onProbSlidingComplete}
+          minimumTrackTintColor="#2563eb"
+        />
+        <Text className="text-sm text-gray-500 dark:text-gray-400">
+          Minimum odds: <Text className="font-semibold text-gray-900 dark:text-gray-100">{minOdds.toFixed(2)}</Text>
+        </Text>
+        <Slider
+          minimumValue={1.01}
+          maximumValue={20}
+          step={0.01}
+          value={minOdds}
+          onSlidingStart={onOddsSlidingStart}
+          onSlidingComplete={onOddsSlidingComplete}
           minimumTrackTintColor="#2563eb"
         />
       </View>
@@ -157,15 +193,17 @@ export default function HomeScreen() {
         selected={sportFilter}
         onSelect={setSportFilter}
       />
+      <MarketFilterChips selected={market} onSelect={setMarket} />
+      {market === "goals_total" && (
+        <LineFilterChips lines={GOALS_LINES} selected={goalsLine} onSelect={setGoalsLine} />
+      )}
       <DayStrip selected={daySelection} onSelect={setDaySelection} />
       {isGuest && <GuestBanner />}
       <SectionList
         sections={sections}
         keyExtractor={(item) => item.id}
         contentContainerClassName="px-4 pb-4"
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
-        }
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
         renderSectionHeader={({ section }) => (
           <View className="mb-2 mt-3 flex-row items-center bg-white dark:bg-black">
             <Text className="mr-2 text-base">{countryFlag(section.country)}</Text>
@@ -179,19 +217,17 @@ export default function HomeScreen() {
             </View>
           </View>
         )}
-        renderItem={({ item }) => (
-          <FixtureCard fixture={item} minProbability={minProbability} />
-        )}
+        renderItem={({ item }) => <FixtureCard fixture={item} />}
         ListEmptyComponent={
           fixturesQuery.isLoading ? (
-            <Text className="mt-8 text-center text-gray-400">Loading fixtures…</Text>
+            <Text className="mt-8 text-center text-gray-400">Loading picks…</Text>
           ) : fixturesQuery.isError ? (
             <Text className="mt-8 text-center text-red-500">
               Couldn&apos;t reach the SportIQ API. Pull to retry.
             </Text>
           ) : (
             <Text className="mt-8 text-center text-gray-400">
-              No fixtures for this day/filter.
+              No picks clear this probability/odds threshold for this day/filter.
             </Text>
           )
         }

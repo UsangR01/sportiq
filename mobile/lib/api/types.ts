@@ -16,9 +16,13 @@ export interface SportResponse {
 }
 
 export interface BestPick {
-  selection: "home" | "draw" | "away";
+  // "home"|"draw"|"away" (h2h); "1X"|"X2" (double_chance); "over"|"under" (totals) — drawn
+  // from ACROSS every market, see backend/app/fixtures/router.py:_all_market_candidates.
+  selection: string;
   probability: number;
   odds: number | null;
+  market: PickMarket;
+  line: number | null; // goals_total/corners_total only
 }
 
 export interface LiveStateResponse {
@@ -96,23 +100,11 @@ export interface FixtureDetail extends FixtureSummary {
   away_team_form: TeamFeaturesResponse | null;
 }
 
-export type PickMarket = "h2h" | "double_chance" | "goals_total" | "corners_total";
-
-export interface PickResponse {
-  fixture_id: string;
-  sport_slug: string;
-  home_team: string;
-  away_team: string;
-  kickoff_utc: string;
-  market: PickMarket;
-  // "home" | "draw" | "away" (h2h); "1X" | "X2" (double_chance); "over" | "under" (totals)
-  selection: string;
-  line: number | null; // set for goals_total/corners_total only
-  odds: number;
-  model_probability: number;
-  expected_value: number;
-  confidence_tier: string;
-}
+// Shared across BestPick (GET /fixtures, the merged Picks feed) and the still-live GET /picks
+// backend endpoint (not currently called from mobile, but kept as a real, tested, reusable API
+// for other consumers) — "all" additionally means "combined best pick across every market" on
+// the GET /fixtures side, which /picks itself doesn't support.
+export type PickMarket = "all" | "h2h" | "double_chance" | "goals_total" | "corners_total";
 
 export interface UserPreferencesResponse {
   default_sport_id: string | null;

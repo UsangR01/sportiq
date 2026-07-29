@@ -2,17 +2,8 @@ import { Link } from "expo-router";
 import { Pressable, Text, View } from "react-native";
 
 import type { FixtureSummary } from "@/lib/api/types";
+import { pickHeadline, selectionLabel } from "@/lib/pickFormat";
 import { LiveBadge } from "./LiveBadge";
-
-const SELECTION_LABEL: Record<"home" | "draw" | "away", string> = {
-  home: "HOME",
-  draw: "DRAW",
-  away: "AWAY",
-};
-
-// Matches app/(tabs)/index.tsx's own default — callers that don't care about the highlight
-// threshold (e.g. the Live tab's plain list) can omit the prop entirely.
-const DEFAULT_MIN_PROBABILITY = 0.55;
 
 function actualResult(homeScore: number, awayScore: number): "home" | "draw" | "away" {
   if (homeScore > awayScore) return "home";
@@ -26,7 +17,11 @@ function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
 
   const isCompleted = status === "completed";
   const actual = isCompleted ? actualResult(live_state.home_score, live_state.away_score) : null;
-  const wasCorrect = actual !== null && best_pick !== null && best_pick.selection === actual;
+  // Non-h2h picks (double chance/totals) don't map onto a single "home"/"draw"/"away" actual
+  // result the same way — correctness there isn't shown here (an h2h-shaped comparison would
+  // be misleading for e.g. a "1X" pick), only for h2h best_picks.
+  const wasCorrect =
+    best_pick?.market === "h2h" && actual !== null && best_pick.selection === actual;
 
   return (
     <View className="items-center">
@@ -39,16 +34,21 @@ function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
       {/* Retrodicted prediction vs. the real result (see
           app/workers/backfill_predictions.py) — colour is never the only signal (a
           checkmark/cross is redundant with it) so this stays legible for colour-blind
-          users too. */}
+          users too. Only rendered for h2h best_picks (see wasCorrect above); a non-h2h best
+          pick still shows the badge without the correctness marker. */}
       {isCompleted && best_pick && (
         <View
           className={`mt-1 flex-row items-center rounded px-2 py-0.5 ${
-            wasCorrect ? "bg-green-600" : "bg-red-500"
+            best_pick.market !== "h2h"
+              ? "bg-gray-500"
+              : wasCorrect
+                ? "bg-green-600"
+                : "bg-red-500"
           }`}
         >
           <Text className="text-[10px] font-bold text-white">
-            {wasCorrect ? "✓" : "✗"} {SELECTION_LABEL[best_pick.selection]}{" "}
-            {Math.round(best_pick.probability * 100)}%
+            {best_pick.market === "h2h" ? (wasCorrect ? "✓ " : "✗ ") : ""}
+            {pickHeadline(best_pick)} {Math.round(best_pick.probability * 100)}%
           </Text>
         </View>
       )}
@@ -56,47 +56,24 @@ function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
   );
 }
 
-function PredictionBadge({
-  fixture,
-  minProbability,
-}: {
-  fixture: FixtureSummary;
-  minProbability: number;
-}) {
+function PredictionBadge({ fixture }: { fixture: FixtureSummary }) {
   const pick = fixture.best_pick;
   if (!pick) return null;
-  const isHighlighted = pick.probability >= minProbability;
 
-  if (isHighlighted) {
-    return (
-      <View className="items-center rounded-lg bg-blue-600 px-3 py-2">
-        <Text className="text-xs font-bold text-white">{SELECTION_LABEL[pick.selection]}</Text>
-        <Text className="text-xs text-blue-100">
-          {Math.round(pick.probability * 100)}%{pick.odds ? ` · ${pick.odds.toFixed(2)}` : ""}
-        </Text>
-      </View>
-    );
-  }
+  // Every fixture reaching this screen already cleared the Picks feed's own min-probability/
+  // min-odds filters server-side (see app/(tabs)/index.tsx) — so this badge is always shown
+  // highlighted, never demoted to a plain "Details" line the way it used to be.
   return (
-    <View className="items-end">
-      <Text className="text-xs uppercase text-gray-400">Details</Text>
-      <Text className="text-sm text-gray-600 dark:text-gray-400">
-        {pick.odds ? pick.odds.toFixed(2) : "—"}
+    <View className="items-center rounded-lg bg-blue-600 px-3 py-2">
+      <Text className="text-xs font-bold text-white">{pickHeadline(pick)}</Text>
+      <Text className="text-xs text-blue-100">
+        {Math.round(pick.probability * 100)}%{pick.odds ? ` · ${pick.odds.toFixed(2)}` : ""}
       </Text>
     </View>
   );
 }
 
-export function FixtureCard({
-  fixture,
-  minProbability = DEFAULT_MIN_PROBABILITY,
-}: {
-  fixture: FixtureSummary;
-  /** Below this, best_pick still renders but as a plain odds line (not a highlighted
-   * prediction badge) — matches the reference app's "DETAILS/OPEN" treatment for matches
-   * the model doesn't have a strong-enough read on to call out. */
-  minProbability?: number;
-}) {
+export function FixtureCard({ fixture }: { fixture: FixtureSummary }) {
   const kickoff = new Date(fixture.kickoff_utc);
   const isLive = fixture.status === "live";
   const isCompleted = fixture.status === "completed";
@@ -128,7 +105,7 @@ export function FixtureCard({
         {isLive || isCompleted ? (
           <ScoreBadge fixture={fixture} />
         ) : (
-          <PredictionBadge fixture={fixture} minProbability={minProbability} />
+          <PredictionBadge fixture={fixture} />
         )}
       </Pressable>
     </Link>

@@ -15,21 +15,13 @@ export default function TabLayout() {
         headerShown: useClientOnlyValue(false, true),
       }}
     >
+      {/* Home and Picks were merged into one tab — the user's own words: "I don't think we
+          need two different pages - home and picks." index.tsx now IS the Picks feed
+          (day-strip/league-grouping retained per their explicit follow-up, but only surfacing
+          fixtures whose best pick — across every market — clears a real probability/odds
+          floor, not a general schedule browser). */}
       <Tabs.Screen
         name="index"
-        options={{
-          title: "Home",
-          tabBarIcon: ({ color }) => (
-            <SymbolView
-              name={{ ios: "house.fill", android: "home", web: "home" }}
-              tintColor={color}
-              size={26}
-            />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="picks"
         options={{
           title: "Picks",
           tabBarIcon: ({ color }) => (

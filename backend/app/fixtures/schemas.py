@@ -17,15 +17,21 @@ class TeamFeaturesResponse(BaseModel):
 
 
 class BestPick(BaseModel):
-    """The model's favoured outcome for this fixture, with the best available odds for it —
-    the same selection/probability/odds math app/picks/service.py already computes for
-    /picks, surfaced inline per fixture in /fixtures's list view instead of requiring a
-    separate call per fixture. odds is null when a prediction exists but no odds have been
-    ingested yet (real for Brasileirão fixtures before TheRundown/API-Football odds land)."""
+    """The model's single favoured outcome for this fixture, with the best available odds for
+    it — drawn from ACROSS every market this product supports (h2h, double chance, Over/Under
+    goals, Over/Under corners), not just home/draw/away, per the user's explicit ask that the
+    Home/Picks feed surface "the best odds with the highest probability of winning" regardless
+    of which market that happens to live in. See app/fixtures/router.py:_pick_best. odds is
+    null when a prediction exists but no odds have been ingested yet for ANY market (real for
+    Brasileirão fixtures before TheRundown/API-Football odds land, or for a market a league's
+    odds provider simply doesn't cover — see CLAUDE.md's per-league odds-coverage notes)."""
 
-    selection: str  # "home" | "draw" | "away"
+    # "home"|"draw"|"away" (h2h); "1X"|"X2" (double_chance); "over"|"under" (totals)
+    selection: str
     probability: float
     odds: float | None = None
+    market: str = "h2h"  # "h2h" | "double_chance" | "goals_total" | "corners_total"
+    line: float | None = None  # goals_total/corners_total only
 
 
 class LiveStateResponse(BaseModel):

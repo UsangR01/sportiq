@@ -1,4 +1,5 @@
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -21,11 +22,22 @@ from app.fixtures.schemas import (
 )
 from app.models_ml.markets import CORNERS_LINES, GOALS_LINES, double_chance_probs, over_under_probs
 from app.odds.models import Odds
-from app.picks.service import best_available_odds, best_outcome
+from app.picks.service import best_available_odds, best_totals_odds
 from app.predictions.models import Prediction
 from app.sports.models import League, Sport
 
 router = APIRouter(tags=["fixtures"])
+
+_VALID_LINES_BY_MARKET = {"goals_total": GOALS_LINES, "corners_total": CORNERS_LINES}
+
+
+@dataclass(frozen=True)
+class _MarketCandidate:
+    selection: str
+    probability: float | None
+    odds: float | None
+    market: str
+    line: float | None
 
 
 def _build_extra_markets(prediction: Prediction) -> ExtraMarketsResponse:
@@ -129,23 +141,116 @@ async def _bulk_live_states(db: AsyncSession, fixture_ids: list) -> dict:
     }
 
 
-async def _bulk_best_picks(db: AsyncSession, fixture_ids: list) -> dict:
-    """Same selection/probability/odds math app/picks/service.py uses for /picks, computed in
-    bulk for a whole page of /fixtures results — one query each for odds and predictions
-    rather than a per-fixture round trip, mirroring app/picks/router.py's own bulk-fetch
-    pattern. Unlike /picks, this never filters fixtures out by odds threshold — every
-    fixture that has a real prediction gets a best_pick entry, odds or not (the mobile client
-    decides how prominently to surface it, e.g. by a probability threshold)."""
+def _all_market_candidates(
+    prediction: Prediction, odds_by_market: dict[str, list[dict]]
+) -> list[_MarketCandidate]:
+    """Every real candidate outcome across all four markets for one fixture's prediction —
+    h2h (home/draw/away), double chance (1X/X2), Over/Under goals (per GOALS_LINES), Over/Under
+    corners (per CORNERS_LINES). Candidates whose probability isn't computable (e.g. no
+    draw_prob for NBA, no xg_home/away yet on an older prediction) are simply omitted, never
+    fabricated. Odds are looked up per-market from odds_by_market (grouped by DB Odds.market,
+    see _bulk_best_picks) — a candidate can have a real probability but no odds yet."""
+    candidates: list[_MarketCandidate] = []
+
+    h2h_odds = best_available_odds(odds_by_market.get("h2h", []))
+    candidates.append(_MarketCandidate("home", prediction.home_prob, h2h_odds["home"], "h2h", None))
+    if prediction.draw_prob is not None:
+        candidates.append(
+            _MarketCandidate("draw", prediction.draw_prob, h2h_odds["draw"], "h2h", None)
+        )
+    candidates.append(_MarketCandidate("away", prediction.away_prob, h2h_odds["away"], "h2h", None))
+
+    dc_odds = best_available_odds(odds_by_market.get("double_chance", []))
+    home_or_draw, away_or_draw = double_chance_probs(
+        prediction.home_prob, prediction.draw_prob, prediction.away_prob
+    )
+    if home_or_draw is not None:
+        candidates.append(
+            _MarketCandidate("1X", home_or_draw, dc_odds["home"], "double_chance", None)
+        )
+    if away_or_draw is not None:
+        candidates.append(
+            _MarketCandidate("X2", away_or_draw, dc_odds["away"], "double_chance", None)
+        )
+
+    goals_total = (
+        prediction.xg_home + prediction.xg_away
+        if prediction.xg_home is not None and prediction.xg_away is not None
+        else None
+    )
+    for line, (under, over) in over_under_probs(goals_total, GOALS_LINES).items():
+        over_odds, under_odds = best_totals_odds(odds_by_market.get("total", []), line)
+        if over is not None:
+            candidates.append(_MarketCandidate("over", over, over_odds, "goals_total", line))
+        if under is not None:
+            candidates.append(_MarketCandidate("under", under, under_odds, "goals_total", line))
+
+    corners_total = (
+        prediction.corners_xg_home + prediction.corners_xg_away
+        if prediction.corners_xg_home is not None and prediction.corners_xg_away is not None
+        else None
+    )
+    for line, (under, over) in over_under_probs(corners_total, CORNERS_LINES).items():
+        over_odds, under_odds = best_totals_odds(odds_by_market.get("corners_total", []), line)
+        if over is not None:
+            candidates.append(_MarketCandidate("over", over, over_odds, "corners_total", line))
+        if under is not None:
+            candidates.append(_MarketCandidate("under", under, under_odds, "corners_total", line))
+
+    return candidates
+
+
+def _pick_best(candidates: list[_MarketCandidate]) -> BestPick | None:
+    """The single highest-probability candidate that has real odds; if NONE of the candidates
+    have real odds yet, falls back to the highest-probability candidate overall (probability-
+    only, odds=None) — same fallback semantics the old h2h-only version had, just extended
+    across every market instead of just three outcomes."""
+    with_odds = [c for c in candidates if c.probability is not None and c.odds is not None]
+    pool = with_odds or [c for c in candidates if c.probability is not None]
+    if not pool:
+        return None
+    best = max(pool, key=lambda c: c.probability)
+    return BestPick(
+        selection=best.selection,
+        probability=best.probability,
+        odds=best.odds,
+        market=best.market,
+        line=best.line,
+    )
+
+
+async def _bulk_best_picks(
+    db: AsyncSession, fixture_ids: list, market: str | None = None, line: float | None = None
+) -> dict:
+    """Computes each fixture's single best pick, drawn from ACROSS every market (h2h, double
+    chance, Over/Under goals, Over/Under corners) by default — per the user's explicit ask
+    that the feed surface "the best odds with the highest probability of winning" regardless
+    of which market that lives in, not just home/draw/away. Pass `market` (+`line` for the two
+    totals markets) to restrict to one specific market instead (mirrors GET /picks's own
+    market/line params). One bulk query each for odds and predictions rather than a
+    per-fixture round trip. Unlike /picks, this never filters fixtures out by odds
+    threshold on its own — every fixture that has a real prediction gets a best_pick entry,
+    odds or not; GET /fixtures's own min_probability/min_odds params do that filtering."""
     if not fixture_ids:
         return {}
 
     odds_rows = (
         (await db.execute(select(Odds).where(Odds.fixture_id.in_(fixture_ids)))).scalars().all()
     )
-    odds_by_fixture: dict = {}
+    # Grouped by the DB's own market value ("h2h"/"double_chance"/"total"/"corners_total") —
+    # _all_market_candidates looks up using these same raw values, not the client-facing
+    # "goals_total" label (that translation only matters for the `market` query param below).
+    odds_by_fixture_market: dict[tuple, list[dict]] = {}
     for o in odds_rows:
-        odds_by_fixture.setdefault(o.fixture_id, []).append(
-            {"home_odds": o.home_odds, "draw_odds": o.draw_odds, "away_odds": o.away_odds}
+        odds_by_fixture_market.setdefault((o.fixture_id, o.market.value), []).append(
+            {
+                "home_odds": o.home_odds,
+                "draw_odds": o.draw_odds,
+                "away_odds": o.away_odds,
+                "line": o.line,
+                "over_odds": o.over_odds,
+                "under_odds": o.under_odds,
+            }
         )
 
     prediction_rows = (
@@ -161,34 +266,18 @@ async def _bulk_best_picks(db: AsyncSession, fixture_ids: list) -> dict:
 
     picks: dict = {}
     for fixture_id, prediction in latest_prediction_by_fixture.items():
-        best_odds = best_available_odds(odds_by_fixture.get(fixture_id, []))
-        outcome = best_outcome(
-            prediction.home_prob,
-            prediction.draw_prob,
-            prediction.away_prob,
-            best_odds["home"],
-            best_odds["draw"],
-            best_odds["away"],
-        )
-        # best_outcome requires odds to pick a candidate (it's built for /picks' EV math,
-        # which needs both) — here we still want a badge when only a probability exists, so
-        # fall back to whichever probability is highest when no odds have landed yet.
-        if outcome is not None:
-            picks[fixture_id] = BestPick(
-                selection=outcome.selection, probability=outcome.probability, odds=outcome.odds
-            )
-        else:
+        odds_by_market = {
+            db_market: odds_by_fixture_market.get((fixture_id, db_market), [])
+            for db_market in ("h2h", "double_chance", "total", "corners_total")
+        }
+        candidates = _all_market_candidates(prediction, odds_by_market)
+        if market and market != "all":
             candidates = [
-                ("home", prediction.home_prob, best_odds["home"]),
-                ("draw", prediction.draw_prob, best_odds["draw"]),
-                ("away", prediction.away_prob, best_odds["away"]),
+                c for c in candidates if c.market == market and (line is None or c.line == line)
             ]
-            candidates = [c for c in candidates if c[1] is not None]
-            if candidates:
-                selection, probability, odds = max(candidates, key=lambda c: c[1])
-                picks[fixture_id] = BestPick(
-                    selection=selection, probability=probability, odds=odds
-                )
+        best = _pick_best(candidates)
+        if best is not None:
+            picks[fixture_id] = best
 
     return picks
 
@@ -200,10 +289,30 @@ async def list_fixtures(
     status_filter: FixtureStatus | None = Query(None, alias="status"),
     date_from: datetime | None = None,
     date_to: datetime | None = None,
+    # market/line/min_probability/min_odds are all optional and default to "no filtering,
+    # combined-best-pick" — existing callers (e.g. the Live tab's status="live" query) that
+    # omit them keep getting every fixture with an unfiltered best_pick, exactly as before.
+    # The Picks feed is the one caller that opts into all four to get "only fixtures whose
+    # best pick — drawn from every market — clears both a probability and an odds floor".
+    market: str | None = Query(None, pattern="^(all|h2h|double_chance|goals_total|corners_total)$"),
+    line: float | None = Query(None),
+    min_probability: float | None = Query(None, ge=0.0, le=1.0),
+    min_odds: float | None = Query(None, ge=1.0, le=1000.0),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
 ):
+    if market in _VALID_LINES_BY_MARKET:
+        valid_lines = _VALID_LINES_BY_MARKET[market]
+        if line is None:
+            raise HTTPException(422, detail=f"market={market!r} requires a `line` query param")
+        if line not in valid_lines:
+            raise HTTPException(
+                422, detail=f"market={market!r} only supports line in {valid_lines}"
+            )
+    elif line is not None:
+        raise HTTPException(422, detail=f"`line` is not applicable to market={market!r}")
+
     stmt = _fixture_query()
     if sport_slug:
         stmt = stmt.where(Sport.slug == sport_slug)
@@ -219,14 +328,35 @@ async def list_fixtures(
 
     rows = (await db.execute(stmt)).all()
     fixture_ids = [row[0].id for row in rows]
-    best_picks = await _bulk_best_picks(db, fixture_ids)
+    best_picks = await _bulk_best_picks(db, fixture_ids, market=market, line=line)
     live_states = await _bulk_live_states(db, fixture_ids)
-    return [
+
+    summaries = [
         _to_summary(
             *row, best_pick=best_picks.get(row[0].id), live_state=live_states.get(row[0].id)
         )
         for row in rows
     ]
+    if min_probability is None and min_odds is None:
+        return summaries
+
+    # A fixture with no qualifying pick at all (no best_pick, or one that doesn't clear the
+    # floor(s)) is dropped from the response entirely — the user's own words: "the intention
+    # is not to surface all the games... we just want the best odds with the highest
+    # probability of winning." min_odds only applies to fixtures with REAL odds on their best
+    # pick — a probability-only pick can never clear an odds floor, by design (never fabricate
+    # a price), so it's excluded too when min_odds is set.
+    filtered = []
+    for summary in summaries:
+        pick = summary.best_pick
+        if pick is None:
+            continue
+        if min_probability is not None and pick.probability < min_probability:
+            continue
+        if min_odds is not None and (pick.odds is None or pick.odds < min_odds):
+            continue
+        filtered.append(summary)
+    return filtered
 
 
 async def _load_fixture_or_404(fixture_id: uuid.UUID, db: AsyncSession):

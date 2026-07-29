@@ -131,7 +131,10 @@ async def test_list_fixtures_best_pick_matches_highest_probability_with_real_odd
 async def test_list_fixtures_best_pick_falls_back_to_probability_when_no_odds(api_client):
     """A prediction with zero real odds still gets a best_pick (probability-only, odds=None)
     — /fixtures never filters a fixture out for lacking odds the way /picks does; the mobile
-    client decides how prominently to show it."""
+    client decides how prominently to show it. best_pick is drawn from ACROSS every market
+    (see app/fixtures/router.py:_all_market_candidates), so with home=0.20/draw=0.25/away=0.55,
+    the double-chance X2 (away+draw=0.80) beats every single-outcome h2h candidate — this is
+    the intended "highest probability of winning across all markets" behavior, not a bug."""
     kickoff = datetime.now(UTC) + timedelta(days=1)
     async with async_session_factory() as db:
         slug = f"test-sport-{uuid.uuid4().hex[:8]}"
@@ -183,8 +186,9 @@ async def test_list_fixtures_best_pick_falls_back_to_probability_when_no_odds(ap
         body = response.json()
         best_pick = body[0]["best_pick"]
         assert best_pick is not None
-        assert best_pick["selection"] == "away"
-        assert best_pick["probability"] == pytest.approx(0.55)
+        assert best_pick["selection"] == "X2"
+        assert best_pick["market"] == "double_chance"
+        assert best_pick["probability"] == pytest.approx(0.80)
         assert best_pick["odds"] is None
         assert body[0]["league_country"] is None
     finally:

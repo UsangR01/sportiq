@@ -6,6 +6,7 @@ export const GOALS_LINES = [1.5, 2.5, 3.5] as const;
 export const CORNERS_LINES = [9.5] as const;
 
 const MARKETS: { market: PickMarket; label: string }[] = [
+  { market: "all", label: "All" },
   { market: "h2h", label: "1X2" },
   { market: "double_chance", label: "Double Chance" },
   { market: "goals_total", label: "Goals O/U" },
