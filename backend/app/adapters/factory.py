@@ -21,14 +21,27 @@ _INJURY_ADAPTERS: dict[str, type[DataSourceAdapter]] = {
     "football": APIFootballAdapter,
 }
 
+# Odds adapters per sport, tried in order and merged — not "the odds adapter is always
+# TheRundown" as TDD §6.2 originally assumed. Confirmed live (see CLAUDE.md): API-Football's
+# real odds coverage is per-league, not per-sport — it covers Brasileirão (which TheRundown
+# doesn't cover at all) but none of the 5 European leagues (which only TheRundown covers).
+# Both are queried for football; a league only one of them covers just gets an empty list
+# from the other, not an error (see app/workers/ingest_odds.py).
+_ODDS_ADAPTERS: dict[str, list[type[DataSourceAdapter]]] = {
+    "football": [TheRundownAdapter, APIFootballAdapter],
+}
+
 
 class AdapterFactory:
-    """Resolves the odds, stats, and injury adapters for a sport at runtime (TDD §6.2). The
-    odds adapter is always TheRundown; stats/injury adapters are sport-specific."""
+    """Resolves the odds, stats, and injury adapters for a sport at runtime (TDD §6.2).
+    Stats/injury adapters are sport-specific; odds adapters are per-sport too now (see
+    _ODDS_ADAPTERS) — TheRundown is still the only odds source for every sport besides
+    football's per-league split."""
 
     @staticmethod
-    def get_odds_adapter() -> DataSourceAdapter:
-        return TheRundownAdapter()
+    def get_odds_adapters(sport_slug: str) -> list[DataSourceAdapter]:
+        adapter_classes = _ODDS_ADAPTERS.get(sport_slug, [TheRundownAdapter])
+        return [cls() for cls in adapter_classes]
 
     @staticmethod
     def get_stats_adapter(data_source_slug: str) -> DataSourceAdapter:

@@ -1,7 +1,8 @@
 """Unit tests for API-Football adapter's pure mapping/aggregation logic.
 
-Sample dicts below are shaped from real /fixtures, /teams/statistics, and /injuries responses
-captured during live research (see CLAUDE.md) — not fabricated shapes. No network, no DB.
+Sample dicts below are shaped from real /fixtures, /teams/statistics, /injuries, and /odds
+responses captured during live research (see CLAUDE.md) — not fabricated shapes. No network,
+no DB.
 """
 
 from datetime import UTC, datetime
@@ -12,6 +13,7 @@ from app.adapters.api_football import (
     _current_football_season,
     _map_fixture_to_payload,
     _map_injury_to_update,
+    _map_odds_response_to_payloads,
     _map_status,
     _parse_form_points,
 )
@@ -147,6 +149,68 @@ def test_compute_team_stats_no_fixtures_played_returns_none_rates():
     assert result.away_win_rate is None
     assert result.attack_str is None
     assert result.form_pts_5 is None
+
+
+ODDS_ROW = {
+    "league": {"id": 71, "season": 2026},
+    "fixture": {"id": 1492316},
+    "update": "2026-07-29T20:03:21+00:00",
+    "bookmakers": [
+        {
+            "id": 1,
+            "name": "Bet365",
+            "bets": [
+                {
+                    "id": 1,
+                    "name": "Match Winner",
+                    "values": [
+                        {"value": "Home", "odd": "1.80"},
+                        {"value": "Draw", "odd": "3.50"},
+                        {"value": "Away", "odd": "5.00"},
+                    ],
+                },
+                {
+                    "id": 5,
+                    "name": "Goals Over/Under",
+                    "values": [
+                        {"value": "Over 2.5", "odd": "1.80"},
+                        {"value": "Under 2.5", "odd": "2.00"},
+                    ],
+                },
+            ],
+        },
+        {
+            "id": 6,
+            "name": "Niche Book",
+            "bets": [
+                {
+                    "id": 5,
+                    "name": "Goals Over/Under",
+                    "values": [{"value": "Over 2.5", "odd": "1.85"}],
+                }
+            ],
+        },
+    ],
+}
+
+
+def test_map_odds_response_to_payloads_real_book():
+    payloads = _map_odds_response_to_payloads(ODDS_ROW)
+    assert len(payloads) == 1  # "Niche Book" has no Match Winner market — correctly skipped
+
+    payload = payloads[0]
+    assert payload.fixture_external_id == "1492316"
+    assert payload.bookmaker == "Bet365"
+    assert payload.market == "h2h"
+    assert payload.home_odds == 1.80
+    assert payload.draw_odds == 3.50
+    assert payload.away_odds == 5.00
+    assert payload.updated_at == datetime(2026, 7, 29, 20, 3, 21, tzinfo=UTC)
+
+
+def test_map_odds_response_to_payloads_no_match_winner_anywhere():
+    row = {**ODDS_ROW, "bookmakers": [ODDS_ROW["bookmakers"][1]]}  # only "Niche Book"
+    assert _map_odds_response_to_payloads(row) == []
 
 
 def test_map_injury_to_update_always_out():

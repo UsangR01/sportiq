@@ -151,6 +151,63 @@ def _compute_team_stats(team_external_id: str, stats: dict) -> TeamStats:
     )
 
 
+MATCH_WINNER_BET_NAME = "Match Winner"  # API-Football's own name for the h2h/moneyline market
+
+
+def _map_odds_response_to_payloads(row: dict) -> list[OddsPayload]:
+    """Pure, network/DB-free mapping — one OddsPayload per bookmaker, mirroring
+    app/adapters/therundown.py:_map_event_to_odds_payloads's shape. Only the "Match Winner"
+    bet is mapped (home/draw/away) — same scope decision as TheRundown's h2h-only ingestion;
+    the dozen other bet types this endpoint returns (Asian handicap, Over/Under, ...) don't
+    fit odds.home_odds/.draw_odds/.away_odds and nothing downstream consumes them.
+
+    Odds are already real decimals here — unlike TheRundown, no American-to-decimal
+    conversion is needed (confirmed live, see CLAUDE.md).
+
+    fixture_external_id is API-Football's own fixture id — the SAME id space as
+    Fixture.external_id for any league whose fixtures also come from API-Football (every
+    football league, currently). That means odds ingestion can match directly on
+    Fixture.external_id instead of the fuzzy team-abbreviation-plus-kickoff-time join
+    TheRundown-sourced odds need (see app/workers/ingest_odds.py:_resolve_fixture) — a real
+    simplification unique to same-provider fixtures+odds, not something to generalise
+    to TheRundown's payloads."""
+    fixture_id = str(row["fixture"]["id"])
+    updated_at_raw = row.get("update")
+    updated_at = (
+        datetime.fromisoformat(updated_at_raw.replace("Z", "+00:00"))
+        if updated_at_raw
+        else datetime.now(UTC)
+    )
+
+    payloads: list[OddsPayload] = []
+    for bookmaker in row.get("bookmakers", []):
+        match_winner = next(
+            (b for b in bookmaker.get("bets", []) if b.get("name") == MATCH_WINNER_BET_NAME), None
+        )
+        if match_winner is None:
+            continue
+
+        odds_by_value = {v["value"]: v.get("odd") for v in match_winner.get("values", [])}
+        home_odds = odds_by_value.get("Home")
+        draw_odds = odds_by_value.get("Draw")
+        away_odds = odds_by_value.get("Away")
+        if home_odds is None and away_odds is None:
+            continue  # this book hasn't posted this market for this fixture
+
+        payloads.append(
+            OddsPayload(
+                fixture_external_id=fixture_id,
+                bookmaker=bookmaker.get("name", "unknown"),
+                market="h2h",
+                home_odds=float(home_odds) if home_odds is not None else None,
+                draw_odds=float(draw_odds) if draw_odds is not None else None,
+                away_odds=float(away_odds) if away_odds is not None else None,
+                updated_at=updated_at,
+            )
+        )
+    return payloads
+
+
 def _map_injury_to_update(injury: dict, source: str = "api_football") -> InjuryUpdate:
     """API-Football's /injuries rows are fixture-scoped ("Missing Fixture") rather than a
     RotoWire-style rolling current-status feed — every row it returns is, by construction,
@@ -170,10 +227,19 @@ def _map_injury_to_update(injury: dict, source: str = "api_football") -> InjuryU
 
 
 class APIFootballAdapter(DataSourceAdapter):
-    """Football fixtures, team stats, injuries (TDD §2.2) — real Pro-tier implementation
-    (confirmed live: 7500 req/day, active until 2026-08-29, see CLAUDE.md). fetch_odds stays
-    unimplemented by design: odds is always TheRundown regardless of sport (TDD §6.2), and
-    API-Football's own /teams/statistics response confirms odds:false at every tier tested.
+    """Football fixtures, team stats, injuries, and (per-league) odds — real Pro-tier
+    implementation (confirmed live: 7500 req/day, active until 2026-08-29, see CLAUDE.md).
+
+    fetch_odds is real but genuinely partial, not a universal TheRundown replacement:
+    confirmed live via each league's /leagues coverage.odds flag that only Brasileirão has
+    real odds coverage on this plan (13 real bookmakers incl. Bet365/Pinnacle/Betfair — richer
+    than TheRundown's 3-of-~15-unmasked situation) — all 5 European leagues report
+    coverage.odds=False, same as originally found pre-Pro-upgrade. The two providers are
+    complementary per league, not redundant: TheRundown remains the only real odds source for
+    the 5 European leagues (which it covers and API-Football doesn't); API-Football is now
+    the only real odds source for Brasileirão (which TheRundown doesn't cover at all). See
+    app/adapters/factory.py:get_odds_adapters and app/workers/ingest_odds.py for how both are
+    queried and merged.
     """
 
     def __init__(self) -> None:
@@ -185,7 +251,53 @@ class APIFootballAdapter(DataSourceAdapter):
         )
 
     async def fetch_odds(self, sport: str, league: str, days_ahead: int) -> list[OddsPayload]:
-        raise NotImplementedError("API-Football does not provide odds — use TheRundownAdapter")
+        """Real for leagues API-Football covers odds for (currently only Brasileirão —
+        see class docstring); genuinely empty (not an error) for a recognised league this
+        plan has zero odds coverage for (confirmed live: EPL returns results=0, not a 4xx) —
+        same "no line from this book" graceful-miss philosophy as TheRundown's masked-
+        sentinel handling, just at the whole-league level instead of per-bookmaker.
+
+        Queried per real upcoming fixture date (mirrors fetch_injuries's own
+        dates-with-real-fixtures optimization) rather than blindly for every date in
+        days_ahead, to avoid empty-date calls once more leagues gain odds coverage."""
+        league_id = LEAGUE_IDS.get(league)
+        if league_id is None:
+            raise ValueError(f"No API-Football league id mapping for league={league!r}")
+
+        now = datetime.now(UTC)
+        season = _current_football_season(league, now)
+        payloads: list[OddsPayload] = []
+
+        async with self._client() as client:
+            fixtures_response = await client.get(
+                "/fixtures",
+                params={
+                    "league": league_id,
+                    "season": season,
+                    "from": now.date().isoformat(),
+                    "to": (now + timedelta(days=days_ahead)).date().isoformat(),
+                },
+            )
+            fixtures_response.raise_for_status()
+            dates: set[date] = {
+                datetime.fromisoformat(fx["fixture"]["date"].replace("Z", "+00:00")).date()
+                for fx in fixtures_response.json().get("response", [])
+            }
+
+            for fixture_date in dates:
+                odds_response = await client.get(
+                    "/odds",
+                    params={
+                        "league": league_id,
+                        "season": season,
+                        "date": fixture_date.isoformat(),
+                    },
+                )
+                odds_response.raise_for_status()
+                for row in odds_response.json().get("response", []):
+                    payloads.extend(_map_odds_response_to_payloads(row))
+
+        return payloads
 
     async def fetch_fixtures(
         self, sport: str, league: str, days_ahead: int

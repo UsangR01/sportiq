@@ -20,11 +20,16 @@ ODDS_LOOKAHEAD_DAYS = 7
 
 
 async def _resolve_fixture(db, sport_id, league_id, payload: OddsPayload) -> Fixture | None:
-    """Fast path: this odds-provider event was already matched to a fixture on a previous
-    run. Otherwise match by team abbreviation + kickoff time and persist the mapping — the
-    odds provider (always TheRundown) and the stats/fixtures provider for a sport
-    (BallDontLie for NBA) use different ID spaces for the same real-world game; there's no
-    shared ID to join on directly (see fixtures.odds_provider_external_id)."""
+    """Three fast paths in order, then a last-resort fuzzy fallback:
+    1. This odds-provider event was already matched to a fixture on a previous run
+       (odds_provider_external_id).
+    2. payload.fixture_external_id matches a Fixture.external_id directly — real whenever the
+       odds provider and the stats/fixtures provider for this sport are the SAME provider
+       (e.g. API-Football odds for a football fixture API-Football itself ingested). Not
+       applicable to TheRundown's payloads (a genuinely different ID space from BallDontLie/
+       API-Football's fixture IDs), where this is just a guaranteed miss, not a false match.
+    3. Team abbreviation + kickoff-time fuzzy match (the only option when the two providers
+       use unrelated ID spaces, e.g. TheRundown odds vs BallDontLie/API-Football fixtures)."""
     fixture = (
         await db.execute(
             select(Fixture).where(
@@ -34,6 +39,18 @@ async def _resolve_fixture(db, sport_id, league_id, payload: OddsPayload) -> Fix
         )
     ).scalar_one_or_none()
     if fixture is not None:
+        return fixture
+
+    fixture = (
+        await db.execute(
+            select(Fixture).where(
+                Fixture.sport_id == sport_id, Fixture.external_id == payload.fixture_external_id
+            )
+        )
+    ).scalar_one_or_none()
+    if fixture is not None:
+        if fixture.odds_provider_external_id is None:
+            fixture.odds_provider_external_id = payload.fixture_external_id
         return fixture
 
     if payload.kickoff_utc is None:
@@ -52,14 +69,35 @@ async def _resolve_fixture(db, sport_id, league_id, payload: OddsPayload) -> Fix
     return fixture
 
 
+async def _fetch_odds_payloads(sport: Sport, league: League) -> list[OddsPayload]:
+    """Queries every odds adapter registered for this sport (see
+    AdapterFactory.get_odds_adapters) and merges their results — football queries both
+    TheRundown and API-Football since real coverage is complementary, split by league, not
+    redundant (see CLAUDE.md). A league one adapter has no mapping for raises ValueError from
+    that adapter alone (e.g. TheRundown for Brasileirão) — caught per-adapter so it can't
+    block a DIFFERENT adapter's real data for the same league."""
+    payloads: list[OddsPayload] = []
+    for adapter in AdapterFactory.get_odds_adapters(sport.slug):
+        try:
+            payloads.extend(
+                await adapter.fetch_odds(
+                    sport=sport.slug, league=league.slug, days_ahead=ODDS_LOOKAHEAD_DAYS
+                )
+            )
+        except ValueError:
+            logger.warning(
+                "%s has no odds coverage for league=%s — skipping",
+                type(adapter).__name__,
+                league.slug,
+            )
+    return payloads
+
+
 async def _ingest_odds_for_league(sport: Sport, league: League) -> None:
-    adapter = AdapterFactory.get_odds_adapter()
     redis = get_redis()
 
     async with async_session_factory() as db:
-        payloads = await adapter.fetch_odds(
-            sport=sport.slug, league=league.slug, days_ahead=ODDS_LOOKAHEAD_DAYS
-        )
+        payloads = await _fetch_odds_payloads(sport, league)
 
         for payload in payloads:
             # Events for a game we haven't ingested fixtures for yet (or can't match) are
@@ -103,13 +141,9 @@ async def _ingest_odds() -> None:
 
     for sport in sports:
         for league in leagues_by_sport[sport.id]:
-            try:
-                await _ingest_odds_for_league(sport, league)
-            except ValueError:
-                # A league TheRundown has no sport_id mapping for (e.g. Brasileirão —
-                # confirmed live it has no Brazil-league coverage at all, see CLAUDE.md)
-                # shouldn't block odds ingestion for every other league in this run.
-                logger.warning("No TheRundown odds coverage for league=%s — skipping", league.slug)
+            # Per-adapter ValueErrors (no odds coverage for this league) are already caught
+            # inside _fetch_odds_payloads — nothing further to isolate at this level.
+            await _ingest_odds_for_league(sport, league)
 
 
 @celery_app.task(name="app.workers.ingest_odds.ingest_odds")
