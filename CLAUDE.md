@@ -142,6 +142,90 @@ Stubbed (signature + schema exist, body is `NotImplementedError`/`501`, pending 
 - `models_registry.artefact_path` is stored as an absolute Windows path (`C:\Users\User\...`) — fine for this machine, not portable to a Linux container (the actual Render.com deploy target per TDD §7). Revisit before any real deployment — probably a relative path resolved against a configured models directory.
 - The training script's flat-stake ROI metric only covers home-side picks with real odds (n=22-30 depending on the run) — the collected odds sample only captured `home_odds`, not `away_odds`, so away-side picks aren't included. A real but small-sample, directionally-positive result (+6.9% to +14.4% across two runs); not a statistically robust claim.
 
+## Additional football prediction markets (double chance, Over/Under goals, Over/Under corners)
+
+Added on top of the core home/draw/away 1X2 market, per a direct user request. Live-researched
+before building (minimal, quota-conscious real API calls) rather than assumed — this changed
+the actual scope of what's possible per league:
+
+- **Double chance (1X, X2)**: pure arithmetic on the existing calibrated home/draw/away
+  probabilities (`app/models_ml/markets.py:double_chance_probs` — P(1X) = P(home)+P(draw),
+  P(X2) = P(away)+P(draw)). No new model, no new training data.
+- **Over/Under goals** (lines 1.5/2.5/3.5) and **Over/Under corners** (line 9.5, the standard,
+  most-traded corners line — confirmed live via Bet365's own offering): both derived by
+  treating each side's expected count as independent Poisson-distributed and summing the two
+  rates (a standard result: the sum of two independent Poissons is itself Poisson) —
+  `app/models_ml/markets.py:over_under_probs`. Goals reuses Layer 1's existing xG output
+  (`xg_home`/`xg_away`, now persisted on `Prediction` — previously computed then discarded).
+  Corners needed a genuinely new pair of Poisson regressors (`corners_home_model`/
+  `corners_away_model`, bundled into the SAME football artefact) — **deliberately reusing
+  Layer 1's exact same 21-feature vector as input, not new corner-specific rolling-form
+  features** (a documented simplification: goal-scoring strength correlates with corner
+  generation in practice), so this needed a new training TARGET but zero new live
+  ingestion/features. Real corners training data was collected via `/fixtures/statistics`
+  (`Corner Kicks` stat, confirmed live for both EPL and Brasileirão back through at least
+  2024) — `ml/training/collect_football_data.py:collect_corner_stats`, 1 API call per
+  fixture (same real, unavoidable cost as lineup collection): **2,818 EPL rows / 2,652
+  Brasileirão rows** (~70-74% fixture coverage — not every historical fixture's
+  `/fixtures/statistics` call returned a value, left as a real gap, not zero-filled). Retrained
+  football model: 1X2 accuracy/RPS unchanged (47.89%/0.2138, as expected — Layer 1/2 untouched),
+  new corners regressors' test MAE ≈ **2.2 corners** (average of home/away) on 589 test rows
+  with a real corner count — a real, modest predictive signal, not a strong one, consistent
+  with reusing goal-based features rather than corner-specific ones.
+- **Real odds coverage differs sharply by league/provider — confirmed live, not assumed**:
+  API-Football's `/odds` has real "Double Chance", "Goals Over/Under", and "Corners Over Under"
+  bet types, but (per the existing per-league coverage finding above) that endpoint only has
+  real odds for Brasileirão — the 5 European leagues get **no real double-chance or corners
+  odds at all** (probability-only for those markets there). TheRundown's raw `total` block
+  DOES carry real Over/Under-goals lines/prices for EPL (confirmed live — same masked-vs-real
+  per-affiliate pattern as moneyline) but has **no double-chance or corners market of any kind**
+  (its line blocks only ever have `moneyline`/`spread`/`total` keys) — so double chance and
+  corners odds are Brasileirão-only, full stop, until a provider with real European coverage
+  for those markets is found.
+- **Schema**: `Odds` gained `line`/`over_odds`/`under_odds` (nullable) plus two new
+  `OddsMarket` enum values, `DOUBLE_CHANCE`/`CORNERS_TOTAL` (Alembic migration `a7c4e2f1b8d3`)
+  — double chance reuses the existing `home_odds`/`away_odds` columns (a genuine 2-way market,
+  same shape as h2h without a draw) rather than adding yet more columns. `Prediction` gained
+  `xg_home`/`xg_away`/`corners_xg_home`/`corners_xg_away` (same migration), all nullable and
+  always `None` for NBA.
+- **`GET /picks` generalised via `market`/`line` query params** (`h2h` default, preserving
+  every existing caller's behavior) rather than new endpoints — `double_chance`/`goals_total`/
+  `corners_total` all reduce to the same "pick the model's favourite among whichever outcomes
+  have real odds" shape (`app/picks/service.py:best_outcome_from_candidates`), they just differ
+  in where the probability/odds come from. `goals_total`/`corners_total` require a `line` query
+  param and 422 if it's missing or not one of the supported lines.
+- **`GET /fixtures/{id}`'s `prediction` gained an `extra_markets` object** (double chance +
+  every supported Over/Under line's probability pair, all derived server-side from the stored
+  Prediction row via the same `app/models_ml/markets.py` functions) — so the mobile fixture
+  detail screen doesn't need to duplicate any Poisson math itself, just format numbers already
+  computed once in Python.
+- Mobile: `mobile/app/(tabs)/picks.tsx` gained a market chip selector (`mobile/components/
+  MarketFilterChips.tsx`) plus a goals-line selector (corners has only one supported line, so
+  no selector needed there); `mobile/app/fixture/[id].tsx` gained an "Other Markets" section
+  rendering `extra_markets` inline below the existing probability bar.
+
+**A real, separate bug was found and fixed while working on this** (reported by the user:
+"games not meeting a threshold are still visible"): `GET /picks`'s threshold check
+(`meets_threshold`, now deleted — dead code once the fix landed) tested whether **any** of a
+fixture's three h2h markets cleared `min_odds`, while the pick actually shown/ranked came from
+a completely separate `best_outcome` call that picks whichever market the model favours most —
+with no connection between the two. A fixture could pass the threshold on its `away_odds`
+(e.g. 6.00) while the actually-recommended pick was `home` at a sub-threshold price (e.g.
+1.30), and the API would return it anyway. Fixed in `app/picks/router.py` by computing the
+outcome FIRST, then checking that specific outcome's own odds against `min_odds` — the
+threshold is now a promise about the pick actually displayed, not about the fixture having
+some market, somewhere, that happens to clear it. Regression-tested in
+`backend/tests/test_picks_router.py` (a fixture whose favoured selection is deliberately
+below-threshold while a different market's odds clear it, asserting it's excluded).
+
+**A second, previously-latent test-infra bug was found and fixed while adding the regression
+test above**: `app/core/redis.py`'s connection pool is a module-level singleton, same
+one-loop-per-pytest-test problem `tests/conftest.py` already handles for the DB engine — but
+Redis's pool was never included in that fixture, since no prior test file had two separate
+async test functions both make a real Redis call (`GET /picks`'s caching) in the same session.
+Surfaced as `RuntimeError: Event loop is closed` on the second test. Fixed by adding the exact
+same dispose-after-every-test pattern for `app.core.redis._pool`.
+
 ## Mobile implementation status
 
 `mobile/` is a real Expo Router app (SDK 57, TypeScript), scaffolded and live-tested end to end against the running backend on **both** Expo web and a real Android emulator (registration, login, logout, guest-session creation/migration, and every §5.2 screen route) — not just created and left unverified.

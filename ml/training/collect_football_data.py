@@ -210,6 +210,39 @@ async def collect_lineups(fixture_ids: list[int]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["FIXTURE_ID", "TEAM_ID", "PLAYER_NAME"])
 
 
+async def collect_corner_stats(fixture_ids: list[int]) -> pd.DataFrame:
+    """Per-fixture real corner-kick counts via /fixtures/statistics ("Corner Kicks" — confirmed
+    live, see CLAUDE.md) — the training target for the new corners-Poisson-regressors
+    (app/models_ml/football.py). One call per fixture, same real, unavoidable cost as
+    collect_lineups (no bulk-by-league-and-date equivalent for per-fixture statistics either).
+    Deliberately does NOT feed any new live-serving feature — the corners regressors reuse
+    Layer 1's existing feature vector, so this data is training-target-only."""
+    rows = []
+    async with _football_client() as client:
+        for i, fixture_id in enumerate(fixture_ids):
+            response = await _get_with_retry(
+                client, "/fixtures/statistics", {"fixture": fixture_id}
+            )
+            for team_block in response.json().get("response", []):
+                team_id = str(team_block["team"]["id"])
+                corners = next(
+                    (
+                        s["value"]
+                        for s in team_block.get("statistics", [])
+                        if s["type"] == "Corner Kicks"
+                    ),
+                    None,
+                )
+                if corners is not None:
+                    rows.append(
+                        {"FIXTURE_ID": fixture_id, "TEAM_ID": team_id, "CORNERS": int(corners)}
+                    )
+            if (i + 1) % 100 == 0:
+                print(f"  collected corner stats for {i + 1}/{len(fixture_ids)} fixtures")
+
+    return pd.DataFrame(rows, columns=["FIXTURE_ID", "TEAM_ID", "CORNERS"])
+
+
 ODDS_REQUEST_DELAY_SECONDS = 5.0  # same RapidAPI-gateway-under-load caution as collect_nba_data.py
 ODDS_MAX_RETRIES = 3
 MAX_ODDS_DATES = 60
@@ -293,6 +326,19 @@ def collect_league(league_slug: str) -> None:
         lineups = asyncio.run(collect_lineups(fixture_ids))
         lineups.to_parquet(lineups_path, index=False)
         print(f"saved {len(lineups)} lineup-presence rows to {lineups_path}")
+
+    corners_path = DATA_DIR / f"football_corners_{league_slug}.parquet"
+    if corners_path.exists():
+        print(f"{corners_path} already exists, skipping API-Football re-fetch")
+    else:
+        fixture_ids = sorted(games["FIXTURE_ID"].unique().tolist())
+        print(
+            f"collecting corner-kick stats for {len(fixture_ids)} {league_slug} fixtures "
+            "(1 call each)..."
+        )
+        corners = asyncio.run(collect_corner_stats(fixture_ids))
+        corners.to_parquet(corners_path, index=False)
+        print(f"saved {len(corners)} corner-stat rows to {corners_path}")
 
     if rundown_sport_id is None:
         print(f"{league_slug}: no TheRundown coverage — skipping historical odds collection")

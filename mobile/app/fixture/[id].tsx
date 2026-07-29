@@ -4,6 +4,7 @@ import { ScrollView, Text, View } from "react-native";
 
 import { LiveBadge } from "@/components/fixtures/LiveBadge";
 import { getFixture } from "@/lib/api/fixtures";
+import type { ExtraMarketsResponse } from "@/lib/api/types";
 
 export default function FixtureDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -81,6 +82,8 @@ export default function FixtureDetailScreen() {
         </View>
       )}
 
+      {fixture.prediction?.extra_markets && <ExtraMarkets markets={fixture.prediction.extra_markets} />}
+
       {fixture.odds.length > 0 && (
         <View className="mb-6">
           <Text className="mb-2 text-sm font-semibold uppercase text-gray-400">Odds</Text>
@@ -105,6 +108,63 @@ export default function FixtureDetailScreen() {
           Phase 2) aren't wired up yet — Highlightly isn't integrated at the backend ingest
           layer, and there's no live WebSocket feed for the tracker to consume. */}
     </ScrollView>
+  );
+}
+
+function pct(value: number | null): string {
+  return value == null ? "—" : `${Math.round(value * 100)}%`;
+}
+
+function ExtraMarkets({ markets }: { markets: ExtraMarketsResponse }) {
+  const hasDoubleChance =
+    markets.double_chance_home_or_draw_prob != null || markets.double_chance_away_or_draw_prob != null;
+  const hasGoals = markets.goals_totals.some((t) => t.over_prob != null);
+  const hasCorners = markets.corners_totals.some((t) => t.over_prob != null);
+
+  if (!hasDoubleChance && !hasGoals && !hasCorners) return null;
+
+  return (
+    <View className="mb-6">
+      <Text className="mb-2 text-sm font-semibold uppercase text-gray-400">Other Markets</Text>
+
+      {hasDoubleChance && (
+        <View className="mb-3 flex-row justify-between border-b border-gray-100 py-2 dark:border-gray-800">
+          <Text className="text-gray-700 dark:text-gray-300">Double Chance</Text>
+          <Text className="text-gray-900 dark:text-gray-100">
+            1X {pct(markets.double_chance_home_or_draw_prob)} · X2{" "}
+            {pct(markets.double_chance_away_or_draw_prob)}
+          </Text>
+        </View>
+      )}
+
+      {hasGoals && (
+        <View className="mb-1">
+          <Text className="mb-1 text-gray-700 dark:text-gray-300">Goals Over/Under</Text>
+          {markets.goals_totals.map((t) => (
+            <View key={t.line} className="flex-row justify-between py-1">
+              <Text className="text-gray-500 dark:text-gray-400">{t.line}</Text>
+              <Text className="text-gray-900 dark:text-gray-100">
+                Over {pct(t.over_prob)} · Under {pct(t.under_prob)}
+              </Text>
+            </View>
+          ))}
+        </View>
+      )}
+
+      {hasCorners && (
+        <View className="mt-2">
+          <Text className="mb-1 text-gray-700 dark:text-gray-300">Corners Over/Under</Text>
+          {markets.corners_totals.map((t) => (
+            <View key={t.line} className="flex-row justify-between py-1">
+              <Text className="text-gray-500 dark:text-gray-400">{t.line}</Text>
+              <Text className="text-gray-900 dark:text-gray-100">
+                Over {pct(t.over_prob)} · Under {pct(t.under_prob)}
+              </Text>
+            </View>
+          ))}
+        </View>
+      )}
+    </View>
   );
 }
 

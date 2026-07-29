@@ -54,6 +54,19 @@ export interface OddsLineResponse {
   updated_at: string;
 }
 
+export interface TotalsProbability {
+  line: number;
+  under_prob: number | null;
+  over_prob: number | null;
+}
+
+export interface ExtraMarketsResponse {
+  double_chance_home_or_draw_prob: number | null;
+  double_chance_away_or_draw_prob: number | null;
+  goals_totals: TotalsProbability[];
+  corners_totals: TotalsProbability[];
+}
+
 export interface PredictionResponse {
   model_version: string;
   home_prob: number;
@@ -61,6 +74,7 @@ export interface PredictionResponse {
   away_prob: number;
   confidence_tier: string;
   expected_value: number | null;
+  extra_markets: ExtraMarketsResponse | null;
 }
 
 export interface TeamFeaturesResponse {
@@ -82,13 +96,18 @@ export interface FixtureDetail extends FixtureSummary {
   away_team_form: TeamFeaturesResponse | null;
 }
 
+export type PickMarket = "h2h" | "double_chance" | "goals_total" | "corners_total";
+
 export interface PickResponse {
   fixture_id: string;
   sport_slug: string;
   home_team: string;
   away_team: string;
   kickoff_utc: string;
-  selection: "home" | "draw" | "away";
+  market: PickMarket;
+  // "home" | "draw" | "away" (h2h); "1X" | "X2" (double_chance); "over" | "under" (totals)
+  selection: string;
+  line: number | null; // set for goals_total/corners_total only
   odds: number;
   model_probability: number;
   expected_value: number;

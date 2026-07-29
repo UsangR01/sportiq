@@ -192,14 +192,25 @@ def _compute_team_stats(team_external_id: str, stats: dict) -> TeamStats:
 
 
 MATCH_WINNER_BET_NAME = "Match Winner"  # API-Football's own name for the h2h/moneyline market
+DOUBLE_CHANCE_BET_NAME = "Double Chance"
+GOALS_OVER_UNDER_BET_NAME = "Goals Over/Under"
+CORNERS_OVER_UNDER_BET_NAME = "Corners Over Under"
+
+# The lines this product supports (see app/models_ml/markets.py) — real bookmaker responses
+# offer many more (0.5, 1.5, ..., 4.5+ for goals; 6.5 through 14.5+ for corners), but only
+# these are ever mapped, matching the scope confirmed useful live (CLAUDE.md).
+GOALS_LINES = (1.5, 2.5, 3.5)
+CORNERS_LINES = (9.5,)  # the standard, most-traded corners line (confirmed live via Bet365)
 
 
 def _map_odds_response_to_payloads(row: dict) -> list[OddsPayload]:
-    """Pure, network/DB-free mapping — one OddsPayload per bookmaker, mirroring
-    app/adapters/therundown.py:_map_event_to_odds_payloads's shape. Only the "Match Winner"
-    bet is mapped (home/draw/away) — same scope decision as TheRundown's h2h-only ingestion;
-    the dozen other bet types this endpoint returns (Asian handicap, Over/Under, ...) don't
-    fit odds.home_odds/.draw_odds/.away_odds and nothing downstream consumes them.
+    """Pure, network/DB-free mapping — one or more OddsPayloads per bookmaker, mirroring
+    app/adapters/therundown.py:_map_event_to_odds_payloads's shape. Maps "Match Winner"
+    (home/draw/away), "Double Chance", "Goals Over/Under" (GOALS_LINES only), and "Corners
+    Over Under" (CORNERS_LINES only) — confirmed live (see CLAUDE.md) that all four are real
+    bet types this endpoint returns, at least for Brasileirão (the only league with real odds
+    coverage on this plan). The dozen other bet types (Asian handicap, per-half markets, ...)
+    still aren't mapped — nothing downstream consumes them.
 
     Odds are already real decimals here — unlike TheRundown, no American-to-decimal
     conversion is needed (confirmed live, see CLAUDE.md).
@@ -221,28 +232,101 @@ def _map_odds_response_to_payloads(row: dict) -> list[OddsPayload]:
 
     payloads: list[OddsPayload] = []
     for bookmaker in row.get("bookmakers", []):
-        match_winner = next(
-            (b for b in bookmaker.get("bets", []) if b.get("name") == MATCH_WINNER_BET_NAME), None
+        bookmaker_name = bookmaker.get("name", "unknown")
+        bets_by_name = {b.get("name"): b for b in bookmaker.get("bets", [])}
+
+        match_winner = bets_by_name.get(MATCH_WINNER_BET_NAME)
+        if match_winner is not None:
+            odds_by_value = {v["value"]: v.get("odd") for v in match_winner.get("values", [])}
+            home_odds = odds_by_value.get("Home")
+            draw_odds = odds_by_value.get("Draw")
+            away_odds = odds_by_value.get("Away")
+            if home_odds is not None or away_odds is not None:
+                payloads.append(
+                    OddsPayload(
+                        fixture_external_id=fixture_id,
+                        bookmaker=bookmaker_name,
+                        market="h2h",
+                        home_odds=float(home_odds) if home_odds is not None else None,
+                        draw_odds=float(draw_odds) if draw_odds is not None else None,
+                        away_odds=float(away_odds) if away_odds is not None else None,
+                        updated_at=updated_at,
+                    )
+                )
+
+        double_chance = bets_by_name.get(DOUBLE_CHANCE_BET_NAME)
+        if double_chance is not None:
+            odds_by_value = {v["value"]: v.get("odd") for v in double_chance.get("values", [])}
+            home_or_draw = odds_by_value.get("Home/Draw")
+            away_or_draw = odds_by_value.get("Draw/Away")
+            if home_or_draw is not None or away_or_draw is not None:
+                payloads.append(
+                    OddsPayload(
+                        fixture_external_id=fixture_id,
+                        bookmaker=bookmaker_name,
+                        market="double_chance",
+                        home_odds=float(home_or_draw) if home_or_draw is not None else None,
+                        draw_odds=None,
+                        away_odds=float(away_or_draw) if away_or_draw is not None else None,
+                        updated_at=updated_at,
+                    )
+                )
+
+        payloads.extend(
+            _map_totals_bet(
+                bets_by_name.get(GOALS_OVER_UNDER_BET_NAME),
+                GOALS_LINES,
+                "total",
+                fixture_id,
+                bookmaker_name,
+                updated_at,
+            )
         )
-        if match_winner is None:
+        payloads.extend(
+            _map_totals_bet(
+                bets_by_name.get(CORNERS_OVER_UNDER_BET_NAME),
+                CORNERS_LINES,
+                "corners_total",
+                fixture_id,
+                bookmaker_name,
+                updated_at,
+            )
+        )
+    return payloads
+
+
+def _map_totals_bet(
+    bet: dict | None,
+    lines: tuple[float, ...],
+    market: str,
+    fixture_id: str,
+    bookmaker_name: str,
+    updated_at: datetime,
+) -> list[OddsPayload]:
+    """Shared by the Goals Over/Under and Corners Over Under mappings — both bets return a
+    flat values list like [{"value": "Over 2.5", "odd": "2.00"}, {"value": "Under 2.5", ...}]
+    covering many lines per bookmaker; only `lines` (GOALS_LINES/CORNERS_LINES) are kept."""
+    if bet is None:
+        return []
+    odds_by_value = {v["value"]: v.get("odd") for v in bet.get("values", [])}
+    payloads: list[OddsPayload] = []
+    for target_line in lines:
+        over_odds = odds_by_value.get(f"Over {target_line}")
+        under_odds = odds_by_value.get(f"Under {target_line}")
+        if over_odds is None and under_odds is None:
             continue
-
-        odds_by_value = {v["value"]: v.get("odd") for v in match_winner.get("values", [])}
-        home_odds = odds_by_value.get("Home")
-        draw_odds = odds_by_value.get("Draw")
-        away_odds = odds_by_value.get("Away")
-        if home_odds is None and away_odds is None:
-            continue  # this book hasn't posted this market for this fixture
-
         payloads.append(
             OddsPayload(
                 fixture_external_id=fixture_id,
-                bookmaker=bookmaker.get("name", "unknown"),
-                market="h2h",
-                home_odds=float(home_odds) if home_odds is not None else None,
-                draw_odds=float(draw_odds) if draw_odds is not None else None,
-                away_odds=float(away_odds) if away_odds is not None else None,
+                bookmaker=bookmaker_name,
+                market=market,
+                home_odds=None,
+                draw_odds=None,
+                away_odds=None,
                 updated_at=updated_at,
+                line=target_line,
+                over_odds=float(over_odds) if over_odds is not None else None,
+                under_odds=float(under_odds) if under_odds is not None else None,
             )
         )
     return payloads

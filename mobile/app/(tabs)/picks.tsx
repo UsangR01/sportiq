@@ -1,14 +1,35 @@
 import Slider from "@react-native-community/slider";
 import { useQuery } from "@tanstack/react-query";
 import * as Haptics from "expo-haptics";
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { FlatList, Platform, Text, View } from "react-native";
 
+import {
+  CORNERS_LINES,
+  GOALS_LINES,
+  LineFilterChips,
+  MarketFilterChips,
+} from "@/components/MarketFilterChips";
 import { SportFilterChips } from "@/components/SportFilterChips";
 import { getPicks } from "@/lib/api/picks";
 import { listSports } from "@/lib/api/sports";
-import type { PickResponse } from "@/lib/api/types";
+import type { PickMarket, PickResponse } from "@/lib/api/types";
 import { usePreferencesStore } from "@/store/preferencesStore";
+
+const SELECTION_LABELS: Record<string, string> = {
+  home: "HOME",
+  draw: "DRAW",
+  away: "AWAY",
+  "1X": "1X (Home/Draw)",
+  X2: "X2 (Away/Draw)",
+  over: "OVER",
+  under: "UNDER",
+};
+
+function pickHeadline(pick: PickResponse): string {
+  const label = SELECTION_LABELS[pick.selection] ?? pick.selection.toUpperCase();
+  return pick.line != null ? `${label} ${pick.line}` : label;
+}
 
 const EV_COLORS: Record<"positive" | "neutral" | "negative", { bg: string; text: string }> = {
   positive: { bg: "bg-green-100 dark:bg-green-900", text: "text-green-800 dark:text-green-200" },
@@ -38,7 +59,7 @@ function PickRow({ pick }: { pick: PickResponse }) {
         {pick.home_team} vs {pick.away_team}
       </Text>
       <Text className="mt-1 text-sm text-gray-600 dark:text-gray-400">
-        {pick.selection.toUpperCase()} @ {pick.odds.toFixed(2)} · {(pick.model_probability * 100).toFixed(0)}%
+        {pickHeadline(pick)} @ {pick.odds.toFixed(2)} · {(pick.model_probability * 100).toFixed(0)}%
         · {pick.confidence_tier}
       </Text>
     </View>
@@ -51,10 +72,16 @@ export default function PicksScreen() {
   const minOdds = usePreferencesStore((s) => s.minOdds);
   const setMinOdds = usePreferencesStore((s) => s.setMinOdds);
 
+  const [market, setMarket] = useState<PickMarket>("h2h");
+  const [goalsLine, setGoalsLine] = useState<number>(GOALS_LINES[1]); // 2.5, the standard line
+  const line =
+    market === "goals_total" ? goalsLine : market === "corners_total" ? CORNERS_LINES[0] : undefined;
+
   const sportsQuery = useQuery({ queryKey: ["sports"], queryFn: listSports });
   const picksQuery = useQuery({
-    queryKey: ["picks", sportFilter, minOdds],
-    queryFn: () => getPicks({ min_odds: minOdds, sport_slug: sportFilter ?? undefined }),
+    queryKey: ["picks", sportFilter, minOdds, market, line],
+    queryFn: () =>
+      getPicks({ min_odds: minOdds, sport_slug: sportFilter ?? undefined, market, line }),
   });
 
   // @react-native-community/slider's Android SeekBar backing view fires onSlidingComplete
@@ -98,9 +125,13 @@ export default function PicksScreen() {
         selected={sportFilter}
         onSelect={setSportFilter}
       />
+      <MarketFilterChips selected={market} onSelect={setMarket} />
+      {market === "goals_total" && (
+        <LineFilterChips lines={GOALS_LINES} selected={goalsLine} onSelect={setGoalsLine} />
+      )}
       <FlatList
         data={picksQuery.data ?? []}
-        keyExtractor={(item) => `${item.fixture_id}-${item.selection}`}
+        keyExtractor={(item) => `${item.fixture_id}-${item.market}-${item.line}-${item.selection}`}
         contentContainerClassName="px-4 pb-4"
         renderItem={({ item }) => <PickRow pick={item} />}
         ListEmptyComponent={

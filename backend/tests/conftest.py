@@ -1,6 +1,7 @@
 import pytest
 
 from app.core.database import engine
+from app.core.redis import _pool as redis_pool
 
 
 @pytest.fixture(autouse=True)
@@ -14,3 +15,14 @@ async def _dispose_engine_after_test():
     for this exact SQLAlchemy-async + pytest-asyncio interaction, not specific to this repo."""
     yield
     await engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+async def _dispose_redis_pool_after_test():
+    """Same root cause as the DB engine above, for app.core.redis's module-level
+    ConnectionPool: latent until a test file first made two separate async test functions
+    both exercise a real Redis call (GET /picks's caching) in the same session — surfaced as
+    "RuntimeError: Event loop is closed" from a later test reusing a connection opened under an
+    earlier, now-closed loop."""
+    yield
+    await redis_pool.disconnect()

@@ -71,6 +71,10 @@ async def _run_predictions(fixture_id: uuid.UUID) -> None:
             draw_prob=result.draw_prob,
             away_prob=result.away_prob,
             confidence_tier=confidence_tier_for_probability(probability),
+            xg_home=result.xg_home,
+            xg_away=result.xg_away,
+            corners_xg_home=result.corners_xg_home,
+            corners_xg_away=result.corners_xg_away,
             created_at=datetime.now(UTC),
         )
         db.add(prediction)

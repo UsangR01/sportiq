@@ -12,7 +12,7 @@ class OddsPayload:
     # app/fixtures/service.py:find_fixture_by_abbreviations_and_time.
     fixture_external_id: str
     bookmaker: str
-    market: str  # "h2h" | "spread" | "total"
+    market: str  # "h2h" | "spread" | "total" | "double_chance" | "corners_total"
     home_odds: float | None
     draw_odds: float | None
     away_odds: float | None
@@ -21,6 +21,11 @@ class OddsPayload:
     home_team_short_name: str | None = None
     away_team_short_name: str | None = None
     kickoff_utc: datetime | None = None
+    # TOTAL/CORNERS_TOTAL only (see app/odds/models.py:Odds) — null for h2h/double_chance.
+    # DOUBLE_CHANCE reuses home_odds (Home-or-Draw price) / away_odds (Away-or-Draw price).
+    line: float | None = None
+    over_odds: float | None = None
+    under_odds: float | None = None
 
 
 @dataclass(frozen=True)

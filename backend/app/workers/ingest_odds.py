@@ -114,6 +114,9 @@ async def _ingest_odds_for_league(sport: Sport, league: League) -> None:
                     home_odds=payload.home_odds,
                     draw_odds=payload.draw_odds,
                     away_odds=payload.away_odds,
+                    line=payload.line,
+                    over_odds=payload.over_odds,
+                    under_odds=payload.under_odds,
                     updated_at=payload.updated_at,
                 )
             )

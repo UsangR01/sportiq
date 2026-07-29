@@ -281,21 +281,101 @@ ODDS_ROW = {
 
 def test_map_odds_response_to_payloads_real_book():
     payloads = _map_odds_response_to_payloads(ODDS_ROW)
-    assert len(payloads) == 1  # "Niche Book" has no Match Winner market — correctly skipped
+    # Bet365: Match Winner (h2h) + Goals Over/Under 2.5 (total). "Niche Book" has no Match
+    # Winner market but DOES have a Goals Over/Under 2.5 line — also mapped, since this
+    # function maps every supported bet type independently per bookmaker, not "all or nothing".
+    assert len(payloads) == 3
 
-    payload = payloads[0]
-    assert payload.fixture_external_id == "1492316"
-    assert payload.bookmaker == "Bet365"
-    assert payload.market == "h2h"
-    assert payload.home_odds == 1.80
-    assert payload.draw_odds == 3.50
-    assert payload.away_odds == 5.00
-    assert payload.updated_at == datetime(2026, 7, 29, 20, 3, 21, tzinfo=UTC)
+    by_bookmaker_market = {(p.bookmaker, p.market): p for p in payloads}
+
+    h2h = by_bookmaker_market[("Bet365", "h2h")]
+    assert h2h.fixture_external_id == "1492316"
+    assert h2h.home_odds == 1.80
+    assert h2h.draw_odds == 3.50
+    assert h2h.away_odds == 5.00
+    assert h2h.updated_at == datetime(2026, 7, 29, 20, 3, 21, tzinfo=UTC)
+
+    bet365_total = by_bookmaker_market[("Bet365", "total")]
+    assert bet365_total.line == 2.5
+    assert bet365_total.over_odds == 1.80
+    assert bet365_total.under_odds == 2.00
+
+    niche_total = by_bookmaker_market[("Niche Book", "total")]
+    assert niche_total.line == 2.5
+    assert niche_total.over_odds == 1.85
+    assert niche_total.under_odds is None  # "Niche Book" never posted an Under 2.5 price
 
 
 def test_map_odds_response_to_payloads_no_match_winner_anywhere():
+    """A bookmaker with no Match Winner market still contributes whichever OTHER supported
+    markets it does have (here, Goals Over/Under) — h2h absence doesn't suppress everything."""
     row = {**ODDS_ROW, "bookmakers": [ODDS_ROW["bookmakers"][1]]}  # only "Niche Book"
-    assert _map_odds_response_to_payloads(row) == []
+    payloads = _map_odds_response_to_payloads(row)
+    assert len(payloads) == 1
+    assert payloads[0].market == "total"
+    assert payloads[0].bookmaker == "Niche Book"
+
+
+def test_map_odds_response_to_payloads_double_chance():
+    row = {
+        **ODDS_ROW,
+        "bookmakers": [
+            {
+                "id": 1,
+                "name": "Bet365",
+                "bets": [
+                    {
+                        "id": 12,
+                        "name": "Double Chance",
+                        "values": [
+                            {"value": "Home/Draw", "odd": "1.18"},
+                            {"value": "Home/Away", "odd": "1.22"},
+                            {"value": "Draw/Away", "odd": "2.05"},
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    payloads = _map_odds_response_to_payloads(row)
+    assert len(payloads) == 1
+    payload = payloads[0]
+    assert payload.market == "double_chance"
+    assert payload.home_odds == 1.18  # Home/Draw (1X)
+    assert payload.away_odds == 2.05  # Draw/Away (X2)
+    assert payload.draw_odds is None
+
+
+def test_map_odds_response_to_payloads_corners_total_only_maps_supported_line():
+    row = {
+        **ODDS_ROW,
+        "bookmakers": [
+            {
+                "id": 1,
+                "name": "Unibet",
+                "bets": [
+                    {
+                        "id": 45,
+                        "name": "Corners Over Under",
+                        "values": [
+                            {"value": "Over 8.5", "odd": "1.50"},
+                            {"value": "Under 8.5", "odd": "2.40"},
+                            {"value": "Over 9.5", "odd": "1.81"},
+                            {"value": "Under 9.5", "odd": "1.87"},
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    payloads = _map_odds_response_to_payloads(row)
+    # Only the 9.5 line is mapped (CORNERS_LINES) — 8.5 isn't a line this product surfaces.
+    assert len(payloads) == 1
+    payload = payloads[0]
+    assert payload.market == "corners_total"
+    assert payload.line == 9.5
+    assert payload.over_odds == 1.81
+    assert payload.under_odds == 1.87
 
 
 def test_map_injury_to_update_always_out():

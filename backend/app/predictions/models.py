@@ -32,6 +32,15 @@ class Prediction(Base):
         Enum(ConfidenceTier, name="confidence_tier"), nullable=False
     )
     expected_value: Mapped[float] = mapped_column(Float, nullable=True)
+    # Layer 1's own expected-goals output (football only) — previously computed then discarded;
+    # persisted so Over/Under-goals probabilities can be derived at read time (see
+    # app/models_ml/markets.py) without re-running inference. corners_xg_* are the new corners-
+    # Poisson-regressor outputs (same idea, a different target). All four null for NBA and for
+    # any football prediction made before this feature existed.
+    xg_home: Mapped[float | None] = mapped_column(Float, nullable=True)
+    xg_away: Mapped[float | None] = mapped_column(Float, nullable=True)
+    corners_xg_home: Mapped[float | None] = mapped_column(Float, nullable=True)
+    corners_xg_away: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

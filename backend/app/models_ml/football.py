@@ -87,10 +87,33 @@ class FootballModel(BaseModel):
         normalized = calibrated / total if total > 0 else raw_probs
 
         probs = dict(zip(self.CLASSES, normalized, strict=True))
+
+        # Corners-Poisson-regressors (Over/Under corners market, see app/models_ml/markets.py)
+        # — a separate pair of regressors bundled in the SAME artefact, reusing Layer 1's own
+        # feature vector (layer1_row) rather than needing any new live feature. Older artefacts
+        # trained before this feature existed simply don't have these keys — .get() keeps
+        # predict() working against them, with corners_xg_* left None (never fabricated).
+        corners_home_model = artefact.get("corners_home_model")
+        corners_away_model = artefact.get("corners_away_model")
+        corners_xg_home = (
+            max(0.0, float(corners_home_model.predict(layer1_row)[0]))
+            if corners_home_model is not None
+            else None
+        )
+        corners_xg_away = (
+            max(0.0, float(corners_away_model.predict(layer1_row)[0]))
+            if corners_away_model is not None
+            else None
+        )
+
         return PredictionResult(
             home_prob=float(probs["home"]),
             draw_prob=float(probs["draw"]),
             away_prob=float(probs["away"]),
+            xg_home=xg_home,
+            xg_away=xg_away,
+            corners_xg_home=corners_xg_home,
+            corners_xg_away=corners_xg_away,
         )
 
     def calibrate(self, val_features: list[dict], val_outcomes: list[str]) -> None:

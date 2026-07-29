@@ -59,10 +59,13 @@ def _american_to_decimal(american: float | None) -> float | None:
 
 def _map_event_to_odds_payloads(event: dict) -> list[OddsPayload]:
     """Pure, network/DB-free mapping — kept separate so it's directly unit-testable against a
-    recorded sample response. Only the moneyline ("h2h") market is mapped: spread/total don't
-    fit the odds table's generic home_odds/draw_odds/away_odds columns (those model a
-    three-way or two-way price, not a point-spread or an over/under line), and nothing
-    downstream currently consumes spread/total data."""
+    recorded sample response. Maps the moneyline ("h2h") market and, since this feature was
+    added, the "total" (Over/Under goals) market too — confirmed live (see CLAUDE.md) that
+    TheRundown's raw `total` block carries real lines/prices, not just a masked sentinel, for
+    the same unlocked affiliates as moneyline. `spread` still isn't mapped: nothing downstream
+    consumes a point-spread market. TheRundown has no double-chance or corners market at all
+    (its line blocks only ever have moneyline/spread/total keys) — those two markets can only
+    ever come from API-Football, for the leagues it covers odds for."""
     normalized_by_side = {t.get("is_home"): t for t in event.get("teams_normalized", [])}
     home_abbr = normalized_by_side.get(True, {}).get("abbreviation")
     away_abbr = normalized_by_side.get(False, {}).get("abbreviation")
@@ -70,36 +73,64 @@ def _map_event_to_odds_payloads(event: dict) -> list[OddsPayload]:
 
     payloads: list[OddsPayload] = []
     for line in event.get("lines", {}).values():
+        affiliate = line.get("affiliate", {}).get("affiliate_name", "unknown")
         moneyline = line.get("moneyline")
-        if not moneyline:
-            continue
+        if moneyline:
+            home_odds = _american_to_decimal(moneyline.get("moneyline_home"))
+            away_odds = _american_to_decimal(moneyline.get("moneyline_away"))
+            if home_odds is not None or away_odds is not None:
+                date_updated = moneyline.get("date_updated")
+                updated_at = (
+                    datetime.fromisoformat(date_updated.replace("Z", "+00:00"))
+                    if date_updated
+                    else datetime.now(UTC)
+                )
+                payloads.append(
+                    OddsPayload(
+                        fixture_external_id=event["event_id"],
+                        bookmaker=affiliate,
+                        market="h2h",
+                        home_odds=home_odds,
+                        draw_odds=_american_to_decimal(moneyline.get("moneyline_draw")),
+                        away_odds=away_odds,
+                        updated_at=updated_at,
+                        home_team_short_name=home_abbr,
+                        away_team_short_name=away_abbr,
+                        kickoff_utc=kickoff_utc,
+                    )
+                )
 
-        home_odds = _american_to_decimal(moneyline.get("moneyline_home"))
-        away_odds = _american_to_decimal(moneyline.get("moneyline_away"))
-        if home_odds is None and away_odds is None:
-            continue  # this book hasn't posted a line for this game
-
-        date_updated = moneyline.get("date_updated")
-        updated_at = (
-            datetime.fromisoformat(date_updated.replace("Z", "+00:00"))
-            if date_updated
-            else datetime.now(UTC)
-        )
-
-        payloads.append(
-            OddsPayload(
-                fixture_external_id=event["event_id"],
-                bookmaker=line.get("affiliate", {}).get("affiliate_name", "unknown"),
-                market="h2h",
-                home_odds=home_odds,
-                draw_odds=_american_to_decimal(moneyline.get("moneyline_draw")),
-                away_odds=away_odds,
-                updated_at=updated_at,
-                home_team_short_name=home_abbr,
-                away_team_short_name=away_abbr,
-                kickoff_utc=kickoff_utc,
-            )
-        )
+        total = line.get("total")
+        if total:
+            total_line = total.get("total_over")  # total_over == total_under, same line value
+            over_odds = _american_to_decimal(total.get("total_over_money"))
+            under_odds = _american_to_decimal(total.get("total_under_money"))
+            if total_line not in (None, _MASKED_ODDS_SENTINEL) and (
+                over_odds is not None or under_odds is not None
+            ):
+                date_updated = total.get("date_updated")
+                updated_at = (
+                    datetime.fromisoformat(date_updated.replace("Z", "+00:00"))
+                    if date_updated
+                    else datetime.now(UTC)
+                )
+                payloads.append(
+                    OddsPayload(
+                        fixture_external_id=event["event_id"],
+                        bookmaker=affiliate,
+                        market="total",
+                        home_odds=None,
+                        draw_odds=None,
+                        away_odds=None,
+                        updated_at=updated_at,
+                        home_team_short_name=home_abbr,
+                        away_team_short_name=away_abbr,
+                        kickoff_utc=kickoff_utc,
+                        line=float(total_line),
+                        over_odds=over_odds,
+                        under_odds=under_odds,
+                    )
+                )
     return payloads
 
 

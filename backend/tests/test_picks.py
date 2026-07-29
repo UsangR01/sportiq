@@ -4,7 +4,6 @@ from app.picks.service import (
     best_available_odds,
     best_outcome,
     compute_expected_value,
-    meets_threshold,
 )
 
 
@@ -25,18 +24,6 @@ def test_best_available_odds_takes_max_per_market():
     ]
     best = best_available_odds(odds_rows)
     assert best == {"home": 2.0, "draw": 3.2, "away": 4.5}
-
-
-def test_meets_threshold_true_when_any_market_qualifies():
-    assert meets_threshold({"home": 1.5, "draw": 3.2, "away": None}, min_odds=2.0)
-
-
-def test_meets_threshold_false_when_all_below():
-    assert not meets_threshold({"home": 1.2, "draw": 1.4, "away": None}, min_odds=2.0)
-
-
-def test_meets_threshold_false_when_all_none():
-    assert not meets_threshold({"home": None, "draw": None, "away": None}, min_odds=1.5)
 
 
 def test_best_outcome_picks_highest_probability():

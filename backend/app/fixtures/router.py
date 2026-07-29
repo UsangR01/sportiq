@@ -10,19 +10,56 @@ from app.core.database import get_db
 from app.fixtures.models import Fixture, FixtureLiveState, FixtureStatus, Team, TeamFeatures
 from app.fixtures.schemas import (
     BestPick,
+    ExtraMarketsResponse,
     FixtureDetail,
     FixtureSummary,
     LiveStateResponse,
     OddsLineResponse,
     PredictionResponse,
     TeamFeaturesResponse,
+    TotalsProbability,
 )
+from app.models_ml.markets import CORNERS_LINES, GOALS_LINES, double_chance_probs, over_under_probs
 from app.odds.models import Odds
 from app.picks.service import best_available_odds, best_outcome
 from app.predictions.models import Prediction
 from app.sports.models import League, Sport
 
 router = APIRouter(tags=["fixtures"])
+
+
+def _build_extra_markets(prediction: Prediction) -> ExtraMarketsResponse:
+    """Derives double chance and Over/Under goals/corners probabilities from an existing
+    Prediction row — see app/models_ml/markets.py for why none of this needs a new model or
+    a live recompute (double chance is arithmetic on home/draw/away; totals reuse the stored
+    xg_home/xg_away and corners_xg_home/corners_xg_away as a Poisson rate)."""
+    home_or_draw, away_or_draw = double_chance_probs(
+        prediction.home_prob, prediction.draw_prob, prediction.away_prob
+    )
+    goals_total = (
+        prediction.xg_home + prediction.xg_away
+        if prediction.xg_home is not None and prediction.xg_away is not None
+        else None
+    )
+    corners_total = (
+        prediction.corners_xg_home + prediction.corners_xg_away
+        if prediction.corners_xg_home is not None and prediction.corners_xg_away is not None
+        else None
+    )
+    goals_probs = over_under_probs(goals_total, GOALS_LINES)
+    corners_probs = over_under_probs(corners_total, CORNERS_LINES)
+    return ExtraMarketsResponse(
+        double_chance_home_or_draw_prob=home_or_draw,
+        double_chance_away_or_draw_prob=away_or_draw,
+        goals_totals=[
+            TotalsProbability(line=line, under_prob=under, over_prob=over)
+            for line, (under, over) in goals_probs.items()
+        ],
+        corners_totals=[
+            TotalsProbability(line=line, under_prob=under, over_prob=over)
+            for line, (under, over) in corners_probs.items()
+        ],
+    )
 
 
 def _fixture_query():
@@ -260,6 +297,7 @@ async def get_fixture(fixture_id: uuid.UUID, db: AsyncSession = Depends(get_db))
                 away_prob=latest_prediction.away_prob,
                 confidence_tier=latest_prediction.confidence_tier.value,
                 expected_value=latest_prediction.expected_value,
+                extra_markets=_build_extra_markets(latest_prediction),
             )
             if latest_prediction
             else None
@@ -312,4 +350,5 @@ async def get_fixture_prediction(fixture_id: uuid.UUID, db: AsyncSession = Depen
         away_prob=latest.away_prob,
         confidence_tier=latest.confidence_tier.value,
         expected_value=latest.expected_value,
+        extra_markets=_build_extra_markets(latest),
     )
