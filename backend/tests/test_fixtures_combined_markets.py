@@ -242,3 +242,81 @@ async def test_all_market_picks_ignores_market_query_param(
     assert row["best_pick"]["market"] == "h2h"
     markets = {p["market"] for p in row["all_market_picks"]}
     assert "corners_total" in markets  # still present despite market=h2h restricting best_pick
+
+
+@pytest.fixture
+async def seeded_completed_low_confidence_fixture():
+    """A COMPLETED fixture whose best pick never clears 60% anywhere — used to prove
+    min_probability/min_odds don't hide past results (they only gate future/live picks)."""
+    kickoff = datetime.now(UTC) - timedelta(days=1)
+    async with async_session_factory() as db:
+        slug = f"test-sport-{uuid.uuid4().hex[:8]}"
+        sport = Sport(slug=slug, name="Test Sport", model_type="test", active=True)
+        db.add(sport)
+        await db.flush()
+        league = League(
+            sport_id=sport.id,
+            slug="test-league",
+            name="Test League",
+            country="XX",
+            tier=1,
+            active=True,
+        )
+        db.add(league)
+        await db.flush()
+        home = Team(sport_id=sport.id, league_id=league.id, name="Home FC", external_id="1")
+        away = Team(sport_id=sport.id, league_id=league.id, name="Away FC", external_id="2")
+        db.add_all([home, away])
+        await db.flush()
+        fixture = Fixture(
+            sport_id=sport.id,
+            league_id=league.id,
+            external_id="fx-completed-low-conf",
+            home_team_id=home.id,
+            away_team_id=away.id,
+            kickoff_utc=kickoff,
+            status=FixtureStatus.COMPLETED,
+            season="2026",
+        )
+        db.add(fixture)
+        await db.flush()
+        db.add(
+            Prediction(
+                fixture_id=fixture.id,
+                model_version="test_model_v1",
+                home_prob=0.40,
+                draw_prob=0.30,
+                away_prob=0.30,
+                confidence_tier=ConfidenceTier.LOW,
+                created_at=datetime.now(UTC),
+            )
+        )
+        await db.commit()
+        await db.refresh(sport)
+        await db.refresh(fixture)
+
+    yield sport, fixture
+
+    async with async_session_factory() as db:
+        await db.execute(delete(Prediction).where(Prediction.fixture_id == fixture.id))
+        await db.execute(delete(Fixture).where(Fixture.sport_id == sport.id))
+        await db.execute(delete(Team).where(Team.sport_id == sport.id))
+        await db.execute(delete(League).where(League.sport_id == sport.id))
+        await db.execute(delete(Sport).where(Sport.id == sport.id))
+        await db.commit()
+
+
+async def test_completed_fixtures_are_never_hidden_by_min_probability_or_min_odds(
+    api_client, seeded_completed_low_confidence_fixture
+):
+    """Per explicit user report: "Results of past games are missing" — min_probability/
+    min_odds encode "is this worth betting on", which doesn't apply to a finished game being
+    reviewed for how the model actually performed."""
+    sport, fixture = seeded_completed_low_confidence_fixture
+    response = await api_client.get(
+        "/fixtures",
+        params={"sport_slug": sport.slug, "min_probability": 0.6, "min_odds": 1.5},
+    )
+    assert response.status_code == 200
+    ids = {row["id"] for row in response.json()}
+    assert str(fixture.id) in ids

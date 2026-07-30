@@ -363,8 +363,17 @@ async def list_fixtures(
     # probability of winning." min_odds only applies to fixtures with REAL odds on their best
     # pick — a probability-only pick can never clear an odds floor, by design (never fabricate
     # a price), so it's excluded too when min_odds is set.
+    #
+    # COMPLETED fixtures are a real exception to all of this: min_probability/min_odds encode
+    # "is this worth betting on", a question that only makes sense for a game that hasn't been
+    # decided yet. A finished game is being reviewed for how the model actually performed, not
+    # considered as a bet — filtering those out by the same threshold hid every past result
+    # from the feed entirely (the user's own report: "Results of past games are missing").
     filtered = []
     for summary in summaries:
+        if summary.status == "completed":
+            filtered.append(summary)
+            continue
         pick = summary.best_pick
         if pick is None:
             continue
