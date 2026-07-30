@@ -7,11 +7,10 @@ import { Platform, RefreshControl, SectionList, Text, View } from "react-native"
 import { DayStrip, type DaySelection } from "@/components/DayStrip";
 import { FixtureCard } from "@/components/fixtures/FixtureCard";
 import { GuestBanner } from "@/components/GuestBanner";
-import { CORNERS_LINES, GOALS_LINES, LineFilterChips, MarketFilterChips } from "@/components/MarketFilterChips";
 import { SportFilterChips } from "@/components/SportFilterChips";
 import { listFixtures } from "@/lib/api/fixtures";
 import { listSports } from "@/lib/api/sports";
-import type { FixtureSummary, PickMarket } from "@/lib/api/types";
+import type { FixtureSummary } from "@/lib/api/types";
 import { countryFlag } from "@/lib/countryFlags";
 import { useAuthStore } from "@/store/authStore";
 import { usePreferencesStore } from "@/store/preferencesStore";
@@ -89,10 +88,6 @@ export default function PicksScreen() {
   const [refreshing, setRefreshing] = useState(false);
 
   const [minProbability, setMinProbability] = useState(DEFAULT_MIN_PROBABILITY);
-  const [market, setMarket] = useState<PickMarket>("all");
-  const [goalsLine, setGoalsLine] = useState<number>(GOALS_LINES[1]); // 2.5, the standard line
-  const line =
-    market === "goals_total" ? goalsLine : market === "corners_total" ? CORNERS_LINES[0] : undefined;
 
   const hasStartedSlidingProb = useRef(false);
   const hasStartedSlidingOdds = useRef(false);
@@ -103,9 +98,12 @@ export default function PicksScreen() {
   const sportsQuery = useQuery({ queryKey: ["sports"], queryFn: listSports });
   const dayKey = daySelection === "live" ? "live" : daySelection.date.toDateString();
   const fixturesQuery = useQuery({
-    queryKey: ["fixtures", "picks", sportFilter, dayKey, market, line, minProbability, minOdds],
+    queryKey: ["fixtures", "picks", sportFilter, dayKey, minProbability, minOdds],
     queryFn: () => {
-      const marketParams = { market, line, min_probability: minProbability, min_odds: minOdds };
+      // market/line are deliberately omitted — the backend's default (combined best pick
+      // across every market: h2h, double chance, goals/corners O/U) is always what this
+      // screen wants now; per-market filtering was removed as UI clutter nobody needed.
+      const marketParams = { min_probability: minProbability, min_odds: minOdds };
       if (daySelection === "live") {
         return listFixtures({
           sport_slug: sportFilter ?? undefined,
@@ -193,10 +191,6 @@ export default function PicksScreen() {
         selected={sportFilter}
         onSelect={setSportFilter}
       />
-      <MarketFilterChips selected={market} onSelect={setMarket} />
-      {market === "goals_total" && (
-        <LineFilterChips lines={GOALS_LINES} selected={goalsLine} onSelect={setGoalsLine} />
-      )}
       <DayStrip selected={daySelection} onSelect={setDaySelection} />
       {isGuest && <GuestBanner />}
       <SectionList
@@ -227,7 +221,7 @@ export default function PicksScreen() {
             </Text>
           ) : (
             <Text className="mt-8 text-center text-gray-400">
-              No picks clear this probability/odds threshold for this day/filter.
+              No picks clear this probability/odds threshold for this day.
             </Text>
           )
         }
