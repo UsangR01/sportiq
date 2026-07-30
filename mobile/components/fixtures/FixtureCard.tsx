@@ -2,7 +2,7 @@ import { Link } from "expo-router";
 import { Pressable, Text, View } from "react-native";
 
 import type { FixtureSummary } from "@/lib/api/types";
-import { buildMarketBreakdown, evaluatePickCorrectness, pickHeadline, selectionLabel } from "@/lib/pickFormat";
+import { evaluatePickCorrectness, pickHeadline } from "@/lib/pickFormat";
 import { LiveBadge } from "./LiveBadge";
 
 function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
@@ -50,54 +50,6 @@ function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
           </Text>
         </View>
       )}
-    </View>
-  );
-}
-
-/** Full past-performance breakdown for a completed fixture — every market the model called
- * (h2h, double chance, goals/corners O/U), each with its own win/loss verdict, not just
- * best_pick's single winner. Per explicit user request: "I need all markets predicted in the
- * past to still be shown to evaluate performance... Everything should be shown." */
-function MarketBreakdown({ fixture }: { fixture: FixtureSummary }) {
-  const { live_state, all_market_picks } = fixture;
-  if (!live_state || all_market_picks.length === 0) return null;
-
-  const items = buildMarketBreakdown(
-    all_market_picks,
-    live_state.home_score,
-    live_state.away_score,
-    live_state.home_corners,
-    live_state.away_corners,
-  );
-  if (items.length === 0) return null;
-
-  return (
-    <View className="mt-3 flex-row flex-wrap gap-1.5 border-t border-gray-100 pt-2 dark:border-gray-800">
-      {items.map((item) => (
-        <View
-          key={item.key}
-          className={`rounded px-2 py-1 ${
-            item.correct === null
-              ? "bg-gray-100 dark:bg-gray-800"
-              : item.correct
-                ? "bg-green-100 dark:bg-green-900"
-                : "bg-red-100 dark:bg-red-900"
-          }`}
-        >
-          <Text
-            className={`text-[10px] font-medium ${
-              item.correct === null
-                ? "text-gray-500 dark:text-gray-400"
-                : item.correct
-                  ? "text-green-800 dark:text-green-200"
-                  : "text-red-800 dark:text-red-200"
-            }`}
-          >
-            {item.correct === null ? "" : item.correct ? "✓ " : "✗ "}
-            {item.label}: {selectionLabel(item.selection)} {Math.round(item.probability * 100)}%
-          </Text>
-        </View>
-      ))}
     </View>
   );
 }
@@ -155,8 +107,6 @@ export function FixtureCard({ fixture }: { fixture: FixtureSummary }) {
             <PredictionBadge fixture={fixture} />
           )}
         </View>
-
-        {isCompleted && <MarketBreakdown fixture={fixture} />}
       </Pressable>
     </Link>
   );
