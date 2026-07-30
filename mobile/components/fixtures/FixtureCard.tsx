@@ -5,6 +5,11 @@ import type { FixtureSummary } from "@/lib/api/types";
 import { evaluatePickCorrectness, pickHeadline } from "@/lib/pickFormat";
 import { LiveBadge } from "./LiveBadge";
 
+// One fixed width for every pick badge (verdict pill and upcoming-pick box alike) so a card
+// showing "1X 80%" lines up exactly with one showing "UNDER 9.5 100%" — the frame never
+// reflows around the market/text length.
+const BADGE_WIDTH = "w-[104px]";
+
 function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
   const { live_state, status, best_pick } = fixture;
   if (!live_state) return null;
@@ -40,11 +45,11 @@ function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
           all (a corners_total pick on a fixture settled before real corner counts existed). */}
       {isCompleted && best_pick && (
         <View
-          className={`mt-1 flex-row items-center rounded px-2 py-0.5 ${
+          className={`mt-1 items-center justify-center rounded px-1 py-1 ${BADGE_WIDTH} ${
             wasCorrect === null ? "bg-gray-500" : wasCorrect ? "bg-green-600" : "bg-red-500"
           }`}
         >
-          <Text className="text-[10px] font-bold text-white">
+          <Text className="text-center text-[10px] font-bold text-white" numberOfLines={1}>
             {wasCorrect === null ? "" : wasCorrect ? "✓ " : "✗ "}
             {pickHeadline(best_pick)} {Math.round(best_pick.probability * 100)}%
           </Text>
@@ -62,9 +67,11 @@ function PredictionBadge({ fixture }: { fixture: FixtureSummary }) {
   // min-odds filters server-side (see app/(tabs)/index.tsx) — so this badge is always shown
   // highlighted, never demoted to a plain "Details" line the way it used to be.
   return (
-    <View className="items-center rounded-lg bg-blue-600 px-3 py-2">
-      <Text className="text-xs font-bold text-white">{pickHeadline(pick)}</Text>
-      <Text className="text-xs text-blue-100">
+    <View className={`items-center justify-center rounded-lg bg-blue-600 px-2 py-2 ${BADGE_WIDTH}`}>
+      <Text className="text-center text-xs font-bold text-white" numberOfLines={1}>
+        {pickHeadline(pick)}
+      </Text>
+      <Text className="text-center text-xs text-blue-100" numberOfLines={1}>
         {Math.round(pick.probability * 100)}%{pick.odds ? ` · ${pick.odds.toFixed(2)}` : ""}
       </Text>
     </View>

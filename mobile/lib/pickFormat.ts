@@ -3,12 +3,15 @@
 // totals). Used by FixtureCard's badges (Picks feed) so a corners or double-chance pick reads
 // as clearly as a plain h2h one.
 
+// Kept short on purpose — these render inside a fixed-width pill badge
+// (see FixtureCard.tsx) sized to fit the longest realistic case ("UNDER 9.5 100%").
+// The fixture detail screen spells "1X"/"X2" out in its own longer-form copy.
 const SELECTION_LABELS: Record<string, string> = {
   home: "HOME",
   draw: "DRAW",
   away: "AWAY",
-  "1X": "1X (Home/Draw)",
-  X2: "X2 (Away/Draw)",
+  "1X": "1X",
+  X2: "X2",
   over: "OVER",
   under: "UNDER",
 };
