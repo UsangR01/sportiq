@@ -44,7 +44,8 @@ class FixturePayload:
     away_team_name: str | None = None
     home_team_short_name: str | None = None
     away_team_short_name: str | None = None
-    status: str = "scheduled"  # "scheduled" | "live" | "completed" — matches FixtureStatus
+    # "scheduled" | "live" | "completed" | "postponed" — matches FixtureStatus
+    status: str = "scheduled"
     # Not part of the original shape — needed to show a score inline (Home feed, fixture
     # detail) instead of requiring a separate live-scores source. Real for both adapters that
     # implement fetch_fixtures for real (API-Football, BallDontLie) since their /fixtures-

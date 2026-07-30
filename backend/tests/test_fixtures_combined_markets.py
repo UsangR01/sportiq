@@ -320,3 +320,108 @@ async def test_completed_fixtures_are_never_hidden_by_min_probability_or_min_odd
     assert response.status_code == 200
     ids = {row["id"] for row in response.json()}
     assert str(fixture.id) in ids
+
+
+@pytest.fixture
+async def seeded_postponed_fixture_with_high_confidence_prediction():
+    """A POSTPONED fixture that still carries a real Prediction/Odds pair from before the
+    postponement was known — its best pick would easily clear a 60%/1.50 floor if it were
+    treated as an ordinary scheduled fixture. Used to prove min_probability/min_odds never
+    hide it (same reasoning as a completed fixture) AND that its best_pick/all_market_picks
+    are suppressed rather than showing a stale pre-postponement pick as if still live."""
+    kickoff = datetime.now(UTC) - timedelta(days=1)
+    async with async_session_factory() as db:
+        slug = f"test-sport-{uuid.uuid4().hex[:8]}"
+        sport = Sport(slug=slug, name="Test Sport", model_type="test", active=True)
+        db.add(sport)
+        await db.flush()
+        league = League(
+            sport_id=sport.id,
+            slug="test-league",
+            name="Test League",
+            country="XX",
+            tier=1,
+            active=True,
+        )
+        db.add(league)
+        await db.flush()
+        home = Team(sport_id=sport.id, league_id=league.id, name="Home FC", external_id="1")
+        away = Team(sport_id=sport.id, league_id=league.id, name="Away FC", external_id="2")
+        db.add_all([home, away])
+        await db.flush()
+        fixture = Fixture(
+            sport_id=sport.id,
+            league_id=league.id,
+            external_id="fx-postponed",
+            home_team_id=home.id,
+            away_team_id=away.id,
+            kickoff_utc=kickoff,
+            status=FixtureStatus.POSTPONED,
+            season="2026",
+        )
+        db.add(fixture)
+        await db.flush()
+        db.add(
+            Odds(
+                fixture_id=fixture.id,
+                bookmaker="TestBook",
+                market=OddsMarket.H2H,
+                home_odds=1.30,
+                draw_odds=5.0,
+                away_odds=8.0,
+                updated_at=datetime.now(UTC),
+            )
+        )
+        db.add(
+            Prediction(
+                fixture_id=fixture.id,
+                model_version="test_model_v1",
+                home_prob=0.85,
+                draw_prob=0.10,
+                away_prob=0.05,
+                confidence_tier=ConfidenceTier.HIGH,
+                created_at=datetime.now(UTC),
+            )
+        )
+        await db.commit()
+        await db.refresh(sport)
+        await db.refresh(fixture)
+
+    yield sport, fixture
+
+    async with async_session_factory() as db:
+        await db.execute(delete(Odds).where(Odds.fixture_id == fixture.id))
+        await db.execute(delete(Prediction).where(Prediction.fixture_id == fixture.id))
+        await db.execute(delete(Fixture).where(Fixture.sport_id == sport.id))
+        await db.execute(delete(Team).where(Team.sport_id == sport.id))
+        await db.execute(delete(League).where(League.sport_id == sport.id))
+        await db.execute(delete(Sport).where(Sport.id == sport.id))
+        await db.commit()
+
+
+async def test_postponed_fixtures_are_never_hidden_by_min_probability_or_min_odds(
+    api_client, seeded_postponed_fixture_with_high_confidence_prediction
+):
+    sport, fixture = seeded_postponed_fixture_with_high_confidence_prediction
+    response = await api_client.get(
+        "/fixtures",
+        params={"sport_slug": sport.slug, "min_probability": 0.6, "min_odds": 1.5},
+    )
+    assert response.status_code == 200
+    ids = {row["id"] for row in response.json()}
+    assert str(fixture.id) in ids
+
+
+async def test_postponed_fixtures_never_show_a_stale_pick(
+    api_client, seeded_postponed_fixture_with_high_confidence_prediction
+):
+    """Per explicit user report: a postponed fixture was still showing its original
+    market prediction/percentage/odds as if the game were still on. best_pick and
+    all_market_picks must both be suppressed regardless of how confident/well-priced the
+    pre-postponement Prediction/Odds rows were."""
+    sport, fixture = seeded_postponed_fixture_with_high_confidence_prediction
+    response = await api_client.get("/fixtures", params={"sport_slug": sport.slug})
+    row = next(r for r in response.json() if r["id"] == str(fixture.id))
+    assert row["status"] == "postponed"
+    assert row["best_pick"] is None
+    assert row["all_market_picks"] == []

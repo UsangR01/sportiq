@@ -47,7 +47,12 @@ export interface FixtureSummary {
   home_team: string;
   away_team: string;
   kickoff_utc: string;
-  status: "scheduled" | "live" | "completed";
+  // "postponed" covers every provider status that isn't actually live/scheduled/completed
+  // (postponed/cancelled/abandoned/suspended/...) — see
+  // backend/app/fixtures/models.py:FixtureStatus. best_pick/all_market_picks are always
+  // null/empty for a postponed fixture (the backend never shows a pre-postponement
+  // prediction as if it were still live), so FixtureCard renders a plain neutral badge here.
+  status: "scheduled" | "live" | "completed" | "postponed";
   season: string;
   best_pick: BestPick | null;
   // Every real candidate across all four markets (h2h, double chance, goals/corners O/U) —

@@ -3,7 +3,7 @@ import type { FixtureDetail, FixtureSummary } from "./types";
 
 export interface ListFixturesParams {
   sport_slug?: string;
-  status?: "scheduled" | "live" | "completed";
+  status?: "scheduled" | "live" | "completed" | "postponed";
   limit?: number;
   /** ISO datetime strings — backend already supported this filter, just never had a caller. */
   date_from?: string;

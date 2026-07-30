@@ -73,11 +73,17 @@ def test_map_status_live():
 
 def test_map_status_postponed_is_not_live():
     # Confirmed live on a real matchday: API-Football genuinely returns "PST" for a real
-    # postponed fixture. The old blanket "anything else is live" fallback would have shown a
-    # LIVE badge with no score for a match that isn't actually happening.
-    assert _map_status("PST") == "scheduled"
-    assert _map_status("CANC") == "scheduled"
-    assert _map_status("SUSP") == "scheduled"
+    # postponed fixture. Previously bucketed into "scheduled" (see git history) — which turned
+    # out to be actively misleading, since a scheduled fixture still gets a normal market
+    # prediction/odds badge in the Picks feed. Now its own real status instead.
+    assert _map_status("PST") == "postponed"
+    assert _map_status("CANC") == "postponed"
+    assert _map_status("SUSP") == "postponed"
+    assert _map_status("ABD") == "postponed"
+    assert _map_status("INT") == "postponed"
+    assert _map_status("TBD") == "postponed"
+    assert _map_status("AWD") == "postponed"
+    assert _map_status("WO") == "postponed"
 
 
 def test_map_fixture_to_payload():

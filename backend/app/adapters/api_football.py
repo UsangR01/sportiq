@@ -56,22 +56,27 @@ def _current_football_season(league: str, now: datetime | None = None) -> int:
 
 #  Confirmed live on a real matchday (see CLAUDE.md): API-Football genuinely returns "PST"
 # for a real postponed fixture, not a hypothetical edge case — 4 real Brasileirão fixtures
-# were postponed while backfilling for this feature. fixtures.status has no
-# cancelled/postponed value (a pre-existing, documented TDD §2.1/§2.3 gap — see CLAUDE.md),
-# so these map to "scheduled" as the least-misleading available bucket rather than falling
-# through to the old blanket "anything else is live" default, which would show a LIVE badge
-# with no score for a match that isn't actually happening.
+# were postponed while backfilling for this feature. fixtures.status originally had no
+# cancelled/postponed value (a pre-existing, documented TDD §2.1/§2.3 gap — see CLAUDE.md);
+# these used to map to "scheduled" as the least-misleading available bucket, which turned out
+# to be actively misleading in its own right — the mobile Picks feed kept showing a live
+# market prediction/odds badge for a game that was never going to be played (the user's own
+# report, from a real Brasileirão postponement: "originally scheduled games... postponed...
+# but they are still on display"). Now maps to its own POSTPONED status instead (see
+# app/fixtures/models.py:FixtureStatus) — still one shared bucket for all 8 of these
+# non-live-non-scheduled states, not 8 individually modeled ones, same scope cut as before.
 _NOT_ACTUALLY_LIVE_STATUSES = {"PST", "CANC", "ABD", "SUSP", "INT", "TBD", "AWD", "WO"}
 
 
 def _map_status(short_status: str) -> str:
     """API-Football's fixture.status.short: "NS" (not started) before kickoff, "FT"/"AET"/
-    "PEN" once finished, "PST"/"CANC"/etc. are real non-live states our schema can't represent
-    precisely yet (see _NOT_ACTUALLY_LIVE_STATUSES), anything else (1H/HT/2H/ET/BT/P) is
-    genuinely in progress.
+    "PEN" once finished, "PST"/"CANC"/etc. are real non-live, non-scheduled states (see
+    _NOT_ACTUALLY_LIVE_STATUSES), anything else (1H/HT/2H/ET/BT/P) is genuinely in progress.
     """
-    if short_status == "NS" or short_status in _NOT_ACTUALLY_LIVE_STATUSES:
+    if short_status == "NS":
         return "scheduled"
+    if short_status in _NOT_ACTUALLY_LIVE_STATUSES:
+        return "postponed"
     if short_status in ("FT", "AET", "PEN"):
         return "completed"
     return "live"

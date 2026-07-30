@@ -59,6 +59,26 @@ function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
   );
 }
 
+/** Shown in place of a score or a market prediction/odds badge for a fixture that isn't
+ * actually being played as originally scheduled (postponed/cancelled/abandoned/... — see
+ * backend/app/fixtures/models.py:FixtureStatus.POSTPONED). The backend already nulls out
+ * best_pick/all_market_picks/prediction for these, so there's nothing stale to accidentally
+ * render here — this is the ONLY thing shown, never a leftover pre-postponement pick. */
+function PostponedBadge() {
+  return (
+    <View
+      className={`items-center justify-center rounded-lg bg-gray-200 px-2 py-2 dark:bg-gray-700 ${BADGE_WIDTH}`}
+    >
+      <Text
+        className="text-center text-xs font-bold text-gray-600 dark:text-gray-300"
+        numberOfLines={1}
+      >
+        POSTPONED
+      </Text>
+    </View>
+  );
+}
+
 function PredictionBadge({ fixture }: { fixture: FixtureSummary }) {
   const pick = fixture.best_pick;
   if (!pick) return null;
@@ -82,6 +102,7 @@ export function FixtureCard({ fixture }: { fixture: FixtureSummary }) {
   const kickoff = new Date(fixture.kickoff_utc);
   const isLive = fixture.status === "live";
   const isCompleted = fixture.status === "completed";
+  const isPostponed = fixture.status === "postponed";
 
   return (
     <Link href={`/fixture/${fixture.id}`} asChild>
@@ -93,6 +114,10 @@ export function FixtureCard({ fixture }: { fixture: FixtureSummary }) {
                 <LiveBadge />
               ) : isCompleted ? (
                 <Text className="text-xs font-semibold uppercase text-gray-400">Full-time</Text>
+              ) : isPostponed ? (
+                <Text className="text-xs font-semibold uppercase text-amber-600 dark:text-amber-500">
+                  Postponed
+                </Text>
               ) : (
                 <Text className="text-xs text-gray-400">
                   {kickoff.toLocaleDateString()}{" "}
@@ -108,7 +133,9 @@ export function FixtureCard({ fixture }: { fixture: FixtureSummary }) {
             </Text>
           </View>
 
-          {isLive || isCompleted ? (
+          {isPostponed ? (
+            <PostponedBadge />
+          ) : isLive || isCompleted ? (
             <ScoreBadge fixture={fixture} />
           ) : (
             <PredictionBadge fixture={fixture} />

@@ -13,6 +13,14 @@ class FixtureStatus(str, enum.Enum):
     SCHEDULED = "scheduled"
     LIVE = "live"
     COMPLETED = "completed"
+    # A catch-all for every real "not actually happening as scheduled" provider status
+    # (postponed/cancelled/abandoned/suspended/interrupted/TBD/awarded/walkover — see
+    # app/adapters/api_football.py:_NOT_ACTUALLY_LIVE_STATUSES) — previously all silently
+    # bucketed into SCHEDULED, which showed a normal market prediction/odds badge for a game
+    # that isn't being played. Not modeling each of those 8 states individually is a deliberate
+    # scope cut (per CLAUDE.md's TDD §2.1/§2.3 divergence note) — "postponed" is the
+    # least-misleading single label for "this fixture is not resolving as originally listed".
+    POSTPONED = "postponed"
 
 
 class InjuryStatus(str, enum.Enum):

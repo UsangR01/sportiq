@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
 from app.core.database import async_session_factory
 from app.fixtures.models import Fixture, FixtureStatus, Team
@@ -120,3 +120,24 @@ async def test_fixture_detail_includes_corners_totals(
     assert len(corners_totals) == 1
     assert corners_totals[0]["line"] == 9.5
     assert corners_totals[0]["under_prob"] + corners_totals[0]["over_prob"] == pytest.approx(1.0)
+
+
+async def test_fixture_detail_suppresses_prediction_once_postponed(
+    api_client, seeded_fixture_with_full_prediction
+):
+    """A fixture postponed after its Prediction row was already written must not keep
+    surfacing that pre-postponement call — per explicit user report, the original market
+    prediction/percentage/odds should never still be shown once a game isn't being played."""
+    sport, fixture = seeded_fixture_with_full_prediction
+    async with async_session_factory() as db:
+        db_fixture = (
+            await db.execute(select(Fixture).where(Fixture.id == fixture.id))
+        ).scalar_one()
+        db_fixture.status = FixtureStatus.POSTPONED
+        await db.commit()
+
+    response = await api_client.get(f"/fixtures/{fixture.id}")
+    body = response.json()
+    assert body["status"] == "postponed"
+    assert body["prediction"] is None
+    assert body["best_pick"] is None

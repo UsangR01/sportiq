@@ -183,9 +183,13 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
                 db.add(fixture)
                 await db.flush()  # populate fixture.id for the live-state upsert below
             else:
-                # TODO: TDD §2.3 says "cancelled/postponed fixtures are updated", but the
-                # fixtures.status enum in §2.1 only defines scheduled|live|completed — no
-                # cancelled/postponed value. Status transitions we DO support get applied here.
+                # TDD §2.3's "cancelled/postponed fixtures are updated" is now real for
+                # football (see app/adapters/api_football.py:_map_status) via FixtureStatus.
+                # POSTPONED — a single shared bucket for every non-live/non-scheduled provider
+                # status, not one enum value per real-world reason. BallDontLie has no
+                # equivalent signal at all (its status field is a free-form string with no
+                # postponed marker — see balldontlie.py:_map_status), so NBA fixtures can still
+                # only ever transition scheduled -> live -> completed.
                 new_status = FixtureStatus(payload.status)
                 if existing.status != new_status:
                     existing.status = new_status
@@ -199,12 +203,14 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
         # §2.3) — last 10 matches, xG, H2H via the stats adapter. Completed fixtures (now
         # real thanks to the backfill above) don't need pre-game features or a prediction —
         # skipping them avoids wasted fetch_team_stats calls on games that already happened.
+        # POSTPONED fixtures are excluded for the same reason: there's no game to build a
+        # pre-game feature vector or prediction for until/unless it's rescheduled.
         upcoming = (
             (
                 await db.execute(
                     select(Fixture).where(
                         Fixture.league_id == league.id,
-                        Fixture.status != FixtureStatus.COMPLETED,
+                        Fixture.status.notin_([FixtureStatus.COMPLETED, FixtureStatus.POSTPONED]),
                     )
                 )
             )

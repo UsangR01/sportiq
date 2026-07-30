@@ -345,11 +345,20 @@ async def list_fixtures(
     best_picks, all_picks = await _bulk_best_picks(db, fixture_ids, market=market, line=line)
     live_states = await _bulk_live_states(db, fixture_ids)
 
+    # A POSTPONED fixture never gets a best_pick/all_market_picks, regardless of whatever
+    # Prediction row might already exist for it — showing "the model would have picked X" for
+    # a game that isn't being played is exactly the misleading display the user reported
+    # ("the postponed should be displayed in place of the original market prediction/
+    # percentage/odd"). The mobile client renders a plain POSTPONED badge off `status` alone.
     summaries = [
         _to_summary(
             *row,
-            best_pick=best_picks.get(row[0].id),
-            all_market_picks=all_picks.get(row[0].id),
+            best_pick=(
+                best_picks.get(row[0].id) if row[0].status != FixtureStatus.POSTPONED else None
+            ),
+            all_market_picks=(
+                all_picks.get(row[0].id) if row[0].status != FixtureStatus.POSTPONED else None
+            ),
             live_state=live_states.get(row[0].id),
         )
         for row in rows
@@ -369,9 +378,12 @@ async def list_fixtures(
     # decided yet. A finished game is being reviewed for how the model actually performed, not
     # considered as a bet — filtering those out by the same threshold hid every past result
     # from the feed entirely (the user's own report: "Results of past games are missing").
+    # POSTPONED fixtures are the same kind of exception, for the same reason plus one more:
+    # they have no best_pick at all now (see above), so the ordinary "pick is None -> drop it"
+    # branch below would silently hide them too — exactly the bug the user reported.
     filtered = []
     for summary in summaries:
-        if summary.status == "completed":
+        if summary.status in ("completed", "postponed"):
             filtered.append(summary)
             continue
         pick = summary.best_pick
@@ -445,6 +457,10 @@ async def get_fixture(fixture_id: uuid.UUID, db: AsyncSession = Depends(get_db))
             ),
         ).model_dump(),
         odds=[OddsLineResponse.model_validate(o, from_attributes=True) for o in odds_rows],
+        # Same suppression as list_fixtures's best_pick/all_market_picks: a POSTPONED fixture
+        # keeps whatever Prediction row was written before the postponement was known, but
+        # showing it here would be exactly the misleading "original market prediction" the
+        # user reported still being displayed for a game that isn't being played.
         prediction=(
             PredictionResponse(
                 model_version=latest_prediction.model_version,
@@ -455,7 +471,7 @@ async def get_fixture(fixture_id: uuid.UUID, db: AsyncSession = Depends(get_db))
                 expected_value=latest_prediction.expected_value,
                 extra_markets=_build_extra_markets(latest_prediction),
             )
-            if latest_prediction
+            if latest_prediction and fixture.status != FixtureStatus.POSTPONED
             else None
         ),
         home_team_form=(
