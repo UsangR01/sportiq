@@ -205,3 +205,40 @@ async def test_goals_total_market_requires_line(api_client, seeded_multi_market_
         "/fixtures", params={"sport_slug": sport.slug, "market": "goals_total"}
     )
     assert response.status_code == 422
+
+
+async def test_all_market_picks_includes_every_market_not_just_the_best(
+    api_client, seeded_multi_market_fixtures
+):
+    """Per explicit user request: past predictions must show every market (h2h, double
+    chance, goals/corners O/U), not just the single winning best_pick."""
+    sport, fixture_a, _fixture_b = seeded_multi_market_fixtures
+    response = await api_client.get("/fixtures", params={"sport_slug": sport.slug})
+    body = response.json()
+    row = next(r for r in body if r["id"] == str(fixture_a.id))
+
+    markets = {p["market"] for p in row["all_market_picks"]}
+    assert markets == {"h2h", "double_chance", "corners_total"}  # no goals_total: no xg set
+
+    h2h_selections = {p["selection"] for p in row["all_market_picks"] if p["market"] == "h2h"}
+    assert h2h_selections == {"home", "draw", "away"}  # every h2h outcome, not just the best
+
+    dc_selections = {
+        p["selection"] for p in row["all_market_picks"] if p["market"] == "double_chance"
+    }
+    assert dc_selections == {"1X", "X2"}
+
+
+async def test_all_market_picks_ignores_market_query_param(
+    api_client, seeded_multi_market_fixtures
+):
+    """market=h2h restricts best_pick, but all_market_picks always stays the FULL breakdown —
+    it's meant for evaluating past performance across every market, independent of whichever
+    single market the caller asked best_pick to be restricted to."""
+    sport, fixture_a, _fixture_b = seeded_multi_market_fixtures
+    response = await api_client.get("/fixtures", params={"sport_slug": sport.slug, "market": "h2h"})
+    body = response.json()
+    row = next(r for r in body if r["id"] == str(fixture_a.id))
+    assert row["best_pick"]["market"] == "h2h"
+    markets = {p["market"] for p in row["all_market_picks"]}
+    assert "corners_total" in markets  # still present despite market=h2h restricting best_pick

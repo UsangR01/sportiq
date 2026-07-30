@@ -55,6 +55,14 @@ class FixtureSummary(BaseModel):
     status: str
     season: str
     best_pick: BestPick | None = None
+    # Every real candidate across all four markets (h2h, double chance, goals/corners O/U) —
+    # NOT just best_pick's single winner — so a past/completed fixture can show a full
+    # win/loss breakdown across every market for evaluating model performance, per explicit
+    # user request ("I need all markets predicted in the past to still be shown... Over and
+    # Under, double chances, corners. Everything should be shown"). Always the FULL,
+    # market-param-independent list (unlike best_pick, which respects GET /fixtures's own
+    # market/line restriction) — see app/fixtures/router.py:_bulk_best_picks.
+    all_market_picks: list[BestPick] = []
     # Present for both in-progress and completed fixtures (see
     # app/workers/ingest_fixtures.py:_upsert_live_state) — null for a fixture that hasn't
     # started. Surfaced in the list view too, not just fixture detail, so the Home feed can

@@ -46,6 +46,11 @@ export interface FixtureSummary {
   status: "scheduled" | "live" | "completed";
   season: string;
   best_pick: BestPick | null;
+  // Every real candidate across all four markets (h2h, double chance, goals/corners O/U) —
+  // not just best_pick's single winner. Used to show a full win/loss breakdown for a
+  // completed fixture, per explicit user request ("I need all markets predicted in the past
+  // to still be shown... Everything should be shown").
+  all_market_picks: BestPick[];
   live_state: LiveStateResponse | null;
 }
 

@@ -103,6 +103,7 @@ def _to_summary(
     home_name: str,
     away_name: str,
     best_pick: BestPick | None = None,
+    all_market_picks: list[BestPick] | None = None,
     live_state: LiveStateResponse | None = None,
 ) -> FixtureSummary:
     return FixtureSummary(
@@ -117,6 +118,7 @@ def _to_summary(
         status=fixture.status.value,
         season=fixture.season,
         best_pick=best_pick,
+        all_market_picks=all_market_picks or [],
         live_state=live_state,
     )
 
@@ -200,6 +202,16 @@ def _all_market_candidates(
     return candidates
 
 
+def _candidate_to_best_pick(candidate: _MarketCandidate) -> BestPick:
+    return BestPick(
+        selection=candidate.selection,
+        probability=candidate.probability,
+        odds=candidate.odds,
+        market=candidate.market,
+        line=candidate.line,
+    )
+
+
 def _pick_best(candidates: list[_MarketCandidate]) -> BestPick | None:
     """The single highest-probability candidate that has real odds; if NONE of the candidates
     have real odds yet, falls back to the highest-probability candidate overall (probability-
@@ -209,19 +221,12 @@ def _pick_best(candidates: list[_MarketCandidate]) -> BestPick | None:
     pool = with_odds or [c for c in candidates if c.probability is not None]
     if not pool:
         return None
-    best = max(pool, key=lambda c: c.probability)
-    return BestPick(
-        selection=best.selection,
-        probability=best.probability,
-        odds=best.odds,
-        market=best.market,
-        line=best.line,
-    )
+    return _candidate_to_best_pick(max(pool, key=lambda c: c.probability))
 
 
 async def _bulk_best_picks(
     db: AsyncSession, fixture_ids: list, market: str | None = None, line: float | None = None
-) -> dict:
+) -> tuple[dict, dict]:
     """Computes each fixture's single best pick, drawn from ACROSS every market (h2h, double
     chance, Over/Under goals, Over/Under corners) by default — per the user's explicit ask
     that the feed surface "the best odds with the highest probability of winning" regardless
@@ -230,9 +235,15 @@ async def _bulk_best_picks(
     market/line params). One bulk query each for odds and predictions rather than a
     per-fixture round trip. Unlike /picks, this never filters fixtures out by odds
     threshold on its own — every fixture that has a real prediction gets a best_pick entry,
-    odds or not; GET /fixtures's own min_probability/min_odds params do that filtering."""
+    odds or not; GET /fixtures's own min_probability/min_odds params do that filtering.
+
+    ALSO returns every real candidate across all four markets per fixture (ignoring the
+    market/line restriction — that only applies to the single best_pick), so a past fixture
+    can show a full win/loss breakdown across every market, not just its single best pick —
+    per the user's explicit ask: "I need all markets predicted in the past to still be
+    shown... Over and Under, double chances, corners. Everything should be shown."."""
     if not fixture_ids:
-        return {}
+        return {}, {}
 
     odds_rows = (
         (await db.execute(select(Odds).where(Odds.fixture_id.in_(fixture_ids)))).scalars().all()
@@ -264,22 +275,25 @@ async def _bulk_best_picks(
         if existing is None or p.created_at > existing.created_at:
             latest_prediction_by_fixture[p.fixture_id] = p
 
-    picks: dict = {}
+    best_picks: dict = {}
+    all_picks: dict = {}
     for fixture_id, prediction in latest_prediction_by_fixture.items():
         odds_by_market = {
             db_market: odds_by_fixture_market.get((fixture_id, db_market), [])
             for db_market in ("h2h", "double_chance", "total", "corners_total")
         }
         candidates = _all_market_candidates(prediction, odds_by_market)
+        all_picks[fixture_id] = [_candidate_to_best_pick(c) for c in candidates]
+
         if market and market != "all":
             candidates = [
                 c for c in candidates if c.market == market and (line is None or c.line == line)
             ]
         best = _pick_best(candidates)
         if best is not None:
-            picks[fixture_id] = best
+            best_picks[fixture_id] = best
 
-    return picks
+    return best_picks, all_picks
 
 
 @router.get("/fixtures", response_model=list[FixtureSummary])
@@ -328,12 +342,15 @@ async def list_fixtures(
 
     rows = (await db.execute(stmt)).all()
     fixture_ids = [row[0].id for row in rows]
-    best_picks = await _bulk_best_picks(db, fixture_ids, market=market, line=line)
+    best_picks, all_picks = await _bulk_best_picks(db, fixture_ids, market=market, line=line)
     live_states = await _bulk_live_states(db, fixture_ids)
 
     summaries = [
         _to_summary(
-            *row, best_pick=best_picks.get(row[0].id), live_state=live_states.get(row[0].id)
+            *row,
+            best_pick=best_picks.get(row[0].id),
+            all_market_picks=all_picks.get(row[0].id),
+            live_state=live_states.get(row[0].id),
         )
         for row in rows
     ]
