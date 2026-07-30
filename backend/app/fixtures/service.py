@@ -54,10 +54,17 @@ async def find_fixture_by_abbreviations_and_time(
     nothing matches — the caller should skip that event rather than mis-attribute odds.
 
     league_id is optional and was never needed for NBA (one league per sport_id), but
-    football has 5 leagues sharing one sport_id — two teams in different leagues could in
+    football has 5+ leagues sharing one sport_id — two teams in different leagues could in
     principle share an abbreviation, which would make the plain sport_id-scoped query below
     ambiguous (MultipleResultsFound). Callers that know the league (ingest_odds.py, inside a
-    per-league loop) should pass it; omitting it preserves the exact prior NBA behavior."""
+    per-league loop) should pass it; omitting it preserves the exact prior NBA behavior.
+
+    Even scoped to one league, short_name isn't guaranteed unique — confirmed live via a real
+    MultipleResultsFound crash while ingesting MLS odds (two real clubs, Colorado Rapids and
+    Columbus Crew, share API-Football's own "COL" team code; the same collision turned up in
+    3 other leagues too — see CLAUDE.md). `.first()` treats an ambiguous match the same as no
+    match at all — this function's own contract is to never guess, and an ambiguous multi-hit
+    is exactly the case it can't confidently resolve."""
     if not home_abbreviation or not away_abbreviation:
         return None
 
@@ -67,19 +74,25 @@ async def find_fixture_by_abbreviations_and_time(
         home_query = home_query.where(Team.league_id == league_id)
         away_query = away_query.where(Team.league_id == league_id)
 
-    home_team = (await db.execute(home_query)).scalar_one_or_none()
-    away_team = (await db.execute(away_query)).scalar_one_or_none()
-    if home_team is None or away_team is None:
+    home_teams = (await db.execute(home_query)).scalars().all()
+    away_teams = (await db.execute(away_query)).scalars().all()
+    if len(home_teams) != 1 or len(away_teams) != 1:
         return None
+    home_team, away_team = home_teams[0], away_teams[0]
 
     window = timedelta(hours=tolerance_hours)
-    return (
-        await db.execute(
-            select(Fixture).where(
-                Fixture.sport_id == sport_id,
-                Fixture.home_team_id == home_team.id,
-                Fixture.away_team_id == away_team.id,
-                Fixture.kickoff_utc.between(kickoff_utc - window, kickoff_utc + window),
+    matches = (
+        (
+            await db.execute(
+                select(Fixture).where(
+                    Fixture.sport_id == sport_id,
+                    Fixture.home_team_id == home_team.id,
+                    Fixture.away_team_id == away_team.id,
+                    Fixture.kickoff_utc.between(kickoff_utc - window, kickoff_utc + window),
+                )
             )
         )
-    ).scalar_one_or_none()
+        .scalars()
+        .all()
+    )
+    return matches[0] if len(matches) == 1 else None

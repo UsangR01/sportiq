@@ -58,6 +58,9 @@ FOOTBALL_LEAGUES = [
     ("laliga", "La Liga", "Spain"),
     ("seriea", "Serie A", "Italy"),
     ("brasileirao", "Série A", "Brazil"),
+    ("scottish_prem", "Scottish Premiership", "Scotland"),
+    ("mls", "Major League Soccer", "USA"),
+    ("csl", "Chinese Super League", "China"),
 ]
 
 

@@ -123,3 +123,34 @@ async def test_find_fixture_returns_none_for_missing_abbreviation():
             kickoff_utc=datetime.now(UTC),
         )
     assert found is None
+
+
+async def test_find_fixture_returns_none_instead_of_crashing_on_ambiguous_short_name(
+    seeded_fixture,
+):
+    """Confirmed live: API-Football's own team code isn't unique within a league (Colorado
+    Rapids and Columbus Crew both code to "COL" in real MLS data — see CLAUDE.md). A second
+    real team sharing the home team's short_name must degrade to "no confident match", not
+    raise MultipleResultsFound and crash the whole odds-ingestion run for that league."""
+    sport, fixture, kickoff = seeded_fixture
+    async with async_session_factory() as db:
+        db.add(
+            Team(
+                sport_id=sport.id,
+                league_id=fixture.league_id,
+                name="Home Team Duplicate",
+                short_name="HOM",
+                external_id="home-2",
+            )
+        )
+        await db.commit()
+
+    async with async_session_factory() as db:
+        found = await find_fixture_by_abbreviations_and_time(
+            db,
+            sport.id,
+            home_abbreviation="HOM",
+            away_abbreviation="AWY",
+            kickoff_utc=kickoff,
+        )
+    assert found is None

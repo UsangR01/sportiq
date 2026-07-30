@@ -12,8 +12,12 @@ lineup presence") needs Stage 1 key players for Brasileirão's historical season
 its current one, to identify who each team's key players actually were in a given past season.
 2026 stays in Brasileirão's list on top of that (its current, mid-season, calendar-year season
 — needed for live fixtures/predictions, since a season only just underway wouldn't otherwise
-have a Stage 1 row yet). The other 3 European leagues' Sport/League rows are seeded and
-generically supported but have no Stage 1 data collected yet.
+have a Stage 1 row yet). Scottish Premiership/MLS/Chinese Super League (added later, see
+CLAUDE.md) get the same "current season only" treatment as Brasileirão originally did — real
+Stage 2 key-player availability for their live fixtures, without the cost of a full 5-season
+historical backfill these three don't otherwise need yet. The other 3 original European
+leagues (Ligue 1/Bundesliga/La Liga/Serie A) are seeded and generically supported but still
+have no Stage 1 data collected at all — a real, unchanged scope gap, not touched by this list.
 
 Usage (from repo root):
     backend/.venv/Scripts/python ml/training/compute_football_key_players.py
@@ -30,9 +34,7 @@ from dotenv import load_dotenv
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
-load_dotenv(
-    BACKEND_DIR / ".env"
-)  # see collect_nba_data.py for why this is needed explicitly
+load_dotenv(BACKEND_DIR / ".env")  # see collect_nba_data.py for why this is needed explicitly
 
 from sqlalchemy import delete, select  # noqa: E402
 
@@ -49,6 +51,9 @@ from app.sports.models import League, Sport  # noqa: E402
 TARGET_LEAGUES: list[tuple[str, list[int]]] = [
     ("epl", [2021, 2022, 2023, 2024, 2025]),
     ("brasileirao", [2021, 2022, 2023, 2024, 2025, 2026]),
+    ("scottish_prem", [2026]),
+    ("mls", [2026]),
+    ("csl", [2026]),
 ]
 
 MAX_PAGES = 30  # safety cap on /players pagination per team
@@ -57,9 +62,7 @@ MAX_RETRIES = 5  # mirrors collect_football_data.py's _get_with_retry backoff-on
 
 def _client() -> httpx.AsyncClient:
     api_key = get_settings().api_football_key
-    return httpx.AsyncClient(
-        base_url=BASE_URL, headers={"x-apisports-key": api_key}, timeout=15.0
-    )
+    return httpx.AsyncClient(base_url=BASE_URL, headers={"x-apisports-key": api_key}, timeout=15.0)
 
 
 async def _get_with_retry(client: httpx.AsyncClient, path: str, params: dict) -> httpx.Response:
@@ -80,12 +83,8 @@ async def _get_with_retry(client: httpx.AsyncClient, path: str, params: dict) ->
     return response
 
 
-async def _fetch_teams(
-    client: httpx.AsyncClient, league_id: int, season: int
-) -> list[dict]:
-    response = await _get_with_retry(
-        client, "/teams", {"league": league_id, "season": season}
-    )
+async def _fetch_teams(client: httpx.AsyncClient, league_id: int, season: int) -> list[dict]:
+    response = await _get_with_retry(client, "/teams", {"league": league_id, "season": season})
     return [row["team"] for row in response.json().get("response", [])]
 
 
@@ -153,9 +152,7 @@ async def compute_and_store_season(league_slug: str, season: int) -> None:
             )
         league = (
             await db.execute(
-                select(League).where(
-                    League.sport_id == sport.id, League.slug == league_slug
-                )
+                select(League).where(League.sport_id == sport.id, League.slug == league_slug)
             )
         ).scalar_one_or_none()
         if league is None:
@@ -175,12 +172,19 @@ async def compute_and_store_season(league_slug: str, season: int) -> None:
                     league_id=league.id,
                     external_id=str(team["id"]),
                     name=team["name"],
-                    short_name=team.get("code") or team["name"],
+                    # NOT team["code"]: a real, confirmed-live bug — API-Football's own 3-letter
+                    # team code is NOT unique across a league's clubs (e.g. MLS's Colorado
+                    # Rapids AND Columbus Crew both code to "COL"). ingest_fixtures.py already
+                    # uses the full team name as short_name for exactly this reason (see
+                    # CLAUDE.md); this call site must match it, or whichever code path creates
+                    # a given Team row first silently decides its short_name, and a
+                    # code-based collision breaks find_fixture_by_abbreviations_and_time's
+                    # uniqueness assumption (confirmed live: a real MultipleResultsFound crash
+                    # while ingesting MLS odds).
+                    short_name=team["name"],
                 )
 
-                players = await _fetch_team_players(
-                    client, team["id"], season, league_id
-                )
+                players = await _fetch_team_players(client, team["id"], season, league_id)
                 top5 = select_top5(players)
 
                 await db.execute(

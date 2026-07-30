@@ -28,6 +28,12 @@ _RUNDOWN_SPORT_IDS: dict[str, int] = {
     "bundesliga": 13,
     "laliga": 14,
     "seriea": 15,
+    "mls": 10,  # confirmed live via GET /sports — real coverage, unlike Scottish Prem/CSL below
+    # No "scottish_prem" or "csl" entry: confirmed live via GET /sports that this subscription's
+    # sport list has no Scotland or China league entry at all (same real gap as Brasileirão's
+    # missing Brazil entry) — _rundown_sport_id_for raises ValueError for these, caught
+    # per-adapter in ingest_odds.py so it never blocks the OTHER real odds source
+    # (API-Football, which does have real coverage for all three — see api_football.py).
 }
 
 # TheRundown returns a masked 0.0001 sentinel for markets a bookmaker hasn't priced (or that

@@ -40,10 +40,14 @@ def make_fixture(**overrides):
 
 
 def test_league_ids_match_therundown_slugs_where_covered():
-    # The 5 European leagues must match app/adapters/therundown.py's _RUNDOWN_SPORT_IDS keys
-    # exactly or odds ingestion silently resolves to nothing for a league. "brasileirao" is a
-    # deliberate exception — TheRundown has no Brazil-league coverage at all (confirmed live,
-    # see CLAUDE.md) — so it's excluded from this particular cross-check.
+    # Every league TheRundown's own _RUNDOWN_SPORT_IDS actually covers must also match its
+    # slug here exactly, or odds ingestion silently resolves to nothing for that league.
+    # brasileirao/scottish_prem/csl are deliberate exceptions — confirmed live that
+    # TheRundown's own /sports list has no Brazil, Scotland, or China league entry at all
+    # (see CLAUDE.md) — real odds for these three come from API-Football's own /odds instead.
+    from app.adapters.therundown import _RUNDOWN_SPORT_IDS
+
+    no_rundown_coverage = {"brasileirao", "scottish_prem", "csl"}
     assert set(LEAGUE_IDS.keys()) == {
         "epl",
         "ligue1",
@@ -51,9 +55,30 @@ def test_league_ids_match_therundown_slugs_where_covered():
         "laliga",
         "seriea",
         "brasileirao",
+        "scottish_prem",
+        "mls",
+        "csl",
     }
+    for league_slug in LEAGUE_IDS:
+        if league_slug in no_rundown_coverage:
+            assert league_slug not in _RUNDOWN_SPORT_IDS
+        else:
+            assert league_slug in _RUNDOWN_SPORT_IDS
+
     assert LEAGUE_IDS["epl"] == 39
     assert LEAGUE_IDS["brasileirao"] == 71
+    assert LEAGUE_IDS["scottish_prem"] == 179
+    assert LEAGUE_IDS["mls"] == 253
+    assert LEAGUE_IDS["csl"] == 169
+
+
+def test_calendar_year_season_leagues_are_exactly_the_non_european_convention_ones():
+    from app.adapters.api_football import CALENDAR_YEAR_SEASON_LEAGUES
+
+    assert CALENDAR_YEAR_SEASON_LEAGUES == {"brasileirao", "mls", "csl"}
+    assert _current_football_season("scottish_prem", datetime(2026, 1, 15, tzinfo=UTC)) == 2025
+    assert _current_football_season("mls", datetime(2026, 1, 15, tzinfo=UTC)) == 2026
+    assert _current_football_season("csl", datetime(2026, 1, 15, tzinfo=UTC)) == 2026
 
 
 def test_map_status_not_started():

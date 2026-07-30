@@ -17,12 +17,18 @@ from app.core.config import get_settings
 # under x-apisports-key, no Bearer/host header needed on this host.
 BASE_URL = "https://v3.football.api-sports.io"
 
-# Real league IDs, confirmed live via GET /leagues?name=X&country=Y — the 5 European leagues
-# must match app/adapters/therundown.py's _RUNDOWN_SPORT_IDS keys exactly so odds ingestion
-# resolves to the same League.slug rows. "brasileirao" is a deliberate exception: confirmed
-# live (see CLAUDE.md) that TheRundown's own /sports list has no Brazil-league entry at all —
-# odds ingestion for this one league gracefully no-ops (see ingest_odds.py) rather than
-# raising, since fixtures/stats/injuries/predictions don't depend on odds coverage existing.
+# Real league IDs, confirmed live via GET /leagues?name=X&country=Y (or ?search=/?country= when
+# the league's own `name` field doesn't literally contain the common English name — e.g.
+# Scotland's top flight is just "Premiership" in API-Football's data, and MLS is "Major League
+# Soccer", not "MLS") — the 5 original European leagues must match
+# app/adapters/therundown.py's _RUNDOWN_SPORT_IDS keys exactly so odds ingestion resolves to the
+# same League.slug rows. "brasileirao"/"scottish_prem"/"csl" are deliberate exceptions:
+# confirmed live (see CLAUDE.md) that TheRundown's own /sports list has no Brazil or China
+# league entry, and no Scotland entry either — odds ingestion for these leagues gracefully
+# no-ops on the TheRundown side (see ingest_odds.py) rather than raising, since fixtures/stats/
+# injuries/predictions don't depend on TheRundown coverage existing, and all three have real
+# API-Football odds coverage instead (confirmed live via each league's current-season
+# coverage.odds flag).
 LEAGUE_IDS: dict[str, int] = {
     "epl": 39,
     "ligue1": 61,
@@ -30,13 +36,20 @@ LEAGUE_IDS: dict[str, int] = {
     "laliga": 140,
     "seriea": 135,
     "brasileirao": 71,  # Brazil Serie A ("Brasileirão Betano") — confirmed live: id 71
+    "scottish_prem": 179,  # Scottish Premiership — confirmed live: id 179, country=Scotland
+    "mls": 253,  # Major League Soccer (USA) — confirmed live: id 253, NOT "MLS" by name search
+    "csl": 169,  # Chinese Super League — confirmed live: id 169, country=China
 }
 
 # Leagues whose season runs on the calendar year (Jan-Dec) rather than the European Aug-May
 # convention — confirmed live for Brasileirão: current season "2026" runs 2026-01-28 to
 # 2026-12-02. Using the European convention here would compute the WRONG season year for
-# most of the year (e.g. any month before July would look back a full year too far).
-CALENDAR_YEAR_SEASON_LEAGUES = {"brasileirao"}
+# most of the year (e.g. any month before July would look back a full year too far). MLS
+# (2026 season: 2026-02-21 to 2026-11-08) and the Chinese Super League (2026 season:
+# 2026-03-06 to 2026-11-08) are the same calendar-year shape, confirmed live the same way —
+# Scottish Premiership stays out of this set, its 2026 season runs 2026-07-31 to 2027-04-10,
+# the same Aug-May convention as the 5 original European leagues.
+CALENDAR_YEAR_SEASON_LEAGUES = {"brasileirao", "mls", "csl"}
 
 INJURY_LOOKAHEAD_DAYS = 3  # how far ahead fetch_injuries looks for fixtures to check dates for
 
