@@ -627,3 +627,32 @@ async def fetch_lineup_presence(fixture_external_id: str) -> dict[str, set[str]]
                 names.add(player_row["player"]["name"].lower())
         by_team[team_id] = names
     return by_team
+
+
+async def fetch_corner_stats(fixture_external_id: str) -> dict[str, int]:
+    """Real per-team corner-kick count for ONE already-completed fixture — {team_external_id:
+    corners}, via /fixtures/statistics's real "Corner Kicks" stat (the same field
+    ml/training/collect_football_data.py:collect_corner_stats collects in bulk for training —
+    this is the one-off, live-serving equivalent). Called exactly once per fixture, at
+    settlement time (app/workers/ingest_fixtures.py:_maybe_settle_outcome), so the Over/Under
+    corners market can show a real win/loss verdict instead of staying permanently
+    unverifiable. A team missing from the response (real, not every historical fixture's
+    /fixtures/statistics call returns a value — see CLAUDE.md) simply has no entry here,
+    never a fabricated 0."""
+    api_key = get_settings().api_football_key
+    async with httpx.AsyncClient(
+        base_url=BASE_URL, headers={"x-apisports-key": api_key}, timeout=15.0
+    ) as client:
+        response = await client.get("/fixtures/statistics", params={"fixture": fixture_external_id})
+        response.raise_for_status()
+
+    corners_by_team: dict[str, int] = {}
+    for team_block in response.json().get("response", []):
+        team_id = str(team_block["team"]["id"])
+        corners = next(
+            (s["value"] for s in team_block.get("statistics", []) if s["type"] == "Corner Kicks"),
+            None,
+        )
+        if corners is not None:
+            corners_by_team[team_id] = int(corners)
+    return corners_by_team

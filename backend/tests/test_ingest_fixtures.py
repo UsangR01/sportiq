@@ -23,6 +23,7 @@ from app.history.models import MatchResult, Outcome
 from app.sports.models import League, Sport
 from app.workers.ingest_fixtures import (
     _ingest_fixtures_for_league,
+    _maybe_fetch_corner_stats,
     _maybe_settle_outcome,
     _upsert_live_state,
 )
@@ -164,11 +165,16 @@ async def _get_teams(db, fixture):
 
 
 async def test_maybe_settle_outcome_writes_real_result(seeded_fixture):
-    _sport, fixture = seeded_fixture
+    sport, fixture = seeded_fixture
     async with async_session_factory() as db:
         home, away = await _get_teams(db, fixture)
         await _maybe_settle_outcome(
-            db, fixture.id, make_payload(status="completed", home_score=3, away_score=1), home, away
+            db,
+            fixture.id,
+            make_payload(status="completed", home_score=3, away_score=1),
+            home,
+            away,
+            sport.slug,
         )
         await db.commit()
 
@@ -182,13 +188,18 @@ async def test_maybe_settle_outcome_writes_real_result(seeded_fixture):
 
 
 async def test_maybe_settle_outcome_updates_elo(seeded_fixture):
-    _sport, fixture = seeded_fixture
+    sport, fixture = seeded_fixture
     async with async_session_factory() as db:
         home, away = await _get_teams(db, fixture)
         assert home.elo_rating is None
         assert away.elo_rating is None
         await _maybe_settle_outcome(
-            db, fixture.id, make_payload(status="completed", home_score=3, away_score=1), home, away
+            db,
+            fixture.id,
+            make_payload(status="completed", home_score=3, away_score=1),
+            home,
+            away,
+            sport.slug,
         )
         await db.commit()
 
@@ -201,17 +212,17 @@ async def test_maybe_settle_outcome_updates_elo(seeded_fixture):
 
 
 async def test_maybe_settle_outcome_is_idempotent(seeded_fixture):
-    _sport, fixture = seeded_fixture
+    sport, fixture = seeded_fixture
     payload = make_payload(status="completed", home_score=2, away_score=2)
     async with async_session_factory() as db:
         home, away = await _get_teams(db, fixture)
-        await _maybe_settle_outcome(db, fixture.id, payload, home, away)
+        await _maybe_settle_outcome(db, fixture.id, payload, home, away, sport.slug)
         await db.commit()
     async with async_session_factory() as db:
         home, away = await _get_teams(db, fixture)
         elo_home_after_first = home.elo_rating
         # a second worker run observing the same completion
-        await _maybe_settle_outcome(db, fixture.id, payload, home, away)
+        await _maybe_settle_outcome(db, fixture.id, payload, home, away, sport.slug)
         await db.commit()
 
     async with async_session_factory() as db:
@@ -228,11 +239,16 @@ async def test_maybe_settle_outcome_is_idempotent(seeded_fixture):
 
 
 async def test_maybe_settle_outcome_skips_non_completed(seeded_fixture):
-    _sport, fixture = seeded_fixture
+    sport, fixture = seeded_fixture
     async with async_session_factory() as db:
         home, away = await _get_teams(db, fixture)
         await _maybe_settle_outcome(
-            db, fixture.id, make_payload(status="live", home_score=1, away_score=0), home, away
+            db,
+            fixture.id,
+            make_payload(status="live", home_score=1, away_score=0),
+            home,
+            away,
+            sport.slug,
         )
         await db.commit()
 
@@ -241,6 +257,69 @@ async def test_maybe_settle_outcome_skips_non_completed(seeded_fixture):
             await db.execute(select(Outcome).where(Outcome.fixture_id == fixture.id))
         ).scalar_one_or_none()
         assert outcome is None
+
+
+class _FakeTeamForCorners:
+    def __init__(self, external_id):
+        self.external_id = external_id
+
+
+async def test_maybe_fetch_corner_stats_football_stores_real_corners(monkeypatch):
+    """Real per-team corner counts, football only — see
+    app/adapters/api_football.py:fetch_corner_stats. Mocking only the external API boundary,
+    per this project's established convention (see CLAUDE.md's test_push_token.py note)."""
+
+    async def fake_fetch_corner_stats(fixture_external_id):
+        assert fixture_external_id == "fx-live-1"
+        return {"1": 7, "2": 4}
+
+    monkeypatch.setattr("app.adapters.api_football.fetch_corner_stats", fake_fetch_corner_stats)
+
+    home_corners, away_corners = await _maybe_fetch_corner_stats(
+        "football",
+        make_payload(status="completed", home_score=3, away_score=1),
+        _FakeTeamForCorners("1"),
+        _FakeTeamForCorners("2"),
+    )
+    assert home_corners == 7
+    assert away_corners == 4
+
+
+async def test_maybe_fetch_corner_stats_skips_non_football(monkeypatch):
+    called = False
+
+    async def fake_fetch_corner_stats(fixture_external_id):
+        nonlocal called
+        called = True
+        return {"1": 7, "2": 4}
+
+    monkeypatch.setattr("app.adapters.api_football.fetch_corner_stats", fake_fetch_corner_stats)
+
+    result = await _maybe_fetch_corner_stats(
+        "nba",
+        make_payload(status="completed", home_score=3, away_score=1),
+        _FakeTeamForCorners("1"),
+        _FakeTeamForCorners("2"),
+    )
+    assert result == (None, None)
+    assert called is False
+
+
+async def test_maybe_fetch_corner_stats_degrades_gracefully_on_http_error(monkeypatch):
+    import httpx
+
+    async def fake_fetch_corner_stats(fixture_external_id):
+        raise httpx.HTTPStatusError("boom", request=None, response=None)
+
+    monkeypatch.setattr("app.adapters.api_football.fetch_corner_stats", fake_fetch_corner_stats)
+
+    result = await _maybe_fetch_corner_stats(
+        "football",
+        make_payload(status="completed", home_score=3, away_score=1),
+        _FakeTeamForCorners("1"),
+        _FakeTeamForCorners("2"),
+    )
+    assert result == (None, None)
 
 
 class FakeAdapter:

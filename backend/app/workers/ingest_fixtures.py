@@ -1,6 +1,7 @@
 import asyncio
 from datetime import UTC, datetime
 
+import httpx
 from sqlalchemy import delete, select
 
 from app.adapters.base import FixturePayload, TeamStats
@@ -46,8 +47,29 @@ async def _upsert_live_state(db, fixture_id, payload: FixturePayload) -> None:
     live_state.last_updated_utc = datetime.now(UTC)
 
 
+async def _maybe_fetch_corner_stats(
+    sport_slug: str, payload: FixturePayload, home_team: Team, away_team: Team
+) -> tuple[int | None, int | None]:
+    """Football only — one real, one-off API call for this fixture's final corner-kick
+    counts, so the Over/Under corners market can show a real win/loss verdict (previously
+    permanently unverifiable — see CLAUDE.md). Only ever called once per fixture, from
+    _maybe_settle_outcome's own idempotency guard. Failures (a very old fixture whose stats
+    are no longer served, a transient API error) degrade to (None, None) — a real, honest
+    gap, not a fabricated 0 — rather than blocking Outcome/Elo settlement, which must still
+    happen regardless."""
+    if sport_slug != "football" or not home_team.external_id or not away_team.external_id:
+        return None, None
+    from app.adapters.api_football import fetch_corner_stats
+
+    try:
+        corners_by_team = await fetch_corner_stats(payload.external_id)
+    except httpx.HTTPError:
+        return None, None
+    return corners_by_team.get(home_team.external_id), corners_by_team.get(away_team.external_id)
+
+
 async def _maybe_settle_outcome(
-    db, fixture_id, payload: FixturePayload, home_team: Team, away_team: Team
+    db, fixture_id, payload: FixturePayload, home_team: Team, away_team: Team, sport_slug: str
 ) -> None:
     """Writes a real settled Outcome row once a fixture completes — the outcomes table TDD's
     own schema already defines but nothing has ever written to (GET /history's real blocker
@@ -56,10 +78,12 @@ async def _maybe_settle_outcome(
     only ever inserts once. Aggregating these into /history itself (real model-performance
     rollups) is a separate, larger task — not attempted here, just unblocking the raw data.
 
-    Also updates both teams' real, persistent Elo rating (app/models_ml/elo.py) exactly once
-    per real completed match — this idempotency check is the natural single hook point for
-    that, since Elo state would otherwise be double-updated by the same daily-backfill +
-    live-poll overlap this function already guards against for the Outcome row."""
+    Also updates both teams' real, persistent Elo rating (app/models_ml/elo.py), and (football
+    only) fetches real final corner-kick counts onto FixtureLiveState — both exactly once per
+    real completed match, since this idempotency check is the natural single hook point for
+    settlement-time side effects that would otherwise double-apply across the same
+    daily-backfill + live-poll overlap this function already guards against for the Outcome
+    row."""
     if payload.status != "completed" or payload.home_score is None or payload.away_score is None:
         return
     existing = (
@@ -89,6 +113,19 @@ async def _maybe_settle_outcome(
     home_team.elo_rating, away_team.elo_rating = apply_match_result(
         elo_home, elo_away, payload.home_score, payload.away_score
     )
+
+    home_corners, away_corners = await _maybe_fetch_corner_stats(
+        sport_slug, payload, home_team, away_team
+    )
+    if home_corners is not None or away_corners is not None:
+        live_state = (
+            await db.execute(
+                select(FixtureLiveState).where(FixtureLiveState.fixture_id == fixture_id)
+            )
+        ).scalar_one_or_none()
+        if live_state is not None:
+            live_state.home_corners = home_corners
+            live_state.away_corners = away_corners
 
 
 async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
@@ -155,7 +192,7 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
                 fixture = existing
 
             await _upsert_live_state(db, fixture.id, payload)
-            await _maybe_settle_outcome(db, fixture.id, payload, home_team, away_team)
+            await _maybe_settle_outcome(db, fixture.id, payload, home_team, away_team, sport.slug)
         await db.commit()
 
         # Team feature vectors, computed at ingest time for not-yet-played fixtures (TDD

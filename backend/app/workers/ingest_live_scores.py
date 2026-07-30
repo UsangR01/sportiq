@@ -62,7 +62,9 @@ async def _ingest_live_scores_for_league(sport: Sport, league: League) -> None:
                 await db.execute(select(Team).where(Team.id == fixture.away_team_id))
             ).scalar_one_or_none()
             if home_team is not None and away_team is not None:
-                await _maybe_settle_outcome(db, fixture.id, payload, home_team, away_team)
+                await _maybe_settle_outcome(
+                    db, fixture.id, payload, home_team, away_team, sport.slug
+                )
 
         await db.commit()
 

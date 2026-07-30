@@ -183,6 +183,13 @@ class FixtureLiveState(Base):
     match_minute: Mapped[int] = mapped_column(Integer, nullable=True)
     period: Mapped[str] = mapped_column(String(20), nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False)
+    # Football only — real corner-kick counts fetched exactly once, at fixture-settlement
+    # time (app/workers/ingest_fixtures.py:_maybe_settle_outcome via
+    # app/adapters/api_football.py:fetch_corner_stats), so the Over/Under corners market can
+    # show a real win/loss verdict instead of staying permanently unverifiable. Null for NBA
+    # (no corners concept) and for any fixture settled before this column existed.
+    home_corners: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    away_corners: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_updated_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     fixture: Mapped["Fixture"] = relationship(back_populates="live_state")

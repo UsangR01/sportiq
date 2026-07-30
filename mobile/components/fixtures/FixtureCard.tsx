@@ -10,13 +10,19 @@ function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
   if (!live_state) return null;
 
   const isCompleted = status === "completed";
-  // Covers h2h/double-chance/goals-total (all derivable from home/away goals); corners_total
-  // stays null (no corner count is tracked on FixtureLiveState) — see
-  // lib/pickFormat.ts:evaluatePickCorrectness for the full per-market breakdown. null means
-  // "genuinely can't verify this one", not "wrong" — shown as a neutral grey badge, not red.
+  // Covers every market, including corners_total when real corner counts were fetched at
+  // settlement time (see lib/pickFormat.ts:evaluatePickCorrectness) — null only for a fixture
+  // settled before that existed, or NBA. null means "genuinely can't verify this one", not
+  // "wrong" — shown as a neutral grey badge, not red.
   const wasCorrect =
     isCompleted && best_pick
-      ? evaluatePickCorrectness(best_pick, live_state.home_score, live_state.away_score)
+      ? evaluatePickCorrectness(
+          best_pick,
+          live_state.home_score,
+          live_state.away_score,
+          live_state.home_corners,
+          live_state.away_corners,
+        )
       : null;
 
   return (
@@ -30,8 +36,8 @@ function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
       {/* Retrodicted prediction vs. the real result (see
           app/workers/backfill_predictions.py) — colour is never the only signal (a
           checkmark/cross is redundant with it) so this stays legible for colour-blind
-          users too. Grey + no mark for the rare case correctness can't be determined at all
-          (a corners_total best pick — see evaluatePickCorrectness). */}
+          users too. Grey + no mark only for the rare case correctness can't be determined at
+          all (a corners_total pick on a fixture settled before real corner counts existed). */}
       {isCompleted && best_pick && (
         <View
           className={`mt-1 flex-row items-center rounded px-2 py-0.5 ${
@@ -60,6 +66,8 @@ function MarketBreakdown({ fixture }: { fixture: FixtureSummary }) {
     all_market_picks,
     live_state.home_score,
     live_state.away_score,
+    live_state.home_corners,
+    live_state.away_corners,
   );
   if (items.length === 0) return null;
 

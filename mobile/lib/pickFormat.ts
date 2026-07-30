@@ -25,16 +25,20 @@ export function pickHeadline(pick: { selection: string; line?: number | null }):
 type Pick = { market: string; selection: string; line?: number | null };
 
 /**
- * Was this pick actually right, given the real final score? Returns null when correctness
- * genuinely can't be determined from the data we have — never a guessed true/false. Covers
- * every market whose real outcome we CAN derive from home/away goals (h2h, double chance,
- * goals totals); corners totals stay null since FixtureLiveState has no corner count at all
- * (only home_score/away_score are tracked — see app/fixtures/models.py:FixtureLiveState).
+ * Was this pick actually right, given the real final score (and, for corners, the real
+ * corner-kick count)? Returns null when correctness genuinely can't be determined from the
+ * data we have — never a guessed true/false. Covers every market: h2h, double chance, and
+ * goals totals are always derivable from home/away goals; corners totals need real
+ * home_corners/away_corners (see app/adapters/api_football.py:fetch_corner_stats, fetched once
+ * at fixture-settlement time) — null only when those are missing (NBA, or a fixture settled
+ * before this existed), not a permanent gap for every corners pick.
  */
 export function evaluatePickCorrectness(
   pick: Pick,
   homeScore: number,
   awayScore: number,
+  homeCorners?: number | null,
+  awayCorners?: number | null,
 ): boolean | null {
   const actual: "home" | "draw" | "away" =
     homeScore > awayScore ? "home" : homeScore < awayScore ? "away" : "draw";
@@ -53,8 +57,14 @@ export function evaluatePickCorrectness(
       if (pick.selection === "under") return totalGoals < pick.line;
       return null;
     }
+    case "corners_total": {
+      if (pick.line == null || homeCorners == null || awayCorners == null) return null;
+      const totalCorners = homeCorners + awayCorners;
+      if (pick.selection === "over") return totalCorners > pick.line;
+      if (pick.selection === "under") return totalCorners < pick.line;
+      return null;
+    }
     default:
-      // corners_total (no corner count tracked) and anything unrecognised.
       return null;
   }
 }
@@ -93,6 +103,8 @@ export function buildMarketBreakdown(
   picks: { market: string; selection: string; probability: number; line: number | null }[],
   homeScore: number,
   awayScore: number,
+  homeCorners?: number | null,
+  awayCorners?: number | null,
 ): MarketBreakdownItem[] {
   const items: MarketBreakdownItem[] = [];
 
@@ -121,7 +133,13 @@ export function buildMarketBreakdown(
         selection: favoured.selection,
         line,
         probability: favoured.probability,
-        correct: evaluatePickCorrectness(favoured, homeScore, awayScore),
+        correct: evaluatePickCorrectness(
+          favoured,
+          homeScore,
+          awayScore,
+          homeCorners,
+          awayCorners,
+        ),
       });
     }
   }

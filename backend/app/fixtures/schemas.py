@@ -40,6 +40,12 @@ class LiveStateResponse(BaseModel):
     match_minute: int | None = None
     period: str | None = None
     status: str
+    # Football only — real corner-kick counts, fetched once at settlement time (see
+    # app/workers/ingest_fixtures.py:_maybe_settle_outcome). Null for NBA and for any fixture
+    # settled before this existed — used to give the Over/Under corners market a real
+    # win/loss verdict instead of staying permanently unverifiable.
+    home_corners: int | None = None
+    away_corners: int | None = None
     last_updated_utc: datetime
 
 

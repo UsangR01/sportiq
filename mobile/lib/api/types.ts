@@ -31,6 +31,10 @@ export interface LiveStateResponse {
   match_minute: number | null;
   period: string | null;
   status: string;
+  // Football only — real corner-kick counts, null for NBA and for fixtures settled before
+  // this existed. See lib/pickFormat.ts:evaluatePickCorrectness.
+  home_corners: number | null;
+  away_corners: number | null;
   last_updated_utc: string;
 }
 
