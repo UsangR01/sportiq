@@ -200,7 +200,13 @@ export default function PicksScreen() {
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
         renderSectionHeader={({ section }) => (
           <View className="mb-2 mt-3 flex-row items-center bg-white dark:bg-black">
-            <Text className="mr-2 text-base">{countryFlag(section.country)}</Text>
+            {/* Fixed-size box, not just a font-size on the Text — some flag emoji (Scotland's
+                multi-codepoint tag sequence in particular) render at inconsistent visual
+                width/height across platforms compared to a plain 2-letter flag like 🇧🇷; this
+                guarantees every flag occupies the exact same on-screen slot regardless. */}
+            <View className="mr-2 h-6 w-6 items-center justify-center">
+              <Text className="text-base leading-6">{countryFlag(section.country)}</Text>
+            </View>
             <View>
               <Text className="text-sm font-bold text-gray-900 dark:text-gray-100">
                 {section.title}
