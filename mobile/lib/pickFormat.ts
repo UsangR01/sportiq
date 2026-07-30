@@ -21,3 +21,40 @@ export function pickHeadline(pick: { selection: string; line?: number | null }):
   const label = selectionLabel(pick.selection);
   return pick.line != null ? `${label} ${pick.line}` : label;
 }
+
+type Pick = { market: string; selection: string; line?: number | null };
+
+/**
+ * Was this pick actually right, given the real final score? Returns null when correctness
+ * genuinely can't be determined from the data we have — never a guessed true/false. Covers
+ * every market whose real outcome we CAN derive from home/away goals (h2h, double chance,
+ * goals totals); corners totals stay null since FixtureLiveState has no corner count at all
+ * (only home_score/away_score are tracked — see app/fixtures/models.py:FixtureLiveState).
+ */
+export function evaluatePickCorrectness(
+  pick: Pick,
+  homeScore: number,
+  awayScore: number,
+): boolean | null {
+  const actual: "home" | "draw" | "away" =
+    homeScore > awayScore ? "home" : homeScore < awayScore ? "away" : "draw";
+
+  switch (pick.market) {
+    case "h2h":
+      return pick.selection === actual;
+    case "double_chance":
+      if (pick.selection === "1X") return actual === "home" || actual === "draw";
+      if (pick.selection === "X2") return actual === "away" || actual === "draw";
+      return null;
+    case "goals_total": {
+      if (pick.line == null) return null;
+      const totalGoals = homeScore + awayScore;
+      if (pick.selection === "over") return totalGoals > pick.line;
+      if (pick.selection === "under") return totalGoals < pick.line;
+      return null;
+    }
+    default:
+      // corners_total (no corner count tracked) and anything unrecognised.
+      return null;
+  }
+}

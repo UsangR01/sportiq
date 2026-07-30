@@ -2,26 +2,22 @@ import { Link } from "expo-router";
 import { Pressable, Text, View } from "react-native";
 
 import type { FixtureSummary } from "@/lib/api/types";
-import { pickHeadline, selectionLabel } from "@/lib/pickFormat";
+import { evaluatePickCorrectness, pickHeadline } from "@/lib/pickFormat";
 import { LiveBadge } from "./LiveBadge";
-
-function actualResult(homeScore: number, awayScore: number): "home" | "draw" | "away" {
-  if (homeScore > awayScore) return "home";
-  if (homeScore < awayScore) return "away";
-  return "draw";
-}
 
 function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
   const { live_state, status, best_pick } = fixture;
   if (!live_state) return null;
 
   const isCompleted = status === "completed";
-  const actual = isCompleted ? actualResult(live_state.home_score, live_state.away_score) : null;
-  // Non-h2h picks (double chance/totals) don't map onto a single "home"/"draw"/"away" actual
-  // result the same way — correctness there isn't shown here (an h2h-shaped comparison would
-  // be misleading for e.g. a "1X" pick), only for h2h best_picks.
+  // Covers h2h/double-chance/goals-total (all derivable from home/away goals); corners_total
+  // stays null (no corner count is tracked on FixtureLiveState) — see
+  // lib/pickFormat.ts:evaluatePickCorrectness for the full per-market breakdown. null means
+  // "genuinely can't verify this one", not "wrong" — shown as a neutral grey badge, not red.
   const wasCorrect =
-    best_pick?.market === "h2h" && actual !== null && best_pick.selection === actual;
+    isCompleted && best_pick
+      ? evaluatePickCorrectness(best_pick, live_state.home_score, live_state.away_score)
+      : null;
 
   return (
     <View className="items-center">
@@ -34,20 +30,16 @@ function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
       {/* Retrodicted prediction vs. the real result (see
           app/workers/backfill_predictions.py) — colour is never the only signal (a
           checkmark/cross is redundant with it) so this stays legible for colour-blind
-          users too. Only rendered for h2h best_picks (see wasCorrect above); a non-h2h best
-          pick still shows the badge without the correctness marker. */}
+          users too. Grey + no mark for the rare case correctness can't be determined at all
+          (a corners_total best pick — see evaluatePickCorrectness). */}
       {isCompleted && best_pick && (
         <View
           className={`mt-1 flex-row items-center rounded px-2 py-0.5 ${
-            best_pick.market !== "h2h"
-              ? "bg-gray-500"
-              : wasCorrect
-                ? "bg-green-600"
-                : "bg-red-500"
+            wasCorrect === null ? "bg-gray-500" : wasCorrect ? "bg-green-600" : "bg-red-500"
           }`}
         >
           <Text className="text-[10px] font-bold text-white">
-            {best_pick.market === "h2h" ? (wasCorrect ? "✓ " : "✗ ") : ""}
+            {wasCorrect === null ? "" : wasCorrect ? "✓ " : "✗ "}
             {pickHeadline(best_pick)} {Math.round(best_pick.probability * 100)}%
           </Text>
         </View>
