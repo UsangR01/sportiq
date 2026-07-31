@@ -20,6 +20,7 @@ from app.adapters.base import FixturePayload, TeamStats
 from app.core.database import async_session_factory
 from app.fixtures.models import Fixture, FixtureLiveState, FixtureStatus, Team, TeamFeatures
 from app.history.models import MatchResult, Outcome
+from app.predictions.models import ConfidenceTier, Prediction
 from app.sports.models import League, Sport
 from app.workers.ingest_fixtures import (
     _ingest_fixtures_for_league,
@@ -402,6 +403,108 @@ async def test_rerunning_ingest_does_not_duplicate_team_features(monkeypatch):
                 await db.execute(select(Fixture).where(Fixture.external_id == "fx-dedup-1"))
             ).scalar_one_or_none()
             if fixture is not None:
+                await db.execute(delete(TeamFeatures).where(TeamFeatures.fixture_id == fixture.id))
+                await db.execute(delete(Fixture).where(Fixture.id == fixture.id))
+            await db.execute(delete(Team).where(Team.sport_id == sport.id))
+            await db.execute(delete(League).where(League.sport_id == sport.id))
+            await db.execute(delete(Sport).where(Sport.id == sport.id))
+            await db.commit()
+
+
+async def test_ingest_queues_a_prediction_for_a_fixture_that_has_none_yet(monkeypatch):
+    """The real bug, reported by the user: "no prediction made at all" for most upcoming
+    fixtures in newly-added leagues. run_predictions was only ever triggered by
+    ingest_injuries.py's re-inference path (a real key-player status change within 3 hours of
+    kickoff) - an ordinary freshly-ingested fixture never got an initial prediction at all.
+    Fixed by queuing run_predictions.delay for any upcoming fixture with no Prediction row yet,
+    and ONLY that case - re-running this worker daily must never re-queue a fixture that
+    already has a real prediction (would waste real H2H/moneyline API calls for no reason)."""
+    kickoff = datetime.now(UTC) + timedelta(days=1)
+    async with async_session_factory() as db:
+        slug = f"test-sport-{uuid.uuid4().hex[:8]}"
+        sport = Sport(slug=slug, name="Test Sport", model_type="test", active=True)
+        db.add(sport)
+        await db.flush()
+        league = League(
+            sport_id=sport.id,
+            slug="test-league",
+            name="Test League",
+            country="XX",
+            tier=1,
+            active=True,
+        )
+        db.add(league)
+        await db.commit()
+        await db.refresh(sport)
+        await db.refresh(league)
+
+    payload = FixturePayload(
+        external_id="fx-needs-prediction-1",
+        league_external_id="test-league",
+        home_team_external_id="30",
+        away_team_external_id="40",
+        kickoff_utc=kickoff,
+        season="2026",
+        home_team_name="Home FC",
+        away_team_name="Away FC",
+        status="scheduled",
+    )
+    fake_adapter = FakeAdapter([payload])
+
+    import app.adapters.factory as factory_module
+
+    monkeypatch.setattr(
+        factory_module.AdapterFactory, "get_stats_adapter", lambda slug: fake_adapter
+    )
+
+    queued_fixture_ids: list[str] = []
+    import app.workers.run_predictions as run_predictions_module
+
+    monkeypatch.setattr(
+        run_predictions_module.run_predictions,
+        "delay",
+        lambda fixture_id: queued_fixture_ids.append(fixture_id),
+    )
+
+    try:
+        await _ingest_fixtures_for_league(sport, league)
+
+        async with async_session_factory() as db:
+            fixture = (
+                await db.execute(
+                    select(Fixture).where(Fixture.external_id == "fx-needs-prediction-1")
+                )
+            ).scalar_one()
+
+        assert queued_fixture_ids == [str(fixture.id)]
+
+        # Give it a real prediction, then re-run (simulates the next day) - must NOT re-queue.
+        async with async_session_factory() as db:
+            db.add(
+                Prediction(
+                    fixture_id=fixture.id,
+                    model_version="test_model_v1",
+                    home_prob=0.5,
+                    draw_prob=0.3,
+                    away_prob=0.2,
+                    confidence_tier=ConfidenceTier.MEDIUM,
+                    created_at=datetime.now(UTC),
+                )
+            )
+            await db.commit()
+
+        queued_fixture_ids.clear()
+        await _ingest_fixtures_for_league(sport, league)
+        assert queued_fixture_ids == []
+    finally:
+        async with async_session_factory() as db:
+            fixture = (
+                await db.execute(
+                    select(Fixture).where(Fixture.external_id == "fx-needs-prediction-1")
+                )
+            ).scalar_one_or_none()
+            if fixture is not None:
+                await db.execute(delete(Prediction).where(Prediction.fixture_id == fixture.id))
                 await db.execute(delete(TeamFeatures).where(TeamFeatures.fixture_id == fixture.id))
                 await db.execute(delete(Fixture).where(Fixture.id == fixture.id))
             await db.execute(delete(Team).where(Team.sport_id == sport.id))

@@ -11,6 +11,7 @@ from app.fixtures.service import get_or_create_team
 from app.history.models import MatchResult, Outcome
 from app.models_ml.elo import INITIAL_ELO, apply_match_result
 from app.models_ml.key_player_availability import get_key_player_availability
+from app.predictions.models import Prediction
 from app.sports.models import League, Sport
 from app.workers.celery import celery_app, run_task
 
@@ -283,6 +284,27 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
                     )
                 )
         await db.commit()
+
+        # A freshly-ingested fixture never got a prediction of its own before this — the only
+        # existing trigger was ingest_injuries.py's re-inference path, which fires just for a
+        # real key-player status change within 3 hours of kickoff, not for an ordinary new
+        # fixture. Confirmed live via the user's own report ("no prediction made at all" for
+        # most MLS/Scottish Premiership fixtures): only the single fixture manually
+        # spot-checked per league during that feature's verification had a real Prediction
+        # row — every other upcoming fixture had none, which is exactly why the Picks feed
+        # showed almost nothing for those leagues (not a probability/odds threshold issue at
+        # all). Only queues for a fixture with NO prediction yet — never re-queues one that
+        # already has a real prediction, so a daily re-run of this worker doesn't waste real
+        # H2H/moneyline API calls recomputing predictions whose features haven't materially
+        # changed since kickoff is still days out.
+        from app.workers.run_predictions import run_predictions
+
+        for fixture in upcoming:
+            has_prediction = (
+                await db.execute(select(Prediction.id).where(Prediction.fixture_id == fixture.id))
+            ).first()
+            if has_prediction is None:
+                run_predictions.delay(str(fixture.id))
 
     # Retrodicted predictions for newly-backfilled completed fixtures (TDD has no equivalent
     # step — added so the Home feed can show "what the model would have called" alongside a
