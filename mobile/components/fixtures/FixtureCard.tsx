@@ -42,7 +42,9 @@ function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
           app/workers/backfill_predictions.py) — colour is never the only signal (a
           checkmark/cross is redundant with it) so this stays legible for colour-blind
           users too. Grey + no mark only for the rare case correctness can't be determined at
-          all (a corners_total pick on a fixture settled before real corner counts existed). */}
+          all (a corners_total pick on a fixture settled before real corner counts existed).
+          Odds shown alongside probability, same as the upcoming PredictionBadge below —
+          omitted (never fabricated) when the pick was probability-only with no real price. */}
       {isCompleted && best_pick && (
         <View
           className={`mt-1 items-center justify-center rounded px-1 py-1 ${BADGE_WIDTH} ${
@@ -51,7 +53,11 @@ function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
         >
           <Text className="text-center text-[10px] font-bold text-white" numberOfLines={1}>
             {wasCorrect === null ? "" : wasCorrect ? "✓ " : "✗ "}
-            {pickHeadline(best_pick)} {Math.round(best_pick.probability * 100)}%
+            {pickHeadline(best_pick)}
+          </Text>
+          <Text className="text-center text-[10px] text-white" numberOfLines={1}>
+            {Math.round(best_pick.probability * 100)}%
+            {best_pick.odds ? ` · ${best_pick.odds.toFixed(2)}` : ""}
           </Text>
         </View>
       )}
