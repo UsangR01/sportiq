@@ -1,5 +1,6 @@
 from app.adapters.api_football import APIFootballAdapter
 from app.adapters.balldontlie import BallDontLieAdapter
+from app.adapters.balldontlie_tennis import BallDontLieTennisAdapter
 from app.adapters.base import DataSourceAdapter
 from app.adapters.rotowire import RotoWireAdapter
 from app.adapters.sportsdataio import SportsDataIOAdapter
@@ -10,10 +11,16 @@ from app.core.config import get_settings
 _STATS_ADAPTERS: dict[str, type[DataSourceAdapter]] = {
     "football": APIFootballAdapter,
     "nba": BallDontLieAdapter,
+    "tennis": BallDontLieTennisAdapter,
     "nfl": SportsDataIOAdapter,
     "nhl": SportsDataIOAdapter,
     "mlb": SportsDataIOAdapter,
 }
+
+# No "tennis" entry in _INJURY_ADAPTERS (no tennis injury feed at MVP — same as every
+# non-NBA/football sport today) or _ODDS_ADAPTERS (odds are an explicit fast-follow; defaults
+# to [TheRundownAdapter] below, which raises a per-adapter-isolated ValueError in
+# ingest_odds.py until real tennis coverage is confirmed and mapped).
 
 # Sport-specific, optional injury adapters. Absent entries mean "no injury feed for this sport".
 _INJURY_ADAPTERS: dict[str, type[DataSourceAdapter]] = {

@@ -28,6 +28,10 @@ async def _assemble_features(
         from app.models_ml.football_features import assemble_from_live_db
 
         return await assemble_from_live_db(db, fixture, home_features, away_features)
+    if sport_slug == "tennis":
+        from app.models_ml.tennis_features import assemble_from_live_db
+
+        return await assemble_from_live_db(db, fixture, home_features, away_features)
     raise NotImplementedError(f"No feature-assembly function for sport={sport_slug!r} yet")
 
 

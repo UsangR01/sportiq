@@ -136,6 +136,13 @@ class TeamFeatures(Base):
     # None for sports/adapters with no streak source yet (NBA).
     win_streak: Mapped[float | None] = mapped_column(Float, nullable=True)
     losing_streak: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Tennis only (app/models_ml/tennis_features.py) — real ATP/WTA ranking points, sourced
+    # from TeamStats.rank_points (app/adapters/balldontlie_tennis.py). None for every other
+    # sport. Deliberately NOT storing a surface-specific win rate here: that signal is
+    # fixture-specific (the CURRENT tournament's surface), not a per-team-per-run stat the way
+    # every other TeamFeatures column is — it's fetched live in assemble_from_live_db instead,
+    # the same way NBA's h2h_win_rate_home is a live call rather than a cached column.
+    rank_points: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class TeamKeyPlayer(Base):

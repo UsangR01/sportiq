@@ -83,6 +83,11 @@ class TeamStats:
     # overloaded 0 that could mean either "no streak" or "streak of length 0".
     win_streak: float | None = None
     losing_streak: float | None = None
+    # Tennis only — real, provider-computed ATP/WTA ranking points (BallDontLie's /rankings).
+    # Used as the primary relative-strength signal instead of a hand-rolled Elo approximation
+    # (unlike football, which added one later) — simpler and more honest than approximating a
+    # rating system when a real one already exists. None for every other sport.
+    rank_points: float | None = None
 
 
 @dataclass(frozen=True)

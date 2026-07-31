@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models_ml.base import BaseModel
 from app.models_ml.football import FootballModel
 from app.models_ml.nba import NBAModel
+from app.models_ml.tennis import TennisModel
 from app.predictions.models import ModelRegistry
 from app.sports.models import Sport
 
@@ -14,6 +15,7 @@ from app.sports.models import Sport
 _MODEL_CLASSES: dict[str, type[BaseModel]] = {
     "football": FootballModel,
     "nba": NBAModel,
+    "tennis": TennisModel,
 }
 
 

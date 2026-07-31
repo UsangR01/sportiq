@@ -103,9 +103,56 @@ async def seed_football() -> None:
         await db.commit()
 
 
+# slug must match app/adapters/balldontlie_tennis.py's _TOUR_PREFIXES keys exactly ("atp"/
+# "wta") — that's also the value passed as `league` to fetch_fixtures/fetch_team_stats, which
+# selects the real /atp/v1 vs /wta/v1 namespace. country=None for both: a tour isn't
+# country-scoped the way a domestic league is (League.country is nullable — confirmed before
+# adding this).
+TENNIS_LEAGUES = [
+    ("atp", "ATP Tour", None),
+    ("wta", "WTA Tour", None),
+]
+
+
+async def seed_tennis() -> None:
+    async with async_session_factory() as db:
+        sport = (await db.execute(select(Sport).where(Sport.slug == "tennis"))).scalar_one_or_none()
+        if sport is None:
+            sport = Sport(slug="tennis", name="Tennis", model_type="tennis_xgb_v1", active=True)
+            db.add(sport)
+            await db.flush()
+            print("created sport: tennis")
+        else:
+            print("sport already exists: tennis")
+
+        for slug, name, country in TENNIS_LEAGUES:
+            league = (
+                await db.execute(
+                    select(League).where(League.sport_id == sport.id, League.slug == slug)
+                )
+            ).scalar_one_or_none()
+            if league is None:
+                db.add(
+                    League(
+                        sport_id=sport.id,
+                        slug=slug,
+                        name=name,
+                        country=country,
+                        tier=1,
+                        active=True,
+                    )
+                )
+                print(f"created league: {slug}")
+            else:
+                print(f"league already exists: {slug}")
+
+        await db.commit()
+
+
 async def main() -> None:
     await seed_nba()
     await seed_football()
+    await seed_tennis()
 
 
 if __name__ == "__main__":

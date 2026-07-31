@@ -281,6 +281,7 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
                         key_players_per_combined=key_players_per_combined,
                         win_streak=stats.win_streak,
                         losing_streak=stats.losing_streak,
+                        rank_points=stats.rank_points,
                     )
                 )
         await db.commit()
