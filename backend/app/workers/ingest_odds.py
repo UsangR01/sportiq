@@ -1,4 +1,3 @@
-import asyncio
 import logging
 
 from sqlalchemy import select
@@ -11,7 +10,7 @@ from app.fixtures.models import Fixture
 from app.fixtures.service import find_fixture_by_abbreviations_and_time
 from app.odds.models import Odds
 from app.sports.models import League, Sport
-from app.workers.celery import celery_app
+from app.workers.celery import celery_app, run_task
 
 logger = logging.getLogger(__name__)
 
@@ -152,4 +151,4 @@ async def _ingest_odds() -> None:
 @celery_app.task(name="app.workers.ingest_odds.ingest_odds")
 def ingest_odds() -> None:
     """Celery beat triggers this every 5 minutes for all active sports (TDD §2.3)."""
-    asyncio.run(_ingest_odds())
+    run_task(_ingest_odds())

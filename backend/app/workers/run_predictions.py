@@ -1,4 +1,3 @@
-import asyncio
 import uuid
 from datetime import UTC, datetime
 
@@ -10,7 +9,7 @@ from app.models_ml.runner import ModelRunner
 from app.predictions.models import Prediction
 from app.predictions.service import confidence_tier_for_probability
 from app.sports.models import Sport
-from app.workers.celery import celery_app
+from app.workers.celery import celery_app, run_task
 from app.workers.notify_users import notify_new_pick
 
 _model_runner = ModelRunner()
@@ -88,4 +87,4 @@ async def _run_predictions(fixture_id: uuid.UUID) -> None:
 def run_predictions(fixture_id: str) -> None:
     """Triggered by ingest events (new fixture, late high-priority injury news) rather than a
     fixed schedule — see ingest_injuries.py's re-inference trigger note (TDD §3.3)."""
-    asyncio.run(_run_predictions(uuid.UUID(fixture_id)))
+    run_task(_run_predictions(uuid.UUID(fixture_id)))

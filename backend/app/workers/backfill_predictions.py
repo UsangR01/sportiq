@@ -54,7 +54,6 @@ along with the ones actually worth upgrading. A real backfill of specifically th
 retrodictions would need that provenance distinction added first.
 """
 
-import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -74,7 +73,7 @@ from app.models_ml.runner import ModelRunner
 from app.predictions.models import Prediction
 from app.predictions.service import confidence_tier_for_probability
 from app.sports.models import League, Sport
-from app.workers.celery import celery_app
+from app.workers.celery import celery_app, run_task
 
 _model_runner = ModelRunner()
 
@@ -349,4 +348,4 @@ def backfill_predictions() -> None:
     once) — the per-league _retrodict_league is also called directly from
     ingest_fixtures.py's own daily backfill, so newly-completed fixtures normally get a real
     retrodicted prediction without needing this task scheduled separately at all."""
-    asyncio.run(_backfill_predictions())
+    run_task(_backfill_predictions())

@@ -8,15 +8,13 @@ score/status changes for fixtures already in our DB, without needing a dedicated
 adapter method at all.
 """
 
-import asyncio
-
 from sqlalchemy import select
 
 from app.adapters.factory import AdapterFactory
 from app.core.database import async_session_factory
 from app.fixtures.models import Fixture, FixtureStatus, Team
 from app.sports.models import League, Sport
-from app.workers.celery import celery_app
+from app.workers.celery import celery_app, run_task
 from app.workers.ingest_fixtures import _maybe_settle_outcome, _upsert_live_state
 
 # +/-1 day around "now" — wide enough to catch a fixture that kicked off late yesterday (UTC)
@@ -91,4 +89,4 @@ async def _ingest_live_scores() -> None:
 @celery_app.task(name="app.workers.ingest_live_scores.ingest_live_scores")
 def ingest_live_scores() -> None:
     """Celery beat triggers this every 5 minutes, alongside odds ingest (TDD §2.3)."""
-    asyncio.run(_ingest_live_scores())
+    run_task(_ingest_live_scores())

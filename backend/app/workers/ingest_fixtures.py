@@ -1,4 +1,3 @@
-import asyncio
 from datetime import UTC, datetime
 
 import httpx
@@ -13,7 +12,7 @@ from app.history.models import MatchResult, Outcome
 from app.models_ml.elo import INITIAL_ELO, apply_match_result
 from app.models_ml.key_player_availability import get_key_player_availability
 from app.sports.models import League, Sport
-from app.workers.celery import celery_app
+from app.workers.celery import celery_app, run_task
 
 FEATURE_LOOKAHEAD_DAYS = 7
 FEATURE_WINDOW_MATCHES = 10
@@ -318,4 +317,4 @@ async def _ingest_fixtures() -> None:
 @celery_app.task(name="app.workers.ingest_fixtures.ingest_fixtures")
 def ingest_fixtures() -> None:
     """Celery beat triggers this daily at 02:00 UTC (TDD §2.3)."""
-    asyncio.run(_ingest_fixtures())
+    run_task(_ingest_fixtures())

@@ -19,7 +19,7 @@ from app.odds.models import Odds
 from app.picks.service import best_available_odds, best_outcome
 from app.predictions.models import ConfidenceTier, Prediction
 from app.users.models import User, UserPreference
-from app.workers.celery import celery_app
+from app.workers.celery import celery_app, run_task
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +129,7 @@ async def _notify_new_pick(fixture_id: uuid.UUID, prediction_id: uuid.UUID) -> N
 def notify_new_pick(fixture_id: str, prediction_id: str) -> None:
     """Queued by run_predictions when a new HIGH-confidence prediction is generated (TDD
     §5.4). Deep link on tap: sportiq://fixture/{fixture_id}, handled by Expo Router."""
-    asyncio.run(_notify_new_pick(uuid.UUID(fixture_id), uuid.UUID(prediction_id)))
+    run_task(_notify_new_pick(uuid.UUID(fixture_id), uuid.UUID(prediction_id)))
 
 
 @celery_app.task(name="app.workers.notify_users.notify_kickoff_reminder")

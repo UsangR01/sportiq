@@ -21,3 +21,9 @@ __pycache__/
 ml/data/
 ml/artifacts/
 ml/mlruns/
+
+# Celery beat's local persisted schedule (shelve DB tracking each periodic task's last-run
+# time) — dev-machine-local state, not something to share/commit.
+backend/celerybeat-schedule*
+
+feature_engineering.ipynb

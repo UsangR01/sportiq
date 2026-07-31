@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 
@@ -19,7 +18,7 @@ from app.fixtures.models import (
 )
 from app.models_ml.key_player_availability import get_key_player_availability
 from app.sports.models import Sport
-from app.workers.celery import celery_app
+from app.workers.celery import celery_app, run_task
 
 logger = logging.getLogger(__name__)
 
@@ -234,4 +233,4 @@ async def _ingest_injuries() -> None:
 def ingest_injuries() -> None:
     """Celery beat triggers this every 30 minutes; the RotoWire path additionally gates on
     NBA game days (TDD §2.3). NBA only at MVP."""
-    asyncio.run(_ingest_injuries())
+    run_task(_ingest_injuries())

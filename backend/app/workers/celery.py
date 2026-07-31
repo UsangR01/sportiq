@@ -1,3 +1,7 @@
+import asyncio
+from collections.abc import Coroutine
+from typing import Any
+
 from celery import Celery
 from celery.schedules import crontab
 
@@ -20,6 +24,35 @@ celery_app = Celery(
 )
 
 celery_app.conf.timezone = "UTC"
+
+
+def run_task(coro: Coroutine[Any, Any, None]) -> None:
+    """Every Celery task entrypoint must call this instead of a bare `asyncio.run(coro)`.
+
+    `app.core.database.engine` (and `app.core.redis._pool`) are module-level singletons whose
+    underlying connections are bound to whichever event loop first used them. `asyncio.run()`
+    creates a brand-new loop per call and closes it on return — harmless on Linux's default
+    `prefork` pool (a fresh OS process per task, so the singleton is never reused across
+    loops), but Celery has no prefork on Windows: `--pool=solo`/`--pool=threads` run every
+    task in ONE long-lived worker process. Confirmed live: a real worker's second task
+    (`run_predictions` after an earlier `ingest_odds`) crashed with `AttributeError: 'NoneType'
+    object has no attribute 'send'` — the exact Windows ProactorEventLoop symptom
+    `tests/conftest.py` already works around for pytest-asyncio, for the identical reason.
+    Disposing both singletons here, on the SAME loop right before it closes, is that same
+    fix applied at the Celery task boundary instead of the pytest boundary.
+    """
+    from app.core.database import engine
+    from app.core.redis import _pool as redis_pool
+
+    async def _run() -> None:
+        try:
+            await coro
+        finally:
+            await engine.dispose()
+            await redis_pool.disconnect()
+
+    asyncio.run(_run())
+
 
 # run_predictions and notify_users are triggered by other tasks (new odds/injury data, late
 # injury re-inference) rather than run on a fixed cadence — not scheduled here (TDD §2.3/§5.4).
