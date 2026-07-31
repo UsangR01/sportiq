@@ -1,3 +1,4 @@
+import logging
 from datetime import UTC, datetime
 
 import httpx
@@ -14,6 +15,8 @@ from app.models_ml.key_player_availability import get_key_player_availability
 from app.predictions.models import Prediction
 from app.sports.models import League, Sport
 from app.workers.celery import celery_app, run_task
+
+logger = logging.getLogger(__name__)
 
 FEATURE_LOOKAHEAD_DAYS = 7
 FEATURE_WINDOW_MATCHES = 10
@@ -334,7 +337,24 @@ async def _ingest_fixtures() -> None:
 
     for sport in sports:
         for league in leagues_by_sport[sport.id]:
-            await _ingest_fixtures_for_league(sport, league)
+            # One league's stats adapter failing (e.g. a sport whose provider tier isn't
+            # unlocked yet — tennis's BallDontLie endpoints 401 until the ALL-STAR plan is
+            # confirmed, see CLAUDE.md) must never block every OTHER league's daily ingest —
+            # same per-league isolation principle ingest_odds.py already applies per-adapter,
+            # applied here since this loop has the identical "one failure kills the rest of
+            # the run" shape ingest_live_scores.py's own loop had before this fix. ValueError
+            # is also caught (not just httpx.HTTPError): AdapterFactory.get_stats_adapter
+            # raises it for any sport with no registered adapter at all.
+            try:
+                await _ingest_fixtures_for_league(sport, league)
+            except (httpx.HTTPError, ValueError) as exc:
+                logger.warning(
+                    "Fixture ingest failed for sport=%s league=%s (%s) — skipping, other "
+                    "leagues unaffected",
+                    sport.slug,
+                    league.slug,
+                    exc,
+                )
 
 
 @celery_app.task(name="app.workers.ingest_fixtures.ingest_fixtures")

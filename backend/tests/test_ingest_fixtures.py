@@ -13,6 +13,7 @@ wiring up score display and history backfill:
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 from sqlalchemy import delete, select
 
@@ -23,6 +24,7 @@ from app.history.models import MatchResult, Outcome
 from app.predictions.models import ConfidenceTier, Prediction
 from app.sports.models import League, Sport
 from app.workers.ingest_fixtures import (
+    _ingest_fixtures,
     _ingest_fixtures_for_league,
     _maybe_fetch_corner_stats,
     _maybe_settle_outcome,
@@ -307,8 +309,6 @@ async def test_maybe_fetch_corner_stats_skips_non_football(monkeypatch):
 
 
 async def test_maybe_fetch_corner_stats_degrades_gracefully_on_http_error(monkeypatch):
-    import httpx
-
     async def fake_fetch_corner_stats(fixture_external_id):
         raise httpx.HTTPStatusError("boom", request=None, response=None)
 
@@ -510,4 +510,244 @@ async def test_ingest_queues_a_prediction_for_a_fixture_that_has_none_yet(monkey
             await db.execute(delete(Team).where(Team.sport_id == sport.id))
             await db.execute(delete(League).where(League.sport_id == sport.id))
             await db.execute(delete(Sport).where(Sport.id == sport.id))
+            await db.commit()
+
+
+class _RaisingAdapter:
+    """Stands in for a stats adapter whose provider tier isn't unlocked yet (e.g. tennis's
+    BallDontLie endpoints 401ing until ALL-STAR is confirmed) — real HTTPError, not a
+    ValueError (ingest_odds.py's own per-adapter isolation only ever catches ValueError,
+    a different failure shape)."""
+
+    async def fetch_fixtures(self, sport, league, days_ahead, days_back=0):
+        raise httpx.HTTPStatusError("boom", request=None, response=None)
+
+    async def fetch_team_stats(self, team_id, n_matches, league=None):
+        raise httpx.HTTPStatusError("boom", request=None, response=None)
+
+
+class _NoOpAdapter:
+    """_ingest_fixtures() loops over EVERY active Sport/League in the whole DB, not just this
+    test's own two synthetic rows — real nba/football/tennis rows are already seeded in the
+    dev DB this test suite runs against. Every real sport slug must get an adapter that
+    returns zero fixtures, or this test would create real, bogus Team/Fixture rows against
+    live seeded data (a real mistake made once while writing this test — see git history)."""
+
+    async def fetch_fixtures(self, sport, league, days_ahead, days_back=0):
+        return []
+
+    async def fetch_team_stats(self, team_id, n_matches, league=None):
+        return TeamStats(team_external_id=team_id)
+
+
+async def test_ingest_fixtures_isolates_one_sports_adapter_failure(monkeypatch):
+    """The real regression: adding tennis (whose BallDontLie adapter 401s until the ALL-STAR
+    plan is confirmed) silently froze EVERY other sport's daily fixture ingest, since
+    _ingest_fixtures()'s sport/league loop had no per-league exception isolation at all — one
+    HTTPError killed the whole run. Reported by the user as a Scottish Premiership match
+    stuck showing a stale live minute long after the real game had finished."""
+    kickoff = datetime.now(UTC) + timedelta(days=1)
+    async with async_session_factory() as db:
+        broken_slug = f"test-broken-{uuid.uuid4().hex[:8]}"
+        healthy_slug = f"test-healthy-{uuid.uuid4().hex[:8]}"
+        broken_sport = Sport(slug=broken_slug, name="Broken Sport", model_type="test", active=True)
+        healthy_sport = Sport(
+            slug=healthy_slug, name="Healthy Sport", model_type="test", active=True
+        )
+        db.add_all([broken_sport, healthy_sport])
+        await db.flush()
+        broken_league = League(
+            sport_id=broken_sport.id,
+            slug="broken-league",
+            name="Broken League",
+            country="XX",
+            tier=1,
+            active=True,
+        )
+        healthy_league = League(
+            sport_id=healthy_sport.id,
+            slug="healthy-league",
+            name="Healthy League",
+            country="XX",
+            tier=1,
+            active=True,
+        )
+        db.add_all([broken_league, healthy_league])
+        await db.commit()
+        await db.refresh(broken_sport)
+        await db.refresh(healthy_sport)
+
+    payload = FixturePayload(
+        external_id="fx-isolation-1",
+        league_external_id="healthy-league",
+        home_team_external_id="50",
+        away_team_external_id="60",
+        kickoff_utc=kickoff,
+        season="2026",
+        home_team_name="Home FC",
+        away_team_name="Away FC",
+        status="scheduled",
+    )
+    healthy_adapter = FakeAdapter([payload])
+    broken_adapter = _RaisingAdapter()
+    noop_adapter = _NoOpAdapter()
+
+    import app.adapters.factory as factory_module
+
+    def _fake_get_stats_adapter(slug):
+        if slug == broken_slug:
+            return broken_adapter
+        if slug == healthy_slug:
+            return healthy_adapter
+        return noop_adapter  # every real sport already seeded in the dev DB — must no-op
+
+    monkeypatch.setattr(factory_module.AdapterFactory, "get_stats_adapter", _fake_get_stats_adapter)
+
+    try:
+        await _ingest_fixtures()  # must not raise, despite the broken sport in the same run
+
+        async with async_session_factory() as db:
+            fixture = (
+                await db.execute(
+                    select(Fixture).where(
+                        Fixture.sport_id == healthy_sport.id,
+                        Fixture.external_id == "fx-isolation-1",
+                    )
+                )
+            ).scalar_one_or_none()
+            # The healthy sport's fixture was still ingested despite the other sport's
+            # adapter blowing up earlier/later in the same loop.
+            assert fixture is not None
+    finally:
+        async with async_session_factory() as db:
+            fixture = (
+                await db.execute(
+                    select(Fixture).where(
+                        Fixture.sport_id == healthy_sport.id,
+                        Fixture.external_id == "fx-isolation-1",
+                    )
+                )
+            ).scalar_one_or_none()
+            if fixture is not None:
+                await db.execute(delete(TeamFeatures).where(TeamFeatures.fixture_id == fixture.id))
+                await db.execute(delete(Prediction).where(Prediction.fixture_id == fixture.id))
+                await db.execute(delete(Fixture).where(Fixture.id == fixture.id))
+            await db.execute(
+                delete(Team).where(Team.sport_id.in_([broken_sport.id, healthy_sport.id]))
+            )
+            await db.execute(
+                delete(League).where(League.sport_id.in_([broken_sport.id, healthy_sport.id]))
+            )
+            await db.execute(delete(Sport).where(Sport.id.in_([broken_sport.id, healthy_sport.id])))
+            await db.commit()
+
+
+class _UnregisteredAdapter:
+    """AdapterFactory.get_stats_adapter's real behavior for a sport with no registered
+    adapter at all — a ValueError, not an httpx.HTTPError."""
+
+    async def fetch_fixtures(self, sport, league, days_ahead, days_back=0):
+        raise ValueError(f"No stats adapter registered for data_source_slug={sport!r}")
+
+    async def fetch_team_stats(self, team_id, n_matches, league=None):
+        raise ValueError("no adapter")
+
+
+async def test_ingest_fixtures_isolates_one_sports_unregistered_adapter(monkeypatch):
+    """Same isolation guarantee, for the OTHER real failure shape: a sport with no stats
+    adapter registered at all raises ValueError (see AdapterFactory.get_stats_adapter), not
+    an httpx.HTTPError — must be isolated the same way."""
+    kickoff = datetime.now(UTC) + timedelta(days=1)
+    async with async_session_factory() as db:
+        broken_slug = f"test-unregistered-{uuid.uuid4().hex[:8]}"
+        healthy_slug = f"test-healthy2-{uuid.uuid4().hex[:8]}"
+        broken_sport = Sport(
+            slug=broken_slug, name="Unregistered Sport", model_type="test", active=True
+        )
+        healthy_sport = Sport(
+            slug=healthy_slug, name="Healthy Sport 2", model_type="test", active=True
+        )
+        db.add_all([broken_sport, healthy_sport])
+        await db.flush()
+        broken_league = League(
+            sport_id=broken_sport.id,
+            slug="unregistered-league",
+            name="Unregistered League",
+            country="XX",
+            tier=1,
+            active=True,
+        )
+        healthy_league = League(
+            sport_id=healthy_sport.id,
+            slug="healthy-league-2",
+            name="Healthy League 2",
+            country="XX",
+            tier=1,
+            active=True,
+        )
+        db.add_all([broken_league, healthy_league])
+        await db.commit()
+        await db.refresh(broken_sport)
+        await db.refresh(healthy_sport)
+
+    payload = FixturePayload(
+        external_id="fx-isolation-2",
+        league_external_id="healthy-league-2",
+        home_team_external_id="70",
+        away_team_external_id="80",
+        kickoff_utc=kickoff,
+        season="2026",
+        home_team_name="Home FC 2",
+        away_team_name="Away FC 2",
+        status="scheduled",
+    )
+    healthy_adapter = FakeAdapter([payload])
+    broken_adapter = _UnregisteredAdapter()
+    noop_adapter = _NoOpAdapter()
+
+    import app.adapters.factory as factory_module
+
+    def _fake_get_stats_adapter(slug):
+        if slug == broken_slug:
+            return broken_adapter
+        if slug == healthy_slug:
+            return healthy_adapter
+        return noop_adapter
+
+    monkeypatch.setattr(factory_module.AdapterFactory, "get_stats_adapter", _fake_get_stats_adapter)
+
+    try:
+        await _ingest_fixtures()  # must not raise, despite the unregistered sport in the run
+
+        async with async_session_factory() as db:
+            fixture = (
+                await db.execute(
+                    select(Fixture).where(
+                        Fixture.sport_id == healthy_sport.id,
+                        Fixture.external_id == "fx-isolation-2",
+                    )
+                )
+            ).scalar_one_or_none()
+            assert fixture is not None
+    finally:
+        async with async_session_factory() as db:
+            fixture = (
+                await db.execute(
+                    select(Fixture).where(
+                        Fixture.sport_id == healthy_sport.id,
+                        Fixture.external_id == "fx-isolation-2",
+                    )
+                )
+            ).scalar_one_or_none()
+            if fixture is not None:
+                await db.execute(delete(TeamFeatures).where(TeamFeatures.fixture_id == fixture.id))
+                await db.execute(delete(Prediction).where(Prediction.fixture_id == fixture.id))
+                await db.execute(delete(Fixture).where(Fixture.id == fixture.id))
+            await db.execute(
+                delete(Team).where(Team.sport_id.in_([broken_sport.id, healthy_sport.id]))
+            )
+            await db.execute(
+                delete(League).where(League.sport_id.in_([broken_sport.id, healthy_sport.id]))
+            )
+            await db.execute(delete(Sport).where(Sport.id.in_([broken_sport.id, healthy_sport.id])))
             await db.commit()

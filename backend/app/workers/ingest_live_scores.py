@@ -8,6 +8,9 @@ score/status changes for fixtures already in our DB, without needing a dedicated
 adapter method at all.
 """
 
+import logging
+
+import httpx
 from sqlalchemy import select
 
 from app.adapters.factory import AdapterFactory
@@ -16,6 +19,8 @@ from app.fixtures.models import Fixture, FixtureStatus, Team
 from app.sports.models import League, Sport
 from app.workers.celery import celery_app, run_task
 from app.workers.ingest_fixtures import _maybe_settle_outcome, _upsert_live_state
+
+logger = logging.getLogger(__name__)
 
 # +/-1 day around "now" — wide enough to catch a fixture that kicked off late yesterday (UTC)
 # and is still in progress, or one about to start in the next few hours, without re-querying
@@ -83,7 +88,27 @@ async def _ingest_live_scores() -> None:
 
     for sport in sports:
         for league in leagues_by_sport[sport.id]:
-            await _ingest_live_scores_for_league(sport, league)
+            # One league's stats adapter failing (e.g. a sport whose provider tier isn't
+            # unlocked yet — tennis's BallDontLie endpoints 401 until the ALL-STAR plan is
+            # confirmed, see CLAUDE.md) must never block every OTHER league's live-score
+            # poll for the rest of this 5-minute cycle — same per-league isolation principle
+            # ingest_odds.py already applies per-adapter. Without this, a single sport stuck
+            # in this loop silently freezes every other sport's live scores/status forever,
+            # since this task runs the full sport/league list every time it fires. ValueError
+            # is also caught here (not just httpx.HTTPError): AdapterFactory.get_stats_adapter
+            # raises it for any sport with no registered adapter at all — a real, if rarer,
+            # misconfiguration case that shouldn't be able to take every other sport down
+            # either.
+            try:
+                await _ingest_live_scores_for_league(sport, league)
+            except (httpx.HTTPError, ValueError) as exc:
+                logger.warning(
+                    "Live-score polling failed for sport=%s league=%s (%s) — skipping, "
+                    "other leagues unaffected",
+                    sport.slug,
+                    league.slug,
+                    exc,
+                )
 
 
 @celery_app.task(name="app.workers.ingest_live_scores.ingest_live_scores")
