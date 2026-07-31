@@ -167,11 +167,12 @@ the actual scope of what's possible per league:
   `app/models_ml/markets.py:over_under_probs`. Goals reuses Layer 1's existing xG output
   (`xg_home`/`xg_away`, now persisted on `Prediction` — previously computed then discarded).
   Corners needed a genuinely new pair of Poisson regressors (`corners_home_model`/
-  `corners_away_model`, bundled into the SAME football artefact) — **deliberately reusing
+  `corners_away_model`, bundled into the SAME football artefact) — ~~deliberately reusing
   Layer 1's exact same 21-feature vector as input, not new corner-specific rolling-form
-  features** (a documented simplification: goal-scoring strength correlates with corner
+  features~~ (a documented simplification: goal-scoring strength correlates with corner
   generation in practice), so this needed a new training TARGET but zero new live
-  ingestion/features. Real corners training data was collected via `/fixtures/statistics`
+  ingestion/features **— superseded, see the corners-specific rolling-features entry below**.
+  Real corners training data was collected via `/fixtures/statistics`
   (`Corner Kicks` stat, confirmed live for both EPL and Brasileirão back through at least
   2024) — `ml/training/collect_football_data.py:collect_corner_stats`, 1 API call per
   fixture (same real, unavoidable cost as lineup collection): **2,818 EPL rows / 2,652
@@ -181,6 +182,40 @@ the actual scope of what's possible per league:
   new corners regressors' test MAE ≈ **2.2 corners** (average of home/away) on 589 test rows
   with a real corner count — a real, modest predictive signal, not a strong one, consistent
   with reusing goal-based features rather than corner-specific ones.
+- **Corners-specific rolling features, built after the user asked whether the already-
+  accumulating corner history was actually being used as a model input** (it wasn't — see the
+  bullet above; that was flagged honestly at the time as a "documented simplification", not
+  something already built despite the framing sounding like it). `app/models_ml/
+  football_features.py` gained `CORNERS_FEATURE_NAMES = FEATURE_NAMES + 4 more`
+  (`corners_for_home`/`corners_against_home`/`corners_for_away`/`corners_against_away`, each
+  team's own rolling average corners won/conceded over its last 5 real matches) — deliberately
+  **not** added to `FEATURE_NAMES` itself, so Layer 1's goals regressors and Layer 2's 1X2
+  classifier are completely unaffected; only `corners_home_model`/`corners_away_model` see the
+  expanded 25-feature vector, via a new `corners_row` in `app/models_ml/football.py:predict`
+  (falls back to `layer1_row` for an older artefact with no `corners_feature_names` key — those
+  artefacts' corners regressors were only ever trained on the 21-feature vector, so that's the
+  *correct* row for them, not a degraded fallback). Training-side: `merge_corners_into_game_log`
+  attaches `CORNERS_FOR`/`CORNERS_AGAINST` onto the game log from the already-collected corners
+  parquet before `assemble_from_game_log` runs. Live-serving side: a new `_corners_rolling_live`
+  reads our OWN accumulating `fixture_live_state.home_corners`/`away_corners` (populated once
+  per fixture at real settlement time, see `_maybe_fetch_corner_stats` above) across a team's
+  last 5 real completed fixtures — **no new live API call at all**, confirmed live against a
+  real fixture (Colorado Rapids-shaped MLS matchup): `_corners_rolling_live` returned real,
+  distinct averages per team from genuinely accumulated history. A `games_df` that never had
+  the merge applied (`app/workers/backfill_predictions.py`'s own retrodiction game log) simply
+  gets `None` for all four — a real, accepted gap, not extended to retrodiction in this pass.
+  **Honest result, not spun positively**: retrained football model, real MLflow-logged
+  `corners_test_mae` went from **2.1988 → 2.2048** (589 test rows) — statistically
+  indistinguishable, arguably marginally worse, despite ~92% of sampled fixtures having a real
+  rolling corners value available (checked directly, not assumed — this wasn't a coverage/
+  cold-start problem). The architecture is correct and now genuinely uses real corner-specific
+  history instead of reusing goal-shaped features, with zero regression risk to the 1X2/goals
+  model (confirmed: accuracy/RPS identical to the prior run) — but it did not measurably improve
+  corners predictions in this training run, most likely because attack/defence-based features
+  already correlated with most of the same signal, or because 589 test rows is too small a
+  sample to detect a real but modest effect. Kept because it's the right foundation regardless
+  (real data, no fabrication, will keep accumulating live history going forward), not because it
+  already moved the metric.
 - **Real odds coverage differs sharply by league/provider — confirmed live, not assumed**:
   API-Football's `/odds` has real "Double Chance", "Goals Over/Under", and "Corners Over Under"
   bet types, but (per the existing per-league coverage finding above) that endpoint only has

@@ -3,11 +3,23 @@ Covers the new Elo/streak/richer-H2H additions; the pre-existing rolling-form/re
 win-rate logic already has coverage elsewhere in this file's history (kept minimal here, not
 re-tested for behavior that hasn't changed)."""
 
-from datetime import date
+import uuid
+from datetime import UTC, date, datetime, timedelta
 
 import pandas as pd
+import pytest
+from sqlalchemy import delete
 
-from app.models_ml.football_features import FEATURE_NAMES, assemble_from_game_log
+from app.core.database import async_session_factory
+from app.fixtures.models import Fixture, FixtureLiveState, FixtureStatus, Team
+from app.models_ml.football_features import (
+    CORNERS_FEATURE_NAMES,
+    FEATURE_NAMES,
+    _corners_rolling_live,
+    assemble_from_game_log,
+    merge_corners_into_game_log,
+)
+from app.sports.models import League, Sport
 
 
 def _row(team, opp, home_away, game_date, gf, ga, wdl):
@@ -107,3 +119,296 @@ def test_assemble_from_game_log_leakage_guard_excludes_future_games():
     features = assemble_from_game_log(games, date(2024, 2, 1), "A", "B")
     # Only the Jan 1 win is visible as of Feb 1 — the June loss must not affect the streak.
     assert features["win_streak_home"] == 1.0
+
+
+def test_corners_feature_names_extends_feature_names_only_for_corners():
+    """Corners-only additions must never leak into the shared 21 Layer 1/Layer 2 use —
+    see module docstring."""
+    assert CORNERS_FEATURE_NAMES[: len(FEATURE_NAMES)] == FEATURE_NAMES
+    new_names = CORNERS_FEATURE_NAMES[len(FEATURE_NAMES) :]
+    assert new_names == (
+        "corners_for_home",
+        "corners_against_home",
+        "corners_for_away",
+        "corners_against_away",
+    )
+    assert not set(new_names) & set(FEATURE_NAMES)
+
+
+def test_assemble_from_game_log_corners_none_when_never_merged():
+    """A games_df that never had merge_corners_into_game_log applied (e.g. backfill_
+    predictions.py's own retrodiction game log — a real, accepted gap, see module docstring)
+    must return None for all four corners features, not raise a KeyError."""
+    games = pd.DataFrame([_row("A", "B", "home", date(2024, 1, 1), 1, 0, "W")])
+    features = assemble_from_game_log(games, date(2024, 1, 8), "A", "B")
+    assert features["corners_for_home"] is None
+    assert features["corners_against_home"] is None
+    assert features["corners_for_away"] is None
+    assert features["corners_against_away"] is None
+
+
+def test_merge_corners_into_game_log_attaches_for_and_against():
+    games = pd.DataFrame(
+        [
+            {
+                "FIXTURE_ID": 1,
+                "TEAM_ID": "A",
+                "OPPONENT_ID": "B",
+                "HOME_AWAY": "home",
+                "GAME_DATE": date(2024, 1, 1),
+                "GF": 2,
+                "GA": 1,
+                "WDL": "W",
+            },
+            {
+                "FIXTURE_ID": 1,
+                "TEAM_ID": "B",
+                "OPPONENT_ID": "A",
+                "HOME_AWAY": "away",
+                "GAME_DATE": date(2024, 1, 1),
+                "GF": 1,
+                "GA": 2,
+                "WDL": "L",
+            },
+        ]
+    )
+    corners = pd.DataFrame(
+        [
+            {"FIXTURE_ID": 1, "TEAM_ID": "A", "CORNERS": 7},
+            {"FIXTURE_ID": 1, "TEAM_ID": "B", "CORNERS": 3},
+        ]
+    )
+    merged = merge_corners_into_game_log(games, corners)
+
+    team_a = merged[merged["TEAM_ID"] == "A"].iloc[0]
+    assert team_a["CORNERS_FOR"] == 7
+    assert team_a["CORNERS_AGAINST"] == 3
+
+    team_b = merged[merged["TEAM_ID"] == "B"].iloc[0]
+    assert team_b["CORNERS_FOR"] == 3
+    assert team_b["CORNERS_AGAINST"] == 7
+
+
+def test_merge_corners_into_game_log_leaves_nan_for_missing_fixture():
+    """A fixture whose /fixtures/statistics call never returned a real corner count (a real,
+    documented ~26-30% historical coverage gap) must get NaN, not a fabricated 0."""
+    games = pd.DataFrame(
+        [
+            {
+                "FIXTURE_ID": 1,
+                "TEAM_ID": "A",
+                "OPPONENT_ID": "B",
+                "HOME_AWAY": "home",
+                "GAME_DATE": date(2024, 1, 1),
+                "GF": 2,
+                "GA": 1,
+                "WDL": "W",
+            }
+        ]
+    )
+    corners = pd.DataFrame(columns=["FIXTURE_ID", "TEAM_ID", "CORNERS"])
+    merged = merge_corners_into_game_log(games, corners)
+    assert merged.iloc[0]["CORNERS_FOR"] is None or pd.isna(merged.iloc[0]["CORNERS_FOR"])
+    assert merged.iloc[0]["CORNERS_AGAINST"] is None or pd.isna(merged.iloc[0]["CORNERS_AGAINST"])
+
+
+def test_assemble_from_game_log_corners_rolling_after_merge():
+    games = pd.DataFrame(
+        [
+            {
+                "FIXTURE_ID": 1,
+                "TEAM_ID": "A",
+                "OPPONENT_ID": "X",
+                "HOME_AWAY": "home",
+                "GAME_DATE": date(2024, 1, 1),
+                "GF": 1,
+                "GA": 0,
+                "WDL": "W",
+            },
+            {
+                "FIXTURE_ID": 1,
+                "TEAM_ID": "X",
+                "OPPONENT_ID": "A",
+                "HOME_AWAY": "away",
+                "GAME_DATE": date(2024, 1, 1),
+                "GF": 0,
+                "GA": 1,
+                "WDL": "L",
+            },
+            {
+                "FIXTURE_ID": 2,
+                "TEAM_ID": "A",
+                "OPPONENT_ID": "Y",
+                "HOME_AWAY": "home",
+                "GAME_DATE": date(2024, 1, 8),
+                "GF": 2,
+                "GA": 1,
+                "WDL": "W",
+            },
+            {
+                "FIXTURE_ID": 2,
+                "TEAM_ID": "Y",
+                "OPPONENT_ID": "A",
+                "HOME_AWAY": "away",
+                "GAME_DATE": date(2024, 1, 8),
+                "GF": 1,
+                "GA": 2,
+                "WDL": "L",
+            },
+            # Strictly AFTER as_of_date below — must not affect the rolling average (leakage guard).
+            {
+                "FIXTURE_ID": 3,
+                "TEAM_ID": "A",
+                "OPPONENT_ID": "Z",
+                "HOME_AWAY": "home",
+                "GAME_DATE": date(2024, 6, 1),
+                "GF": 9,
+                "GA": 9,
+                "WDL": "W",
+            },
+            {
+                "FIXTURE_ID": 3,
+                "TEAM_ID": "Z",
+                "OPPONENT_ID": "A",
+                "HOME_AWAY": "away",
+                "GAME_DATE": date(2024, 6, 1),
+                "GF": 9,
+                "GA": 9,
+                "WDL": "L",
+            },
+        ]
+    )
+    corners = pd.DataFrame(
+        [
+            {"FIXTURE_ID": 1, "TEAM_ID": "A", "CORNERS": 6},
+            {"FIXTURE_ID": 1, "TEAM_ID": "X", "CORNERS": 4},
+            {"FIXTURE_ID": 2, "TEAM_ID": "A", "CORNERS": 8},
+            {"FIXTURE_ID": 2, "TEAM_ID": "Y", "CORNERS": 2},
+            {"FIXTURE_ID": 3, "TEAM_ID": "A", "CORNERS": 20},  # future — must be excluded
+            {"FIXTURE_ID": 3, "TEAM_ID": "Z", "CORNERS": 20},
+        ]
+    )
+    merged = merge_corners_into_game_log(games, corners)
+    features = assemble_from_game_log(merged, date(2024, 2, 1), "A", "B")
+    # A's own corners in its two prior games were 6 and 8 -> mean 7; conceded 4 and 2 -> mean 3.
+    assert features["corners_for_home"] == 7.0
+    assert features["corners_against_home"] == 3.0
+
+
+@pytest.fixture
+async def seeded_team_with_corners_history():
+    """A real team with 3 completed fixtures alternating home/away, real corner counts on
+    FixtureLiveState — proves _corners_rolling_live correctly picks home_corners vs
+    away_corners per past fixture depending on which side the team was actually on, not just
+    always reading the same column."""
+    async with async_session_factory() as db:
+        slug = f"test-sport-{uuid.uuid4().hex[:8]}"
+        sport = Sport(slug=slug, name="Test Sport", model_type="test", active=True)
+        db.add(sport)
+        await db.flush()
+        league = League(
+            sport_id=sport.id,
+            slug="test-league",
+            name="Test League",
+            country="XX",
+            tier=1,
+            active=True,
+        )
+        db.add(league)
+        await db.flush()
+        team = Team(sport_id=sport.id, league_id=league.id, name="Team A", external_id="a1")
+        opp1 = Team(sport_id=sport.id, league_id=league.id, name="Opp 1", external_id="o1")
+        opp2 = Team(sport_id=sport.id, league_id=league.id, name="Opp 2", external_id="o2")
+        db.add_all([team, opp1, opp2])
+        await db.flush()
+
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+        fixtures = []
+        # Team A is HOME with 6 corners for / 2 against.
+        f1 = Fixture(
+            sport_id=sport.id,
+            league_id=league.id,
+            external_id="fx-corners-1",
+            home_team_id=team.id,
+            away_team_id=opp1.id,
+            kickoff_utc=base,
+            status=FixtureStatus.COMPLETED,
+            season="2026",
+        )
+        db.add(f1)
+        await db.flush()
+        db.add(
+            FixtureLiveState(
+                fixture_id=f1.id,
+                home_score=1,
+                away_score=0,
+                home_corners=6,
+                away_corners=2,
+                status="completed",
+                last_updated_utc=datetime.now(UTC),
+            )
+        )
+        fixtures.append(f1)
+
+        # Team A is AWAY with 4 corners for (= away_corners) / 8 against (= home_corners).
+        f2 = Fixture(
+            sport_id=sport.id,
+            league_id=league.id,
+            external_id="fx-corners-2",
+            home_team_id=opp2.id,
+            away_team_id=team.id,
+            kickoff_utc=base + timedelta(days=7),
+            status=FixtureStatus.COMPLETED,
+            season="2026",
+        )
+        db.add(f2)
+        await db.flush()
+        db.add(
+            FixtureLiveState(
+                fixture_id=f2.id,
+                home_score=2,
+                away_score=1,
+                home_corners=8,
+                away_corners=4,
+                status="completed",
+                last_updated_utc=datetime.now(UTC),
+            )
+        )
+        fixtures.append(f2)
+
+        await db.commit()
+        for f in fixtures:
+            await db.refresh(f)
+        await db.refresh(team)
+
+    yield team, fixtures
+
+    async with async_session_factory() as db:
+        await db.execute(
+            delete(FixtureLiveState).where(
+                FixtureLiveState.fixture_id.in_([f.id for f in fixtures])
+            )
+        )
+        await db.execute(delete(Fixture).where(Fixture.league_id == league.id))
+        await db.execute(delete(Team).where(Team.league_id == league.id))
+        await db.execute(delete(League).where(League.id == league.id))
+        await db.execute(delete(Sport).where(Sport.id == sport.id))
+        await db.commit()
+
+
+async def test_corners_rolling_live_picks_correct_side_per_fixture(
+    seeded_team_with_corners_history,
+):
+    team, _fixtures = seeded_team_with_corners_history
+    async with async_session_factory() as db:
+        corners_for, corners_against = await _corners_rolling_live(db, team.id, n=5)
+    # Home game: for=6, against=2. Away game: for=4 (away_corners), against=8 (home_corners).
+    assert corners_for == pytest.approx((6 + 4) / 2)
+    assert corners_against == pytest.approx((2 + 8) / 2)
+
+
+async def test_corners_rolling_live_none_with_no_completed_fixtures():
+    async with async_session_factory() as db:
+        corners_for, corners_against = await _corners_rolling_live(db, uuid.uuid4(), n=5)
+    assert corners_for is None
+    assert corners_against is None

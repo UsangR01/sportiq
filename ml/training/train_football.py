@@ -7,11 +7,18 @@ test split below rather than two separate models, since features are goal-rate/p
 (normalized), not raw-goal-count-based, so pooling across leagues with different scoring
 levels is not expected to introduce a systematic bias.
 
-New in this pass, adopted from the user's own prior NBA notebook's feature-engineering ideas
+Adopted from the user's own prior NBA notebook's feature-engineering ideas
 (feature_engineering.ipynb / "Running - NBA Games Prediction Project.ipynb", both added to the
 repo root) — see app/models_ml/football_features.py's module docstring for the full feature
 list: real iterative Elo ratings (elo_diff), win streaks (win_streak_home/away), and richer
 H2H (avg goals scored/allowed vs the specific opponent, not just win rate).
+
+New in this pass: the corners-Poisson-regressors (Over/Under corners market) now train on 4
+corners-specific rolling features (CORNERS_FEATURE_NAMES) instead of reusing Layer 1's goals-
+shaped feature vector — each team's own rolling average corners won/conceded, merged in via
+merge_corners_into_game_log. Layer 1's goals regressors and Layer 2's 1X2 classifier are
+completely unaffected (still exactly FEATURE_NAMES/LAYER2_CONTEXT_FEATURES) — this only
+changes what the corners regressors themselves see.
 
 Two-layer stack per TDD §3.2:
   - Layer 1: two XGBoost Poisson regressors (objective="count:poisson"), one per side,
@@ -68,7 +75,12 @@ import pandas as pd  # noqa: E402
 import xgboost as xgb  # noqa: E402
 from app.models_ml.elo import compute_elo_history  # noqa: E402
 from app.models_ml.football import FootballModel  # noqa: E402
-from app.models_ml.football_features import FEATURE_NAMES, assemble_from_game_log  # noqa: E402
+from app.models_ml.football_features import (  # noqa: E402
+    CORNERS_FEATURE_NAMES,
+    FEATURE_NAMES,
+    assemble_from_game_log,
+    merge_corners_into_game_log,
+)
 from app.models_ml.historical_key_players import (  # noqa: E402
     historical_key_player_availability,
     index_played_names,
@@ -221,7 +233,9 @@ def build_training_examples(
     return pd.DataFrame(rows)
 
 
-async def _register_model(artefact_path: Path, rps: float, accuracy: float, roi: float | None) -> None:
+async def _register_model(
+    artefact_path: Path, rps: float, accuracy: float, roi: float | None
+) -> None:
     from sqlalchemy import select
 
     from app.core.database import async_session_factory
@@ -279,6 +293,12 @@ async def main_async() -> None:
         [pd.read_parquet(DATA_DIR / f"football_corners_{league}.parquet") for league in LEAGUES],
         ignore_index=True,
     )
+    # Attaches CORNERS_FOR/CORNERS_AGAINST onto `games` for the new corners-rolling features
+    # (app/models_ml/football_features.py:_corners_rolling) — `corners` itself stays the raw
+    # FIXTURE_ID/TEAM_ID/CORNERS frame build_training_examples still needs separately for the
+    # corners regressors' own TARGET (home_corners/away_corners), an unrelated use of the same
+    # data.
+    games = merge_corners_into_game_log(games, corners)
     team_codes: dict[str, str] = {}
     for league in LEAGUES:
         codes_path = DATA_DIR / f"football_team_codes_{league}.parquet"
@@ -303,11 +323,15 @@ async def main_async() -> None:
     team_key_players_by_team_season = await _load_team_key_players()
     print(f"  {len(team_key_players_by_team_season)} (team, season) entries loaded")
 
-    print("assembling training examples (leakage-safe: every stat filtered to GAME_DATE < fixture date)...")
+    print(
+        "assembling training examples (leakage-safe: every stat filtered to GAME_DATE < fixture date)..."
+    )
     examples = build_training_examples(
         games, odds, lineups, corners, team_key_players_by_team_season, team_codes
     )
-    print(f"{len(examples)} examples, moneyline available for {examples['home_odds'].notna().sum()}")
+    print(
+        f"{len(examples)} examples, moneyline available for {examples['home_odds'].notna().sum()}"
+    )
 
     train_df = examples[examples["season"].isin(TRAIN_SEASONS)]
     val_df = examples[examples["season"] == VAL_SEASON]
@@ -326,12 +350,16 @@ async def main_async() -> None:
     layer1_away_model.fit(X_train, train_df["away_goals"].astype(float))
 
     # --- Corners-Poisson-regressors (Over/Under corners market, app/models_ml/markets.py) ---
-    # Deliberately reuse Layer 1's exact same feature vector (X_train/X_test) rather than
-    # engineering corner-specific rolling-form features — a documented simplification (goal-
-    # scoring strength correlates with corner generation in practice) that avoids adding any
-    # new LIVE feature/ingestion path; only the training TARGET (real collected corner counts)
-    # is new. Rows missing a real corner count (not every historical fixture's /fixtures/
-    # statistics call returned one) are excluded from fitting, not zero-filled.
+    # Now trained on Layer 1's 21 features PLUS 4 corners-specific rolling ones
+    # (CORNERS_FEATURE_NAMES — each team's own rolling average corners won/conceded, from our
+    # own accumulating fixture_live_state at serving time, see football_features.py's module
+    # docstring for why this replaces the earlier "just reuse Layer 1's vector" simplification).
+    # Rows missing a real corner count (not every historical fixture's /fixtures/statistics
+    # call returned one) are excluded from fitting, not zero-filled.
+    corners_feature_cols = list(CORNERS_FEATURE_NAMES)
+    X_train_corners = train_df[corners_feature_cols].astype(float)
+    X_test_corners = test_df[corners_feature_cols].astype(float)
+
     corners_train_mask = train_df["home_corners"].notna() & train_df["away_corners"].notna()
     corners_test_mask = test_df["home_corners"].notna() & test_df["away_corners"].notna()
     print(
@@ -340,23 +368,26 @@ async def main_async() -> None:
     )
     corners_home_model = xgb.XGBRegressor(objective="count:poisson", n_estimators=200, max_depth=4)
     corners_home_model.fit(
-        X_train[corners_train_mask], train_df.loc[corners_train_mask, "home_corners"].astype(float)
+        X_train_corners[corners_train_mask],
+        train_df.loc[corners_train_mask, "home_corners"].astype(float),
     )
     corners_away_model = xgb.XGBRegressor(objective="count:poisson", n_estimators=200, max_depth=4)
     corners_away_model.fit(
-        X_train[corners_train_mask], train_df.loc[corners_train_mask, "away_corners"].astype(float)
+        X_train_corners[corners_train_mask],
+        train_df.loc[corners_train_mask, "away_corners"].astype(float),
     )
     if corners_test_mask.sum() > 0:
-        corners_home_pred = corners_home_model.predict(X_test[corners_test_mask])
-        corners_away_pred = corners_away_model.predict(X_test[corners_test_mask])
-        corners_mae = float(
-            np.mean(
-                np.abs(corners_home_pred - test_df.loc[corners_test_mask, "home_corners"])
+        corners_home_pred = corners_home_model.predict(X_test_corners[corners_test_mask])
+        corners_away_pred = corners_away_model.predict(X_test_corners[corners_test_mask])
+        corners_mae = (
+            float(
+                np.mean(np.abs(corners_home_pred - test_df.loc[corners_test_mask, "home_corners"]))
+                + np.mean(
+                    np.abs(corners_away_pred - test_df.loc[corners_test_mask, "away_corners"])
+                )
             )
-            + np.mean(
-                np.abs(corners_away_pred - test_df.loc[corners_test_mask, "away_corners"])
-            )
-        ) / 2
+            / 2
+        )
         print(f"corners regressors test MAE (avg of home/away, corners): {corners_mae:.3f}")
     else:
         corners_mae = None
@@ -444,6 +475,7 @@ async def main_async() -> None:
             "calibrators": calibrators,
             "corners_home_model": corners_home_model,
             "corners_away_model": corners_away_model,
+            "corners_feature_names": corners_feature_cols,
         },
         artefact_path,
     )

@@ -23,6 +23,25 @@ The 21 features (this module's FEATURE_NAMES, in order):
   key_players_per_combined_away, moneyline_implied_prob_home, elo_diff, win_streak_home,
   win_streak_away.
 
+4 more, CORNERS-ONLY (CORNERS_FEATURE_NAMES = FEATURE_NAMES + these 4 — NOT part of
+FEATURE_NAMES itself, so Layer 1's goals regressors and Layer 2's 1X2 classifier are
+completely unaffected by this addition): corners_for_home, corners_against_home,
+corners_for_away, corners_against_away — each team's own rolling average corners won/conceded
+over its last LAST_N_FORM real matches. Deliberately kept out of the shared 21: reusing Layer
+1's goals-shaped feature vector for the corners regressors was a documented simplification
+(see app/models_ml/football.py's prior history), not a permanent design choice — corners
+generation correlates with attacking strength but isn't the same signal, and no live provider
+exposes a team's own historical corners as an aggregate the way /teams/statistics does for
+goals (confirmed live research). The live-serving equivalent instead reads our OWN
+fixture_live_state.home_corners/away_corners, populated once per fixture at real settlement
+time (app/workers/ingest_fixtures.py:_maybe_fetch_corner_stats) — no new live API call needed,
+just our own accumulating history. Training-side, merge_corners_into_game_log() must be called
+on the raw game log BEFORE assemble_from_game_log (see ml/training/train_football.py) to attach
+the CORNERS_FOR/CORNERS_AGAINST columns _corners_rolling reads; a games_df that never had this
+merge applied (e.g. app/workers/backfill_predictions.py's own retrodiction game log) simply
+gets None for all four — an honest, accepted gap, same as that module's existing
+moneyline_implied_prob_home-is-always-None note, not a crash.
+
 elo_diff (elo_rating_home - elo_rating_away), not two separate elo_rating_home/away columns:
 Elo ratings are only meaningful relative to each other (a 1500 vs 1500 matchup and a 1700 vs
 1700 matchup are equally "even" despite different absolute levels) — the difference is the
@@ -64,12 +83,46 @@ FEATURE_NAMES = (
     "win_streak_away",
 )
 
+# Corners-regressor-only additions (see module docstring) — never fed to Layer 1's goals
+# regressors or Layer 2's 1X2 classifier, only to app/models_ml/football.py's
+# corners_home_model/corners_away_model.
+CORNERS_FEATURE_NAMES = FEATURE_NAMES + (
+    "corners_for_home",
+    "corners_against_home",
+    "corners_for_away",
+    "corners_against_away",
+)
+
 # TeamStats/TeamFeatures' existing "_5" column-naming convention (form_pts_5, xg_for_5,
 # xg_against_5) already implies football's own "last 5" rolling-form window — NBA reused the
 # same columns with a documented "actually last 10" override (see nba_features.py); football
 # is the sport those names were originally shaped around.
 LAST_N_FORM = 5
 POINTS = {"W": 3, "D": 1, "L": 0}
+
+
+def merge_corners_into_game_log(games: pd.DataFrame, corners: pd.DataFrame) -> pd.DataFrame:
+    """Attaches CORNERS_FOR/CORNERS_AGAINST columns to a game log (ml/training/
+    collect_football_data.py's games_df shape) from its separately-collected corners frame
+    (FIXTURE_ID/TEAM_ID/CORNERS — collect_corner_stats' own shape). Must be called once,
+    before assemble_from_game_log, on the FULL pooled game log (mirrors
+    app/models_ml/elo.py:compute_elo_history's own "call once on the whole log" requirement) —
+    _corners_rolling below reads these two columns directly, no merge logic of its own.
+
+    Left joins (not inner): a fixture whose /fixtures/statistics call never returned a real
+    corner count (a genuine, documented ~26-30% historical gap, see collect_corner_stats'
+    own docstring) gets NaN here, which pandas' own .mean() already skips — same "never
+    fabricate a neutral value" outcome as every other missing-data path in this module,
+    with no special-case code needed."""
+    own = corners.rename(columns={"CORNERS": "CORNERS_FOR"})[
+        ["FIXTURE_ID", "TEAM_ID", "CORNERS_FOR"]
+    ]
+    games = games.merge(own, on=["FIXTURE_ID", "TEAM_ID"], how="left")
+
+    opponent = corners.rename(columns={"TEAM_ID": "OPPONENT_ID", "CORNERS": "CORNERS_AGAINST"})[
+        ["FIXTURE_ID", "OPPONENT_ID", "CORNERS_AGAINST"]
+    ]
+    return games.merge(opponent, on=["FIXTURE_ID", "OPPONENT_ID"], how="left")
 
 
 def _rest_days(team_games: pd.DataFrame, as_of_date: date) -> float | None:
@@ -101,6 +154,28 @@ def _defence_str(team_games: pd.DataFrame, as_of_date: date) -> float | None:
     if recent.empty:
         return None
     return float(recent["GA"].mean())
+
+
+def _corners_rolling(
+    team_games: pd.DataFrame, as_of_date: date
+) -> tuple[float | None, float | None]:
+    """Returns (corners_for, corners_against) over the last LAST_N_FORM matches strictly
+    before as_of_date — same leakage guard as _rolling_form/_defence_str. Requires
+    CORNERS_FOR/CORNERS_AGAINST columns (see merge_corners_into_game_log); a team_games frame
+    that never had corners merged in simply returns (None, None) rather than raising a
+    KeyError — a real, accepted gap for callers that don't merge (see module docstring)."""
+    if "CORNERS_FOR" not in team_games.columns or "CORNERS_AGAINST" not in team_games.columns:
+        return None, None
+    prior = team_games[team_games["GAME_DATE"] < as_of_date].sort_values(
+        "GAME_DATE", ascending=False
+    )
+    recent = prior.head(LAST_N_FORM)
+    corners_for = recent["CORNERS_FOR"].dropna()
+    corners_against = recent["CORNERS_AGAINST"].dropna()
+    return (
+        float(corners_for.mean()) if not corners_for.empty else None,
+        float(corners_against.mean()) if not corners_against.empty else None,
+    )
 
 
 def _side_win_rate(team_games: pd.DataFrame, as_of_date: date, home_away: str) -> float | None:
@@ -184,6 +259,8 @@ def assemble_from_game_log(
     defence_home = _defence_str(home_games, as_of_date)
     defence_away = _defence_str(away_games, as_of_date)
     h2h_win_rate, h2h_avg_scored, h2h_avg_allowed = _h2h_stats(home_games, as_of_date, away_team_id)
+    corners_for_home, corners_against_home = _corners_rolling(home_games, as_of_date)
+    corners_for_away, corners_against_away = _corners_rolling(away_games, as_of_date)
 
     return {
         "attack_str_home": attack_home,
@@ -207,7 +284,54 @@ def assemble_from_game_log(
         "elo_diff": elo_diff,
         "win_streak_home": _win_streak(home_games, as_of_date),
         "win_streak_away": _win_streak(away_games, as_of_date),
+        "corners_for_home": corners_for_home,
+        "corners_against_home": corners_against_home,
+        "corners_for_away": corners_for_away,
+        "corners_against_away": corners_against_away,
     }
+
+
+async def _corners_rolling_live(
+    db, team_id, n: int = LAST_N_FORM
+) -> tuple[float | None, float | None]:
+    """Live counterpart to _corners_rolling. No live provider exposes a team's own historical
+    corners as an aggregate the way /teams/statistics does for goals (confirmed live research,
+    see CLAUDE.md) — so rather than N extra per-fixture API calls, this reads our OWN
+    accumulating fixture_live_state.home_corners/away_corners, written once per fixture at real
+    settlement time (app/workers/ingest_fixtures.py:_maybe_fetch_corner_stats). team_id is our
+    internal UUID (Fixture.home_team_id/away_team_id's own type), not a provider external_id."""
+    from sqlalchemy import or_, select
+
+    from app.fixtures.models import Fixture, FixtureLiveState, FixtureStatus
+
+    rows = (
+        await db.execute(
+            select(Fixture, FixtureLiveState)
+            .join(FixtureLiveState, FixtureLiveState.fixture_id == Fixture.id)
+            .where(
+                or_(Fixture.home_team_id == team_id, Fixture.away_team_id == team_id),
+                Fixture.status == FixtureStatus.COMPLETED,
+                FixtureLiveState.home_corners.is_not(None),
+                FixtureLiveState.away_corners.is_not(None),
+            )
+            .order_by(Fixture.kickoff_utc.desc())
+            .limit(n)
+        )
+    ).all()
+    if not rows:
+        return None, None
+
+    corners_for, corners_against = [], []
+    for fixture, live_state in rows:
+        if fixture.home_team_id == team_id:
+            corners_for.append(live_state.home_corners)
+            corners_against.append(live_state.away_corners)
+        else:
+            corners_for.append(live_state.away_corners)
+            corners_against.append(live_state.home_corners)
+    return float(sum(corners_for) / len(corners_for)), float(
+        sum(corners_against) / len(corners_against)
+    )
 
 
 async def assemble_from_live_db(db, fixture, home_features, away_features) -> dict:
@@ -225,6 +349,9 @@ async def assemble_from_live_db(db, fixture, home_features, away_features) -> di
       taken at ingest time, of Team.elo_rating — the real persistent, incrementally-updated
       value (see app/models_ml/elo.py and app/workers/ingest_fixtures.py:_maybe_settle_outcome).
       No live call needed; this is a live DB value like the other TeamFeatures-sourced fields.
+    - corners_for_home/corners_against_home/corners_for_away/corners_against_away
+      (CORNERS_FEATURE_NAMES-only, see _corners_rolling_live): our own rolling average from
+      fixture_live_state, not a live provider call — see module docstring.
     """
     from sqlalchemy import select
 
@@ -274,6 +401,12 @@ async def assemble_from_live_db(db, fixture, home_features, away_features) -> di
         (1 / best_odds.home_odds) if best_odds and best_odds.home_odds else None
     )
 
+    corners_for_home = corners_against_home = corners_for_away = corners_against_away = None
+    if home_team:
+        corners_for_home, corners_against_home = await _corners_rolling_live(db, home_team.id)
+    if away_team:
+        corners_for_away, corners_against_away = await _corners_rolling_live(db, away_team.id)
+
     return {
         "attack_str_home": home_features.attack_str if home_features else None,
         "attack_str_away": away_features.attack_str if away_features else None,
@@ -312,4 +445,8 @@ async def assemble_from_live_db(db, fixture, home_features, away_features) -> di
         "elo_diff": elo_diff,
         "win_streak_home": home_features.win_streak if home_features else None,
         "win_streak_away": away_features.win_streak if away_features else None,
+        "corners_for_home": corners_for_home,
+        "corners_against_home": corners_against_home,
+        "corners_for_away": corners_for_away,
+        "corners_against_away": corners_against_away,
     }
