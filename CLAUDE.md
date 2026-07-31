@@ -272,6 +272,56 @@ async test functions both make a real Redis call (`GET /picks`'s caching) in the
 Surfaced as `RuntimeError: Event loop is closed` on the second test. Fixed by adding the exact
 same dispose-after-every-test pattern for `app.core.redis._pool`.
 
+## Head-to-head panel replaces the raw Odds table on fixture detail
+
+Per direct user request: "Users don't find the Odds section useful, instead they've asked that
+this be replaced with H2H statistics between the two teams." Turned out to be cheaper than it
+looked — `/fixtures/headtohead` was already being called every time a prediction is generated
+(`fetch_h2h_stats`, feeding the model's `h2h_win_rate_home`/`h2h_avg_goals_scored_home`/
+`h2h_avg_goals_allowed_home` features), it just collapsed the response to 3 aggregate numbers
+and discarded the individual past-meeting data (real dates, real scores, up to
+`H2H_LOOKBACK_MEETINGS` = 10 real meetings per call).
+
+- **`app/adapters/api_football.py`** gained `H2HMeetingSummary`/`H2HDetail` dataclasses and
+  `fetch_h2h_detail(home_external_id, away_external_id)` — same `_fetch_h2h_meetings` call
+  `fetch_h2h_stats` already uses, this time keeping the meeting list instead of collapsing it.
+  Parsing is split into a pure `_parse_h2h_detail(meetings, home_external_id)` (directly
+  testable against a recorded sample shape, no network) and the thin async wrapper, mirroring
+  every other `_map_*`/`_parse_*` helper in this file. `home_wins`/`draws`/`away_wins` and
+  `recent_meetings` are relative to the CURRENT fixture's home/away assignment, not each past
+  meeting's own (same `_goals_from_home_side_perspective` reasoning `fetch_h2h_stats` already
+  used) — a team's H2H record against an opponent shouldn't flip depending on which side it
+  happened to be on in a past meeting.
+- **Fetched live, at `GET /fixtures/{id}` request time — not persisted, not precomputed at
+  ingest.** A deliberate design choice: unlike odds/predictions, H2H doesn't need to be
+  precomputed for the Picks list to filter/sort on, so a per-request live fetch
+  (`app/fixtures/router.py:_fetch_head_to_head`) is the simplest design — no new migration, no
+  new column, no scheduled job — and only costs a real API call when a user actually opens a
+  fixture's detail screen, not once per ingested fixture.
+- **Football only, by design** — API-Football has a dedicated head-to-head endpoint; NBA's own
+  H2H (`app/adapters/balldontlie.py:fetch_h2h_win_rate`) is real but a thinner manual
+  fixture-history search, not wired up to this panel. Gated on `sport_slug == "football"` plus
+  both teams having a real `external_id`; `None` (never a fabricated empty record) for NBA, for
+  a team with no resolved external_id, or for two teams that have genuinely never played each
+  other (API-Football returns zero real meetings).
+- **`FixtureDetail` gained `head_to_head: HeadToHeadResponse | None`** — `meetings_count`/
+  `home_wins`/`draws`/`away_wins`/`avg_goals_scored_home`/`avg_goals_allowed_home`/
+  `recent_meetings` (each with `kickoff_utc`/`home_team_name`/`away_team_name`/`home_goals`/
+  `away_goals`). `GET /fixtures/{id}`'s existing `odds` field is untouched on the backend (real,
+  tested, kept for any future consumer, same reasoning as `GET /picks` being kept
+  unused-but-real after the market-filter-chip removal) — only mobile stopped rendering it.
+- **Mobile**: `mobile/app/fixture/[id].tsx`'s raw bookmaker-by-bookmaker odds table was removed
+  outright and replaced with a `HeadToHead` component — a 3-box record summary (wins for each
+  side + draws), an average-goals-per-meeting line, and a list of real recent meetings with
+  date and score. Rendered only when `fixture.head_to_head` is non-null, so it silently
+  disappears for NBA or a genuinely historyless matchup rather than showing an empty section.
+- **Verified live end-to-end**: real Internacional vs Flamengo fixture (Brasileirão) returned
+  10 real past meetings spanning 2023-2026 with real dates/scores (1 home win / 5 draws / 4 away
+  wins from Internacional's perspective, avg goals 0.9/1.4) — confirmed correct perspective-
+  flipping on meetings where Internacional had historically been the away side. A real NBA
+  fixture confirmed `head_to_head: null`. Screenshotted in the actual running mobile app (Expo
+  web) — the section renders exactly where Odds used to be, no console errors.
+
 ## Mobile implementation status
 
 `mobile/` is a real Expo Router app (SDK 57, TypeScript), scaffolded and live-tested end to end against the running backend on **both** Expo web and a real Android emulator (registration, login, logout, guest-session creation/migration, and every §5.2 screen route) — not just created and left unverified.

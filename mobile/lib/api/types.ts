@@ -107,11 +107,34 @@ export interface TeamFeaturesResponse {
   away_win_rate: number | null;
 }
 
+export interface H2HMeetingResponse {
+  kickoff_utc: string;
+  home_team_name: string;
+  away_team_name: string;
+  home_goals: number;
+  away_goals: number;
+}
+
+// Real head-to-head history — replaces the raw bookmaker-odds table on the fixture detail
+// screen per direct user request. home_wins/draws/away_wins and recent_meetings are relative
+// to THIS fixture's home/away assignment, not each past meeting's own. Football only for now;
+// null (never a fabricated empty record) for NBA or two teams with no shared history.
+export interface HeadToHeadResponse {
+  meetings_count: number;
+  home_wins: number;
+  draws: number;
+  away_wins: number;
+  avg_goals_scored_home: number;
+  avg_goals_allowed_home: number;
+  recent_meetings: H2HMeetingResponse[];
+}
+
 export interface FixtureDetail extends FixtureSummary {
   odds: OddsLineResponse[];
   prediction: PredictionResponse | null;
   home_team_form: TeamFeaturesResponse | null;
   away_team_form: TeamFeaturesResponse | null;
+  head_to_head: HeadToHeadResponse | null;
 }
 
 // Shared across BestPick (GET /fixtures, the merged Picks feed) and the still-live GET /picks

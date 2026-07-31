@@ -7,6 +7,8 @@ no DB.
 
 from datetime import UTC, datetime
 
+import pytest
+
 from app.adapters.api_football import (
     LEAGUE_IDS,
     _compute_team_stats,
@@ -17,6 +19,7 @@ from app.adapters.api_football import (
     _map_odds_response_to_payloads,
     _map_status,
     _parse_form_points,
+    _parse_h2h_detail,
     _parse_streaks,
 )
 
@@ -423,3 +426,79 @@ def test_map_injury_to_update_always_out():
     assert update.player_name == "Test Player"
     assert update.status == "OUT"
     assert update.source == "api_football"
+
+
+def _meeting(home_id, home_name, away_id, away_name, home_goals, away_goals, meeting_date):
+    return {
+        "fixture": {
+            "id": 1000,
+            "date": meeting_date,
+            "status": {"long": "Match Finished", "short": "FT", "elapsed": 90},
+        },
+        "teams": {
+            "home": {"id": home_id, "name": home_name},
+            "away": {"id": away_id, "name": away_name},
+        },
+        "goals": {"home": home_goals, "away": away_goals},
+    }
+
+
+def test_parse_h2h_detail_basic_record():
+    # Home side (id 33) won meeting 1, drew meeting 2, lost meeting 3 — all with 33 as the
+    # HISTORICAL home team too, the simplest case.
+    meetings = [
+        _meeting(33, "Man United", 42, "Arsenal", 2, 0, "2025-01-01T15:00:00+00:00"),
+        _meeting(33, "Man United", 42, "Arsenal", 1, 1, "2024-06-01T15:00:00+00:00"),
+        _meeting(33, "Man United", 42, "Arsenal", 0, 3, "2024-01-01T15:00:00+00:00"),
+    ]
+    detail = _parse_h2h_detail(meetings, "33")
+
+    assert detail.meetings_count == 3
+    assert detail.home_wins == 1
+    assert detail.draws == 1
+    assert detail.away_wins == 1
+    assert detail.avg_goals_scored_home == pytest.approx((2 + 1 + 0) / 3)
+    assert detail.avg_goals_allowed_home == pytest.approx((0 + 1 + 3) / 3)
+    assert len(detail.recent_meetings) == 3
+    assert detail.recent_meetings[0].home_team_name == "Man United"
+    assert detail.recent_meetings[0].home_goals == 2
+    assert detail.recent_meetings[0].away_goals == 0
+
+
+def test_parse_h2h_detail_flips_perspective_when_team_was_away_in_past_meeting():
+    """home_external_id (33) played AWAY in this past meeting and won 3-1 — must count as a
+    home_wins for 33 (the CURRENT fixture's home team), not an away_win, even though 33 was
+    the historical away side. Same reasoning as _goals_from_home_side_perspective."""
+    meetings = [_meeting(42, "Arsenal", 33, "Man United", 1, 3, "2025-01-01T15:00:00+00:00")]
+    detail = _parse_h2h_detail(meetings, "33")
+
+    assert detail.home_wins == 1
+    assert detail.away_wins == 0
+    assert detail.avg_goals_scored_home == 3.0
+    assert detail.avg_goals_allowed_home == 1.0
+
+
+def test_parse_h2h_detail_none_with_no_meetings():
+    assert _parse_h2h_detail([], "33") is None
+
+
+def test_parse_h2h_detail_skips_meetings_with_missing_goals():
+    meetings = [
+        _meeting(33, "Man United", 42, "Arsenal", None, None, "2025-01-01T15:00:00+00:00"),
+        _meeting(33, "Man United", 42, "Arsenal", 2, 1, "2024-01-01T15:00:00+00:00"),
+    ]
+    detail = _parse_h2h_detail(meetings, "33")
+
+    assert detail.meetings_count == 1
+    assert len(detail.recent_meetings) == 1
+    assert detail.home_wins == 1
+
+
+def test_parse_h2h_detail_preserves_meeting_order():
+    meetings = [
+        _meeting(33, "Man United", 42, "Arsenal", 2, 0, "2025-01-01T15:00:00+00:00"),
+        _meeting(33, "Man United", 42, "Arsenal", 0, 0, "2024-01-01T15:00:00+00:00"),
+    ]
+    detail = _parse_h2h_detail(meetings, "33")
+
+    assert [m.home_goals for m in detail.recent_meetings] == [2, 0]

@@ -119,8 +119,35 @@ class PredictionResponse(BaseModel):
     extra_markets: ExtraMarketsResponse | None = None
 
 
+class H2HMeetingResponse(BaseModel):
+    kickoff_utc: datetime
+    home_team_name: str
+    away_team_name: str
+    home_goals: int
+    away_goals: int
+
+
+class HeadToHeadResponse(BaseModel):
+    """Real head-to-head history between this fixture's two teams — replaces the raw
+    bookmaker-odds table on the fixture detail screen per direct user request ("Users don't
+    find the Odds section useful... replaced with H2H statistics"). home_wins/draws/away_wins
+    and recent_meetings are relative to THIS fixture's home/away assignment, not each past
+    meeting's own — see app/adapters/api_football.py:H2HDetail. Football only for now (no
+    equivalent built for NBA yet — see app/fixtures/router.py:get_fixture); null, not a
+    fabricated empty record, when unavailable."""
+
+    meetings_count: int
+    home_wins: int
+    draws: int
+    away_wins: int
+    avg_goals_scored_home: float
+    avg_goals_allowed_home: float
+    recent_meetings: list[H2HMeetingResponse] = []
+
+
 class FixtureDetail(FixtureSummary):
     odds: list[OddsLineResponse] = []
     prediction: PredictionResponse | None = None
     home_team_form: TeamFeaturesResponse | None = None
     away_team_form: TeamFeaturesResponse | None = None
+    head_to_head: HeadToHeadResponse | None = None

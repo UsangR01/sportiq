@@ -618,6 +618,90 @@ async def fetch_h2h_stats(home_external_id: str, away_external_id: str) -> H2HSt
     )
 
 
+@dataclass(frozen=True)
+class H2HMeetingSummary:
+    kickoff_utc: datetime
+    home_team_name: str
+    away_team_name: str
+    home_goals: int
+    away_goals: int
+
+
+@dataclass(frozen=True)
+class H2HDetail:
+    """Richer than H2HStats (which only exists for the model's own feature vector) — this is
+    for a real display panel (GET /fixtures/{id}'s Head-to-Head section), so it keeps the
+    individual meeting list too, not just 3 aggregate numbers. home_wins/draws/away_wins are
+    relative to the CURRENT fixture's home/away assignment, not each historical meeting's own
+    (same reasoning as _goals_from_home_side_perspective) — a team's H2H record against an
+    opponent shouldn't flip depending on which side it happened to be on in a past meeting."""
+
+    meetings_count: int
+    home_wins: int
+    draws: int
+    away_wins: int
+    avg_goals_scored_home: float
+    avg_goals_allowed_home: float
+    recent_meetings: list[H2HMeetingSummary]
+
+
+def _parse_h2h_detail(meetings: list[dict], home_external_id: str) -> H2HDetail | None:
+    """Pure parsing, separated from the live _fetch_h2h_meetings call so this is directly
+    testable against a recorded sample response — mirrors every other _map_*/_parse_* helper
+    in this file. `meetings` is assumed already-completed-only and most-recent-first (i.e.
+    _fetch_h2h_meetings's own return shape) — no re-filtering or re-sorting here."""
+    home_wins = draws = away_wins = 0
+    scored_total = 0
+    allowed_total = 0
+    recent: list[H2HMeetingSummary] = []
+    for fx in meetings:
+        goals = _goals_from_home_side_perspective(fx, home_external_id)
+        if goals is None:
+            continue
+        scored, allowed = goals
+        scored_total += scored
+        allowed_total += allowed
+        if scored > allowed:
+            home_wins += 1
+        elif scored == allowed:
+            draws += 1
+        else:
+            away_wins += 1
+        recent.append(
+            H2HMeetingSummary(
+                kickoff_utc=datetime.fromisoformat(fx["fixture"]["date"].replace("Z", "+00:00")),
+                home_team_name=fx["teams"]["home"]["name"],
+                away_team_name=fx["teams"]["away"]["name"],
+                home_goals=fx["goals"]["home"],
+                away_goals=fx["goals"]["away"],
+            )
+        )
+
+    counted = home_wins + draws + away_wins
+    if counted == 0:
+        return None
+    return H2HDetail(
+        meetings_count=counted,
+        home_wins=home_wins,
+        draws=draws,
+        away_wins=away_wins,
+        avg_goals_scored_home=scored_total / counted,
+        avg_goals_allowed_home=allowed_total / counted,
+        recent_meetings=recent,
+    )
+
+
+async def fetch_h2h_detail(home_external_id: str, away_external_id: str) -> H2HDetail | None:
+    """Real head-to-head data for a fixture detail screen's own H2H panel — same
+    /fixtures/headtohead call this codebase already makes for the model's H2H features
+    (fetch_h2h_stats), just keeping the individual meeting list this time instead of collapsing
+    it to 3 numbers. No new live API cost beyond calling this at fixture-detail-request time
+    rather than only at prediction-generation time (see app/fixtures/router.py:get_fixture) —
+    a per-viewed-fixture cost, not a per-ingested-fixture one."""
+    meetings = await _fetch_h2h_meetings(home_external_id, away_external_id)
+    return _parse_h2h_detail(meetings, home_external_id)
+
+
 async def fetch_lineup_presence(fixture_external_id: str) -> dict[str, set[str]]:
     """Real box-score/lineup presence for ONE already-completed fixture — {team_external_id:
     {lowercased player names who actually played}}. One-off, real-time equivalent of

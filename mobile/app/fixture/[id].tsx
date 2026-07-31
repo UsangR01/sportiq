@@ -4,7 +4,7 @@ import { ScrollView, Text, View } from "react-native";
 
 import { LiveBadge } from "@/components/fixtures/LiveBadge";
 import { getFixture } from "@/lib/api/fixtures";
-import type { ExtraMarketsResponse } from "@/lib/api/types";
+import type { ExtraMarketsResponse, HeadToHeadResponse } from "@/lib/api/types";
 
 export default function FixtureDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -84,24 +84,12 @@ export default function FixtureDetailScreen() {
 
       {fixture.prediction?.extra_markets && <ExtraMarkets markets={fixture.prediction.extra_markets} />}
 
-      {fixture.odds.length > 0 && (
-        <View className="mb-6">
-          <Text className="mb-2 text-sm font-semibold uppercase text-gray-400">Odds</Text>
-          {fixture.odds.map((line, i) => (
-            <View
-              key={`${line.bookmaker}-${i}`}
-              className="mb-1 flex-row justify-between border-b border-gray-100 py-2 dark:border-gray-800"
-            >
-              <Text className="text-gray-700 dark:text-gray-300">{line.bookmaker}</Text>
-              <Text className="text-gray-900 dark:text-gray-100">
-                {[line.home_odds, line.draw_odds, line.away_odds]
-                  .filter((v): v is number => v !== null)
-                  .map((v) => v.toFixed(2))
-                  .join(" / ")}
-              </Text>
-            </View>
-          ))}
-        </View>
+      {fixture.head_to_head && (
+        <HeadToHead
+          headToHead={fixture.head_to_head}
+          homeTeam={fixture.home_team}
+          awayTeam={fixture.away_team}
+        />
       )}
 
       {/* Highlight clips (TDD §5.3 Option A) and the animated match tracker (Option B,
@@ -164,6 +152,74 @@ function ExtraMarkets({ markets }: { markets: ExtraMarketsResponse }) {
           ))}
         </View>
       )}
+    </View>
+  );
+}
+
+/** Real head-to-head history between the two teams — replaces the raw bookmaker-odds table
+ * per direct user request ("Users don't find the Odds section useful... replaced with H2H
+ * statistics"). home_wins/draws/away_wins and recent_meetings are already relative to THIS
+ * fixture's home/away assignment (see backend/app/adapters/api_football.py:H2HDetail), so no
+ * client-side flipping is needed here. Only rendered when the backend actually has real
+ * history — football-only for now, null (not a fabricated empty state) for NBA or two teams
+ * with no shared past meetings. */
+function HeadToHead({
+  headToHead,
+  homeTeam,
+  awayTeam,
+}: {
+  headToHead: HeadToHeadResponse;
+  homeTeam: string;
+  awayTeam: string;
+}) {
+  return (
+    <View className="mb-6">
+      <Text className="mb-2 text-sm font-semibold uppercase text-gray-400">Head to Head</Text>
+
+      <View className="mb-3 flex-row rounded-lg bg-gray-50 p-3 dark:bg-gray-900">
+        <View className="flex-1 items-center">
+          <Text className="text-lg font-bold text-gray-900 dark:text-gray-100">
+            {headToHead.home_wins}
+          </Text>
+          <Text className="text-center text-xs text-gray-500 dark:text-gray-400">
+            {homeTeam} wins
+          </Text>
+        </View>
+        <View className="flex-1 items-center">
+          <Text className="text-lg font-bold text-gray-900 dark:text-gray-100">
+            {headToHead.draws}
+          </Text>
+          <Text className="text-xs text-gray-500 dark:text-gray-400">Draws</Text>
+        </View>
+        <View className="flex-1 items-center">
+          <Text className="text-lg font-bold text-gray-900 dark:text-gray-100">
+            {headToHead.away_wins}
+          </Text>
+          <Text className="text-center text-xs text-gray-500 dark:text-gray-400">
+            {awayTeam} wins
+          </Text>
+        </View>
+      </View>
+
+      <Text className="mb-3 text-xs text-gray-500 dark:text-gray-400">
+        Avg goals per meeting: {homeTeam} {headToHead.avg_goals_scored_home.toFixed(1)} · {awayTeam}{" "}
+        {headToHead.avg_goals_allowed_home.toFixed(1)}
+      </Text>
+
+      {headToHead.recent_meetings.map((meeting, i) => (
+        <View
+          key={i}
+          className="flex-row items-center justify-between border-b border-gray-100 py-2 dark:border-gray-800"
+        >
+          <Text className="text-xs text-gray-400">
+            {new Date(meeting.kickoff_utc).toLocaleDateString()}
+          </Text>
+          <Text className="text-gray-900 dark:text-gray-100">
+            {meeting.home_team_name} {meeting.home_goals} – {meeting.away_goals}{" "}
+            {meeting.away_team_name}
+          </Text>
+        </View>
+      ))}
     </View>
   );
 }

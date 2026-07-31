@@ -14,6 +14,8 @@ from app.fixtures.schemas import (
     ExtraMarketsResponse,
     FixtureDetail,
     FixtureSummary,
+    H2HMeetingResponse,
+    HeadToHeadResponse,
     LiveStateResponse,
     OddsLineResponse,
     PredictionResponse,
@@ -397,6 +399,54 @@ async def list_fixtures(
     return filtered
 
 
+async def _fetch_head_to_head(
+    db: AsyncSession, sport_slug: str, fixture: Fixture
+) -> HeadToHeadResponse | None:
+    """Real head-to-head history for the fixture detail screen's H2H panel — replaces the raw
+    bookmaker-odds table per direct user request. Fetched live, at request time (not persisted,
+    not precomputed at ingest) since this is a detail-screen-only concern, not something the
+    Picks list needs to filter/sort on — a per-viewed-fixture cost, not a per-ingested-fixture
+    one. Football only for now: API-Football has a dedicated /fixtures/headtohead endpoint;
+    NBA's own H2H (BallDontLie, via a manual fixture-history search) is real but not wired up
+    here — None, not a fabricated empty record, for NBA or any team missing an external_id."""
+    if sport_slug != "football":
+        return None
+
+    home_team = (
+        await db.execute(select(Team).where(Team.id == fixture.home_team_id))
+    ).scalar_one_or_none()
+    away_team = (
+        await db.execute(select(Team).where(Team.id == fixture.away_team_id))
+    ).scalar_one_or_none()
+    if not home_team or not away_team or not home_team.external_id or not away_team.external_id:
+        return None
+
+    from app.adapters.api_football import fetch_h2h_detail
+
+    detail = await fetch_h2h_detail(home_team.external_id, away_team.external_id)
+    if detail is None:
+        return None
+
+    return HeadToHeadResponse(
+        meetings_count=detail.meetings_count,
+        home_wins=detail.home_wins,
+        draws=detail.draws,
+        away_wins=detail.away_wins,
+        avg_goals_scored_home=detail.avg_goals_scored_home,
+        avg_goals_allowed_home=detail.avg_goals_allowed_home,
+        recent_meetings=[
+            H2HMeetingResponse(
+                kickoff_utc=m.kickoff_utc,
+                home_team_name=m.home_team_name,
+                away_team_name=m.away_team_name,
+                home_goals=m.home_goals,
+                away_goals=m.away_goals,
+            )
+            for m in detail.recent_meetings
+        ],
+    )
+
+
 async def _load_fixture_or_404(fixture_id: uuid.UUID, db: AsyncSession):
     stmt = _fixture_query().where(Fixture.id == fixture_id)
     row = (await db.execute(stmt)).first()
@@ -441,6 +491,8 @@ async def get_fixture(fixture_id: uuid.UUID, db: AsyncSession = Depends(get_db))
         )
     ).scalar_one_or_none()
 
+    head_to_head = await _fetch_head_to_head(db, sport_slug, fixture)
+
     return FixtureDetail(
         **_to_summary(
             fixture,
@@ -484,6 +536,7 @@ async def get_fixture(fixture_id: uuid.UUID, db: AsyncSession = Depends(get_db))
             if away_features
             else None
         ),
+        head_to_head=head_to_head,
     )
 
 
