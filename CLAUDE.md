@@ -278,49 +278,59 @@ Per direct user request: "Users don't find the Odds section useful, instead they
 this be replaced with H2H statistics between the two teams." Turned out to be cheaper than it
 looked — `/fixtures/headtohead` was already being called every time a prediction is generated
 (`fetch_h2h_stats`, feeding the model's `h2h_win_rate_home`/`h2h_avg_goals_scored_home`/
-`h2h_avg_goals_allowed_home` features), it just collapsed the response to 3 aggregate numbers
-and discarded the individual past-meeting data (real dates, real scores, up to
-`H2H_LOOKBACK_MEETINGS` = 10 real meetings per call).
+`h2h_avg_goals_allowed_home` features).
 
-- **`app/adapters/api_football.py`** gained `H2HMeetingSummary`/`H2HDetail` dataclasses and
-  `fetch_h2h_detail(home_external_id, away_external_id)` — same `_fetch_h2h_meetings` call
-  `fetch_h2h_stats` already uses, this time keeping the meeting list instead of collapsing it.
-  Parsing is split into a pure `_parse_h2h_detail(meetings, home_external_id)` (directly
-  testable against a recorded sample shape, no network) and the thin async wrapper, mirroring
-  every other `_map_*`/`_parse_*` helper in this file. `home_wins`/`draws`/`away_wins` and
-  `recent_meetings` are relative to the CURRENT fixture's home/away assignment, not each past
-  meeting's own (same `_goals_from_home_side_perspective` reasoning `fetch_h2h_stats` already
-  used) — a team's H2H record against an opponent shouldn't flip depending on which side it
-  happened to be on in a past meeting.
+**Redesigned again, per a direct follow-up request**, after the user saw the first version (a
+3-box record + an avg-goals line + a list of individual past meeting scores) and asked for 5
+specific aggregate stat comparisons instead ("show important stats that will give users
+confidence on the prediction... Average goals/corners/Total Shots/Shots on goal/Ball Possession
+in the last 5 meetings for Team A and B Respectively"), dropping the individual-meeting-score
+list entirely:
+
+- **`app/adapters/api_football.py`** gained `MatchStats` (`corners`/`shots`/`shots_on_goal`/
+  `possession_pct`, all nullable) and `fetch_match_stats(fixture_external_id)` — one real call to
+  `/fixtures/statistics`, confirmed live to return `"Corner Kicks"`/`"Total Shots"`/`"Shots on
+  Goal"` as real ints and `"Ball Possession"` as a **string percentage** (`"27%"`, parsed via
+  `.rstrip("%")` before `float(...)`) per team. `fetch_corner_stats` (used by the existing
+  corners-settlement path) is now a thin wrapper over this, preserving its exact prior external
+  behavior. `H2H_DETAIL_MEETINGS = 5` is a deliberately separate constant from the model-feature
+  `H2H_LOOKBACK_MEETINGS = 10`, so this display-only panel can never silently change model
+  training/serving behavior.
+- **`H2HDetail`** dropped `recent_meetings` entirely and gained `avg_corners_home/away`,
+  `avg_shots_home/away`, `avg_shots_on_goal_home/away`, `avg_possession_home/away` (goals'
+  `avg_goals_scored_home`/`avg_goals_allowed_home` renamed to `avg_goals_home`/`avg_goals_away`
+  to match the new naming). `fetch_h2h_detail` now makes up to 6 real calls per fixture-detail
+  view (1 `/fixtures/headtohead` + up to 5 `/fixtures/statistics`, one per counted meeting) — a
+  real cost increase from the prior version's 1 call, still bounded per-view, not per-ingested-
+  fixture, since this is fetched live at request time (unchanged from the original design).
+- **Per-side averaging needs no perspective flip for match stats**, unlike goals: `MatchStats` is
+  keyed directly by the real provider team external id, so `_parse_h2h_detail` just checks which
+  external id matches the CURRENT fixture's home team per meeting — no
+  `_goals_from_home_side_perspective`-style flip logic needed (goals still need it, since the raw
+  API response pre-attaches them to a specific historical home/away slot).
+- **Never fabricates a value**: each of the 5 stats' averages is computed from its own
+  independent list of real, non-null values across the counted meetings — a meeting with real
+  corners but a missing possession stat contributes to the corners average while being excluded
+  only from the possession average, rather than dropping the whole meeting or fabricating a 0.
+  Any single meeting's `/fixtures/statistics` call failing (`httpx.HTTPError`) degrades that one
+  meeting's stats to empty rather than failing the whole panel.
 - **Fetched live, at `GET /fixtures/{id}` request time — not persisted, not precomputed at
-  ingest.** A deliberate design choice: unlike odds/predictions, H2H doesn't need to be
-  precomputed for the Picks list to filter/sort on, so a per-request live fetch
-  (`app/fixtures/router.py:_fetch_head_to_head`) is the simplest design — no new migration, no
-  new column, no scheduled job — and only costs a real API call when a user actually opens a
-  fixture's detail screen, not once per ingested fixture.
-- **Football only, by design** — API-Football has a dedicated head-to-head endpoint; NBA's own
-  H2H (`app/adapters/balldontlie.py:fetch_h2h_win_rate`) is real but a thinner manual
-  fixture-history search, not wired up to this panel. Gated on `sport_slug == "football"` plus
-  both teams having a real `external_id`; `None` (never a fabricated empty record) for NBA, for
-  a team with no resolved external_id, or for two teams that have genuinely never played each
-  other (API-Football returns zero real meetings).
-- **`FixtureDetail` gained `head_to_head: HeadToHeadResponse | None`** — `meetings_count`/
-  `home_wins`/`draws`/`away_wins`/`avg_goals_scored_home`/`avg_goals_allowed_home`/
-  `recent_meetings` (each with `kickoff_utc`/`home_team_name`/`away_team_name`/`home_goals`/
-  `away_goals`). `GET /fixtures/{id}`'s existing `odds` field is untouched on the backend (real,
-  tested, kept for any future consumer, same reasoning as `GET /picks` being kept
-  unused-but-real after the market-filter-chip removal) — only mobile stopped rendering it.
-- **Mobile**: `mobile/app/fixture/[id].tsx`'s raw bookmaker-by-bookmaker odds table was removed
-  outright and replaced with a `HeadToHead` component — a 3-box record summary (wins for each
-  side + draws), an average-goals-per-meeting line, and a list of real recent meetings with
-  date and score. Rendered only when `fixture.head_to_head` is non-null, so it silently
-  disappears for NBA or a genuinely historyless matchup rather than showing an empty section.
-- **Verified live end-to-end**: real Internacional vs Flamengo fixture (Brasileirão) returned
-  10 real past meetings spanning 2023-2026 with real dates/scores (1 home win / 5 draws / 4 away
-  wins from Internacional's perspective, avg goals 0.9/1.4) — confirmed correct perspective-
-  flipping on meetings where Internacional had historically been the away side. A real NBA
-  fixture confirmed `head_to_head: null`. Screenshotted in the actual running mobile app (Expo
-  web) — the section renders exactly where Odds used to be, no console errors.
+  ingest.** Unchanged from the original design: no new migration, no new column, no scheduled
+  job — cost is paid only when a user actually opens a fixture's detail screen.
+- **Football only, by design** — unchanged: gated on `sport_slug == "football"` plus both teams
+  having a real `external_id`; `None` (never a fabricated empty record) for NBA, an unresolved
+  team, or two teams that have genuinely never played each other.
+- **Mobile**: `mobile/app/fixture/[id].tsx`'s `HeadToHead` component keeps the 3-box win/draw/win
+  record, but the avg-goals line and recent-meetings list were replaced with a `StatRow` per
+  stat (Goals/Corners/Total Shots/Shots on Goal/Possession), each showing the home team's value
+  left-aligned and the away team's value right-aligned around a centered label — a row is
+  omitted entirely (not shown as "— / —") when both sides are null for that specific stat.
+- **Verified live end-to-end** against a real Internacional vs Cruzeiro fixture (Brasileirão):
+  5 real meetings, 2 home wins / 1 draw / 2 away wins, real averages across all 5 stats (goals
+  1.2/0.8, corners 6.0/5.4, shots 13.8/11.6, shots on goal 5.2/4.2, possession 49%/51%) —
+  confirmed via both the raw `GET /fixtures/{id}` JSON and a screenshot of the actual rendered
+  panel in the running mobile app (Expo web), no console errors. Full backend suite (187 tests),
+  `ruff check .`, and `black --check .` all pass; `npx tsc --noEmit` clean on mobile.
 
 ## Mobile implementation status
 

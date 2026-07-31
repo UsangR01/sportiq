@@ -156,13 +156,51 @@ function ExtraMarkets({ markets }: { markets: ExtraMarketsResponse }) {
   );
 }
 
+function formatStat(value: number | null, decimals: number, suffix: string): string {
+  return value == null ? "—" : `${value.toFixed(decimals)}${suffix}`;
+}
+
+/** One stat's home-vs-away comparison — home value left-aligned, label centered, away value
+ * right-aligned, mirroring how sports apps typically lay out a head-to-head stat comparison.
+ * Renders nothing (not even the label) when BOTH sides are null, e.g. a stat type
+ * /fixtures/statistics genuinely never returned for any of the counted meetings — never a
+ * fabricated "—" / "—" row for a stat that's entirely unavailable. */
+function StatRow({
+  label,
+  homeValue,
+  awayValue,
+  suffix = "",
+  decimals = 1,
+}: {
+  label: string;
+  homeValue: number | null;
+  awayValue: number | null;
+  suffix?: string;
+  decimals?: number;
+}) {
+  if (homeValue == null && awayValue == null) return null;
+  return (
+    <View className="flex-row items-center border-b border-gray-100 py-2 dark:border-gray-800">
+      <Text className="flex-1 text-left text-sm font-semibold text-gray-900 dark:text-gray-100">
+        {formatStat(homeValue, decimals, suffix)}
+      </Text>
+      <Text className="flex-1 text-center text-xs uppercase text-gray-400">{label}</Text>
+      <Text className="flex-1 text-right text-sm font-semibold text-gray-900 dark:text-gray-100">
+        {formatStat(awayValue, decimals, suffix)}
+      </Text>
+    </View>
+  );
+}
+
 /** Real head-to-head history between the two teams — replaces the raw bookmaker-odds table
  * per direct user request ("Users don't find the Odds section useful... replaced with H2H
- * statistics"). home_wins/draws/away_wins and recent_meetings are already relative to THIS
- * fixture's home/away assignment (see backend/app/adapters/api_football.py:H2HDetail), so no
- * client-side flipping is needed here. Only rendered when the backend actually has real
- * history — football-only for now, null (not a fabricated empty state) for NBA or two teams
- * with no shared past meetings. */
+ * statistics"). Per a follow-up ask, shows average goals/corners/shots/shots-on-goal/
+ * possession over the last meetings_count real meetings instead of a list of individual match
+ * scores ("important stats that will give users confidence on the prediction"). Every value
+ * is already relative to THIS fixture's home/away assignment (see backend/app/adapters/
+ * api_football.py:H2HDetail), so no client-side flipping is needed here. Only rendered when
+ * the backend actually has real history — football-only for now, null (not a fabricated
+ * empty state) for NBA or two teams with no shared past meetings. */
 function HeadToHead({
   headToHead,
   homeTeam,
@@ -201,25 +239,43 @@ function HeadToHead({
         </View>
       </View>
 
-      <Text className="mb-3 text-xs text-gray-500 dark:text-gray-400">
-        Avg goals per meeting: {homeTeam} {headToHead.avg_goals_scored_home.toFixed(1)} · {awayTeam}{" "}
-        {headToHead.avg_goals_allowed_home.toFixed(1)}
+      <Text className="mb-2 text-xs text-gray-400">
+        Averages over last {headToHead.meetings_count} meeting
+        {headToHead.meetings_count === 1 ? "" : "s"}
       </Text>
+      <View className="mb-1 flex-row">
+        <Text className="flex-1 text-left text-xs font-semibold text-gray-500 dark:text-gray-400" numberOfLines={1}>
+          {homeTeam}
+        </Text>
+        <View className="flex-1" />
+        <Text className="flex-1 text-right text-xs font-semibold text-gray-500 dark:text-gray-400" numberOfLines={1}>
+          {awayTeam}
+        </Text>
+      </View>
 
-      {headToHead.recent_meetings.map((meeting, i) => (
-        <View
-          key={i}
-          className="flex-row items-center justify-between border-b border-gray-100 py-2 dark:border-gray-800"
-        >
-          <Text className="text-xs text-gray-400">
-            {new Date(meeting.kickoff_utc).toLocaleDateString()}
-          </Text>
-          <Text className="text-gray-900 dark:text-gray-100">
-            {meeting.home_team_name} {meeting.home_goals} – {meeting.away_goals}{" "}
-            {meeting.away_team_name}
-          </Text>
-        </View>
-      ))}
+      <StatRow label="Goals" homeValue={headToHead.avg_goals_home} awayValue={headToHead.avg_goals_away} />
+      <StatRow
+        label="Corners"
+        homeValue={headToHead.avg_corners_home}
+        awayValue={headToHead.avg_corners_away}
+      />
+      <StatRow
+        label="Total Shots"
+        homeValue={headToHead.avg_shots_home}
+        awayValue={headToHead.avg_shots_away}
+      />
+      <StatRow
+        label="Shots on Goal"
+        homeValue={headToHead.avg_shots_on_goal_home}
+        awayValue={headToHead.avg_shots_on_goal_away}
+      />
+      <StatRow
+        label="Possession"
+        homeValue={headToHead.avg_possession_home}
+        awayValue={headToHead.avg_possession_away}
+        suffix="%"
+        decimals={0}
+      />
     </View>
   );
 }

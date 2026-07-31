@@ -536,17 +536,16 @@ class H2HStats:
     avg_goals_allowed_home: float
 
 
-async def _fetch_h2h_meetings(home_external_id: str, away_external_id: str) -> list[dict]:
+async def _fetch_h2h_meetings(
+    home_external_id: str, away_external_id: str, last: int = H2H_LOOKBACK_MEETINGS
+) -> list[dict]:
     api_key = get_settings().api_football_key
     async with httpx.AsyncClient(
         base_url=BASE_URL, headers={"x-apisports-key": api_key}, timeout=15.0
     ) as client:
         response = await client.get(
             "/fixtures/headtohead",
-            params={
-                "h2h": f"{home_external_id}-{away_external_id}",
-                "last": H2H_LOOKBACK_MEETINGS,
-            },
+            params={"h2h": f"{home_external_id}-{away_external_id}", "last": last},
         )
         response.raise_for_status()
     meetings = response.json().get("response", [])
@@ -618,64 +617,177 @@ async def fetch_h2h_stats(home_external_id: str, away_external_id: str) -> H2HSt
     )
 
 
+H2H_DETAIL_MEETINGS = 5  # the fixture-detail H2H panel's own window — separate from
+# H2H_LOOKBACK_MEETINGS (the model-feature functions above, untouched) per direct user request
+# ("Average X in the last 5 meetings") — deliberately NOT shared with fetch_h2h_stats/
+# fetch_h2h_win_rate so this display-only change can never silently alter model training.
+
+
 @dataclass(frozen=True)
-class H2HMeetingSummary:
-    kickoff_utc: datetime
-    home_team_name: str
-    away_team_name: str
-    home_goals: int
-    away_goals: int
+class MatchStats:
+    """Real per-team stats for ONE match, via /fixtures/statistics — the same endpoint
+    fetch_corner_stats already calls for the corners settlement grading, this time keeping
+    every field the H2H averages panel needs. Any field can be None on its own (not every
+    historical fixture's /fixtures/statistics call returns every stat type — a real, accepted
+    gap, never fabricated)."""
+
+    corners: int | None
+    shots: int | None
+    shots_on_goal: int | None
+    possession_pct: float | None
+
+
+_MATCH_STAT_TYPE_KEYS = {
+    "Corner Kicks": "corners",
+    "Total Shots": "shots",
+    "Shots on Goal": "shots_on_goal",
+}
+
+
+def _parse_match_stats_block(team_block: dict) -> MatchStats:
+    """Pure parsing for one team's /fixtures/statistics block — confirmed live (see CLAUDE.md)
+    that this real response includes far more than corners: Total Shots, Shots on Goal, Ball
+    Possession (a string like "27%", not a number) among ~19 real stat types per team."""
+    values: dict[str, float | None] = {
+        "corners": None,
+        "shots": None,
+        "shots_on_goal": None,
+        "possession_pct": None,
+    }
+    for stat in team_block.get("statistics", []):
+        raw = stat.get("value")
+        if raw is None:
+            continue
+        stat_type = stat.get("type")
+        if stat_type in _MATCH_STAT_TYPE_KEYS:
+            values[_MATCH_STAT_TYPE_KEYS[stat_type]] = int(raw)
+        elif stat_type == "Ball Possession":
+            values["possession_pct"] = float(str(raw).rstrip("%"))
+    return MatchStats(**values)
+
+
+async def fetch_match_stats(fixture_external_id: str) -> dict[str, MatchStats]:
+    """Real per-team match stats (corners, total shots, shots on goal, ball possession %) for
+    ONE already-completed fixture — {team_external_id: MatchStats}. fetch_corner_stats below is
+    now a thin wrapper over this, kept as its own function since its one caller (settlement-time
+    corners-pick grading) only ever needed corners, not the fuller shape. A team missing from
+    the response (real, not every historical fixture's /fixtures/statistics call returns a
+    value) simply has no entry, never a fabricated value."""
+    api_key = get_settings().api_football_key
+    async with httpx.AsyncClient(
+        base_url=BASE_URL, headers={"x-apisports-key": api_key}, timeout=15.0
+    ) as client:
+        response = await client.get("/fixtures/statistics", params={"fixture": fixture_external_id})
+        response.raise_for_status()
+
+    return {
+        str(team_block["team"]["id"]): _parse_match_stats_block(team_block)
+        for team_block in response.json().get("response", [])
+    }
 
 
 @dataclass(frozen=True)
 class H2HDetail:
     """Richer than H2HStats (which only exists for the model's own feature vector) — this is
-    for a real display panel (GET /fixtures/{id}'s Head-to-Head section), so it keeps the
-    individual meeting list too, not just 3 aggregate numbers. home_wins/draws/away_wins are
-    relative to the CURRENT fixture's home/away assignment, not each historical meeting's own
-    (same reasoning as _goals_from_home_side_perspective) — a team's H2H record against an
-    opponent shouldn't flip depending on which side it happened to be on in a past meeting."""
+    for a real display panel (GET /fixtures/{id}'s Head-to-Head section): the last
+    H2H_DETAIL_MEETINGS real meetings' average goals/corners/shots/shots-on-goal/possession per
+    side, replacing an earlier version of this panel that just listed individual match scores
+    (per direct user follow-up: "important stats that will give users confidence on the
+    prediction" instead of raw scores). home_wins/draws/away_wins and every avg_*_home/away
+    field are relative to the CURRENT fixture's home/away assignment, not each historical
+    meeting's own (same reasoning as _goals_from_home_side_perspective) — a team's H2H record
+    shouldn't flip depending on which side it happened to be on in a past meeting. Every avg_*
+    field is None (never a fabricated value) when none of the counted meetings had a real value
+    for that specific stat."""
 
     meetings_count: int
     home_wins: int
     draws: int
     away_wins: int
-    avg_goals_scored_home: float
-    avg_goals_allowed_home: float
-    recent_meetings: list[H2HMeetingSummary]
+    avg_goals_home: float | None
+    avg_goals_away: float | None
+    avg_corners_home: float | None
+    avg_corners_away: float | None
+    avg_shots_home: float | None
+    avg_shots_away: float | None
+    avg_shots_on_goal_home: float | None
+    avg_shots_on_goal_away: float | None
+    avg_possession_home: float | None
+    avg_possession_away: float | None
 
 
-def _parse_h2h_detail(meetings: list[dict], home_external_id: str) -> H2HDetail | None:
-    """Pure parsing, separated from the live _fetch_h2h_meetings call so this is directly
-    testable against a recorded sample response — mirrors every other _map_*/_parse_* helper
-    in this file. `meetings` is assumed already-completed-only and most-recent-first (i.e.
-    _fetch_h2h_meetings's own return shape) — no re-filtering or re-sorting here."""
+def _average(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def _parse_h2h_detail(
+    meetings: list[dict],
+    home_external_id: str,
+    match_stats_by_fixture: dict[str, dict[str, MatchStats]],
+) -> H2HDetail | None:
+    """Pure parsing, separated from the live _fetch_h2h_meetings/fetch_match_stats calls so
+    this is directly testable against recorded sample responses — mirrors every other
+    _map_*/_parse_* helper in this file. `meetings` is assumed already-completed-only (i.e.
+    _fetch_h2h_meetings's own return shape) — no re-filtering here. match_stats_by_fixture is
+    keyed by the meeting's own fixture id (as a string) to whichever MatchStats
+    fetch_match_stats managed to fetch for it — an empty dict for a fixture whose stats call
+    failed or returned nothing degrades every avg_* for that meeting to "not counted", never a
+    fabricated value."""
     home_wins = draws = away_wins = 0
-    scored_total = 0
-    allowed_total = 0
-    recent: list[H2HMeetingSummary] = []
+    goals_home: list[float] = []
+    goals_away: list[float] = []
+    corners_home: list[float] = []
+    corners_away: list[float] = []
+    shots_home: list[float] = []
+    shots_away: list[float] = []
+    shots_on_goal_home: list[float] = []
+    shots_on_goal_away: list[float] = []
+    possession_home: list[float] = []
+    possession_away: list[float] = []
+
     for fx in meetings:
         goals = _goals_from_home_side_perspective(fx, home_external_id)
         if goals is None:
             continue
         scored, allowed = goals
-        scored_total += scored
-        allowed_total += allowed
+        goals_home.append(scored)
+        goals_away.append(allowed)
         if scored > allowed:
             home_wins += 1
         elif scored == allowed:
             draws += 1
         else:
             away_wins += 1
-        recent.append(
-            H2HMeetingSummary(
-                kickoff_utc=datetime.fromisoformat(fx["fixture"]["date"].replace("Z", "+00:00")),
-                home_team_name=fx["teams"]["home"]["name"],
-                away_team_name=fx["teams"]["away"]["name"],
-                home_goals=fx["goals"]["home"],
-                away_goals=fx["goals"]["away"],
-            )
+
+        # match_stats is keyed by the PROVIDER'S OWN team id directly, not home/away, so no
+        # perspective flip is needed here the way goals needed — just look up whichever
+        # external id is home_external_id in THIS meeting vs. the other side.
+        meeting_home_id = str(fx["teams"]["home"]["id"])
+        meeting_away_id = str(fx["teams"]["away"]["id"])
+        away_external_id_here = (
+            meeting_away_id if meeting_home_id == home_external_id else meeting_home_id
         )
+        stats_by_team = match_stats_by_fixture.get(str(fx["fixture"]["id"]), {})
+        home_stats = stats_by_team.get(home_external_id)
+        away_stats = stats_by_team.get(away_external_id_here)
+        if home_stats:
+            if home_stats.corners is not None:
+                corners_home.append(home_stats.corners)
+            if home_stats.shots is not None:
+                shots_home.append(home_stats.shots)
+            if home_stats.shots_on_goal is not None:
+                shots_on_goal_home.append(home_stats.shots_on_goal)
+            if home_stats.possession_pct is not None:
+                possession_home.append(home_stats.possession_pct)
+        if away_stats:
+            if away_stats.corners is not None:
+                corners_away.append(away_stats.corners)
+            if away_stats.shots is not None:
+                shots_away.append(away_stats.shots)
+            if away_stats.shots_on_goal is not None:
+                shots_on_goal_away.append(away_stats.shots_on_goal)
+            if away_stats.possession_pct is not None:
+                possession_away.append(away_stats.possession_pct)
 
     counted = home_wins + draws + away_wins
     if counted == 0:
@@ -685,21 +797,44 @@ def _parse_h2h_detail(meetings: list[dict], home_external_id: str) -> H2HDetail 
         home_wins=home_wins,
         draws=draws,
         away_wins=away_wins,
-        avg_goals_scored_home=scored_total / counted,
-        avg_goals_allowed_home=allowed_total / counted,
-        recent_meetings=recent,
+        avg_goals_home=_average(goals_home),
+        avg_goals_away=_average(goals_away),
+        avg_corners_home=_average(corners_home),
+        avg_corners_away=_average(corners_away),
+        avg_shots_home=_average(shots_home),
+        avg_shots_away=_average(shots_away),
+        avg_shots_on_goal_home=_average(shots_on_goal_home),
+        avg_shots_on_goal_away=_average(shots_on_goal_away),
+        avg_possession_home=_average(possession_home),
+        avg_possession_away=_average(possession_away),
     )
 
 
 async def fetch_h2h_detail(home_external_id: str, away_external_id: str) -> H2HDetail | None:
     """Real head-to-head data for a fixture detail screen's own H2H panel — same
     /fixtures/headtohead call this codebase already makes for the model's H2H features
-    (fetch_h2h_stats), just keeping the individual meeting list this time instead of collapsing
-    it to 3 numbers. No new live API cost beyond calling this at fixture-detail-request time
-    rather than only at prediction-generation time (see app/fixtures/router.py:get_fixture) —
-    a per-viewed-fixture cost, not a per-ingested-fixture one."""
-    meetings = await _fetch_h2h_meetings(home_external_id, away_external_id)
-    return _parse_h2h_detail(meetings, home_external_id)
+    (fetch_h2h_stats), over the last H2H_DETAIL_MEETINGS (5) meetings. Also fetches
+    fetch_match_stats once PER meeting (up to 5 extra real API calls, on top of the 1 for
+    headtohead itself) to get corners/shots/shots-on-goal/possession — a real, meaningful cost
+    increase over the goals-only version of this panel, but still a per-viewed-fixture cost
+    (see app/fixtures/router.py:get_fixture), not a per-ingested-fixture one, and each call
+    degrades independently (an HTTPError for one meeting's stats doesn't lose the others, or
+    the win/draw/loss record and goals averages, which need no extra call at all)."""
+    meetings = await _fetch_h2h_meetings(
+        home_external_id, away_external_id, last=H2H_DETAIL_MEETINGS
+    )
+    if not meetings:
+        return None
+
+    match_stats_by_fixture: dict[str, dict[str, MatchStats]] = {}
+    for fx in meetings:
+        fixture_id = str(fx["fixture"]["id"])
+        try:
+            match_stats_by_fixture[fixture_id] = await fetch_match_stats(fixture_id)
+        except httpx.HTTPError:
+            match_stats_by_fixture[fixture_id] = {}
+
+    return _parse_h2h_detail(meetings, home_external_id, match_stats_by_fixture)
 
 
 async def fetch_lineup_presence(fixture_external_id: str) -> dict[str, set[str]]:
@@ -733,28 +868,15 @@ async def fetch_lineup_presence(fixture_external_id: str) -> dict[str, set[str]]
 
 async def fetch_corner_stats(fixture_external_id: str) -> dict[str, int]:
     """Real per-team corner-kick count for ONE already-completed fixture — {team_external_id:
-    corners}, via /fixtures/statistics's real "Corner Kicks" stat (the same field
-    ml/training/collect_football_data.py:collect_corner_stats collects in bulk for training —
-    this is the one-off, live-serving equivalent). Called exactly once per fixture, at
-    settlement time (app/workers/ingest_fixtures.py:_maybe_settle_outcome), so the Over/Under
-    corners market can show a real win/loss verdict instead of staying permanently
-    unverifiable. A team missing from the response (real, not every historical fixture's
-    /fixtures/statistics call returns a value — see CLAUDE.md) simply has no entry here,
-    never a fabricated 0."""
-    api_key = get_settings().api_football_key
-    async with httpx.AsyncClient(
-        base_url=BASE_URL, headers={"x-apisports-key": api_key}, timeout=15.0
-    ) as client:
-        response = await client.get("/fixtures/statistics", params={"fixture": fixture_external_id})
-        response.raise_for_status()
-
-    corners_by_team: dict[str, int] = {}
-    for team_block in response.json().get("response", []):
-        team_id = str(team_block["team"]["id"])
-        corners = next(
-            (s["value"] for s in team_block.get("statistics", []) if s["type"] == "Corner Kicks"),
-            None,
-        )
-        if corners is not None:
-            corners_by_team[team_id] = int(corners)
-    return corners_by_team
+    corners}. Called exactly once per fixture, at settlement time
+    (app/workers/ingest_fixtures.py:_maybe_settle_outcome), so the Over/Under corners market can
+    show a real win/loss verdict instead of staying permanently unverifiable. Now a thin wrapper
+    over fetch_match_stats (kept as its own function since this is the only caller that only
+    ever needed corners, not the fuller shots/possession shape) — same real behavior: a team
+    missing a real corners value simply has no entry here, never a fabricated 0."""
+    stats_by_team = await fetch_match_stats(fixture_external_id)
+    return {
+        team_id: stats.corners
+        for team_id, stats in stats_by_team.items()
+        if stats.corners is not None
+    }

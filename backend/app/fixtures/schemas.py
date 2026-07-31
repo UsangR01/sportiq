@@ -119,30 +119,33 @@ class PredictionResponse(BaseModel):
     extra_markets: ExtraMarketsResponse | None = None
 
 
-class H2HMeetingResponse(BaseModel):
-    kickoff_utc: datetime
-    home_team_name: str
-    away_team_name: str
-    home_goals: int
-    away_goals: int
-
-
 class HeadToHeadResponse(BaseModel):
     """Real head-to-head history between this fixture's two teams — replaces the raw
     bookmaker-odds table on the fixture detail screen per direct user request ("Users don't
-    find the Odds section useful... replaced with H2H statistics"). home_wins/draws/away_wins
-    and recent_meetings are relative to THIS fixture's home/away assignment, not each past
-    meeting's own — see app/adapters/api_football.py:H2HDetail. Football only for now (no
-    equivalent built for NBA yet — see app/fixtures/router.py:get_fixture); null, not a
-    fabricated empty record, when unavailable."""
+    find the Odds section useful... replaced with H2H statistics"). Per a follow-up ask,
+    shows average goals/corners/shots/shots-on-goal/possession over the last 5 real meetings
+    per side instead of a list of individual match scores ("important stats that will give
+    users confidence on the prediction"). home_wins/draws/away_wins and every avg_*_home/away
+    field are relative to THIS fixture's home/away assignment, not each past meeting's own —
+    see app/adapters/api_football.py:H2HDetail. Football only for now (no equivalent built for
+    NBA yet — see app/fixtures/router.py:get_fixture); null, not a fabricated empty record,
+    when unavailable. Each avg_* field is independently null when none of the counted meetings
+    had a real value for that specific stat (never a fabricated average)."""
 
     meetings_count: int
     home_wins: int
     draws: int
     away_wins: int
-    avg_goals_scored_home: float
-    avg_goals_allowed_home: float
-    recent_meetings: list[H2HMeetingResponse] = []
+    avg_goals_home: float | None = None
+    avg_goals_away: float | None = None
+    avg_corners_home: float | None = None
+    avg_corners_away: float | None = None
+    avg_shots_home: float | None = None
+    avg_shots_away: float | None = None
+    avg_shots_on_goal_home: float | None = None
+    avg_shots_on_goal_away: float | None = None
+    avg_possession_home: float | None = None
+    avg_possession_away: float | None = None
 
 
 class FixtureDetail(FixtureSummary):

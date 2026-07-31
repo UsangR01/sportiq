@@ -107,26 +107,30 @@ export interface TeamFeaturesResponse {
   away_win_rate: number | null;
 }
 
-export interface H2HMeetingResponse {
-  kickoff_utc: string;
-  home_team_name: string;
-  away_team_name: string;
-  home_goals: number;
-  away_goals: number;
-}
-
 // Real head-to-head history — replaces the raw bookmaker-odds table on the fixture detail
-// screen per direct user request. home_wins/draws/away_wins and recent_meetings are relative
-// to THIS fixture's home/away assignment, not each past meeting's own. Football only for now;
-// null (never a fabricated empty record) for NBA or two teams with no shared history.
+// screen per direct user request. Per a follow-up ask, shows average goals/corners/shots/
+// shots-on-goal/possession over the last 5 real meetings per side instead of a list of
+// individual match scores ("important stats that will give users confidence on the
+// prediction"). home_wins/draws/away_wins and every avg_*_home/away field are relative to
+// THIS fixture's home/away assignment, not each past meeting's own. Football only for now;
+// null (never a fabricated empty record) for NBA or two teams with no shared history. Each
+// avg_* field is independently null when none of the counted meetings had a real value for
+// that specific stat.
 export interface HeadToHeadResponse {
   meetings_count: number;
   home_wins: number;
   draws: number;
   away_wins: number;
-  avg_goals_scored_home: number;
-  avg_goals_allowed_home: number;
-  recent_meetings: H2HMeetingResponse[];
+  avg_goals_home: number | null;
+  avg_goals_away: number | null;
+  avg_corners_home: number | null;
+  avg_corners_away: number | null;
+  avg_shots_home: number | null;
+  avg_shots_away: number | null;
+  avg_shots_on_goal_home: number | null;
+  avg_shots_on_goal_away: number | null;
+  avg_possession_home: number | null;
+  avg_possession_away: number | null;
 }
 
 export interface FixtureDetail extends FixtureSummary {

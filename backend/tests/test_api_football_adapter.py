@@ -11,6 +11,7 @@ import pytest
 
 from app.adapters.api_football import (
     LEAGUE_IDS,
+    MatchStats,
     _compute_team_stats,
     _current_football_season,
     _goals_from_home_side_perspective,
@@ -20,6 +21,7 @@ from app.adapters.api_football import (
     _map_status,
     _parse_form_points,
     _parse_h2h_detail,
+    _parse_match_stats_block,
     _parse_streaks,
 )
 
@@ -428,10 +430,12 @@ def test_map_injury_to_update_always_out():
     assert update.source == "api_football"
 
 
-def _meeting(home_id, home_name, away_id, away_name, home_goals, away_goals, meeting_date):
+def _meeting(
+    home_id, home_name, away_id, away_name, home_goals, away_goals, meeting_date, fixture_id=1000
+):
     return {
         "fixture": {
-            "id": 1000,
+            "id": fixture_id,
             "date": meeting_date,
             "status": {"long": "Match Finished", "short": "FT", "elapsed": 90},
         },
@@ -451,18 +455,19 @@ def test_parse_h2h_detail_basic_record():
         _meeting(33, "Man United", 42, "Arsenal", 1, 1, "2024-06-01T15:00:00+00:00"),
         _meeting(33, "Man United", 42, "Arsenal", 0, 3, "2024-01-01T15:00:00+00:00"),
     ]
-    detail = _parse_h2h_detail(meetings, "33")
+    detail = _parse_h2h_detail(meetings, "33", {})
 
     assert detail.meetings_count == 3
     assert detail.home_wins == 1
     assert detail.draws == 1
     assert detail.away_wins == 1
-    assert detail.avg_goals_scored_home == pytest.approx((2 + 1 + 0) / 3)
-    assert detail.avg_goals_allowed_home == pytest.approx((0 + 1 + 3) / 3)
-    assert len(detail.recent_meetings) == 3
-    assert detail.recent_meetings[0].home_team_name == "Man United"
-    assert detail.recent_meetings[0].home_goals == 2
-    assert detail.recent_meetings[0].away_goals == 0
+    assert detail.avg_goals_home == pytest.approx((2 + 1 + 0) / 3)
+    assert detail.avg_goals_away == pytest.approx((0 + 1 + 3) / 3)
+    # No match_stats_by_fixture entries supplied — every corners/shots/possession average must
+    # be None, never a fabricated value.
+    assert detail.avg_corners_home is None
+    assert detail.avg_shots_home is None
+    assert detail.avg_possession_home is None
 
 
 def test_parse_h2h_detail_flips_perspective_when_team_was_away_in_past_meeting():
@@ -470,16 +475,16 @@ def test_parse_h2h_detail_flips_perspective_when_team_was_away_in_past_meeting()
     home_wins for 33 (the CURRENT fixture's home team), not an away_win, even though 33 was
     the historical away side. Same reasoning as _goals_from_home_side_perspective."""
     meetings = [_meeting(42, "Arsenal", 33, "Man United", 1, 3, "2025-01-01T15:00:00+00:00")]
-    detail = _parse_h2h_detail(meetings, "33")
+    detail = _parse_h2h_detail(meetings, "33", {})
 
     assert detail.home_wins == 1
     assert detail.away_wins == 0
-    assert detail.avg_goals_scored_home == 3.0
-    assert detail.avg_goals_allowed_home == 1.0
+    assert detail.avg_goals_home == 3.0
+    assert detail.avg_goals_away == 1.0
 
 
 def test_parse_h2h_detail_none_with_no_meetings():
-    assert _parse_h2h_detail([], "33") is None
+    assert _parse_h2h_detail([], "33", {}) is None
 
 
 def test_parse_h2h_detail_skips_meetings_with_missing_goals():
@@ -487,18 +492,90 @@ def test_parse_h2h_detail_skips_meetings_with_missing_goals():
         _meeting(33, "Man United", 42, "Arsenal", None, None, "2025-01-01T15:00:00+00:00"),
         _meeting(33, "Man United", 42, "Arsenal", 2, 1, "2024-01-01T15:00:00+00:00"),
     ]
-    detail = _parse_h2h_detail(meetings, "33")
+    detail = _parse_h2h_detail(meetings, "33", {})
 
     assert detail.meetings_count == 1
-    assert len(detail.recent_meetings) == 1
     assert detail.home_wins == 1
 
 
-def test_parse_h2h_detail_preserves_meeting_order():
+def test_parse_h2h_detail_averages_match_stats_per_side_across_meetings():
+    """Real match-stats averaging, respecting perspective: meeting 1 has 33 as historical home
+    (looked up directly by team id 33), meeting 2 has 33 as historical AWAY (looked up by
+    whichever id ISN'T 33) — match_stats is keyed by real provider team id, not home/away, so
+    no flip is needed the way goals needed, just a correct lookup either way."""
     meetings = [
-        _meeting(33, "Man United", 42, "Arsenal", 2, 0, "2025-01-01T15:00:00+00:00"),
-        _meeting(33, "Man United", 42, "Arsenal", 0, 0, "2024-01-01T15:00:00+00:00"),
+        _meeting(33, "Man United", 42, "Arsenal", 2, 0, "2025-01-01T15:00:00+00:00", fixture_id=1),
+        _meeting(42, "Arsenal", 33, "Man United", 1, 1, "2024-06-01T15:00:00+00:00", fixture_id=2),
     ]
-    detail = _parse_h2h_detail(meetings, "33")
+    match_stats_by_fixture = {
+        "1": {
+            "33": MatchStats(corners=6, shots=14, shots_on_goal=5, possession_pct=55.0),
+            "42": MatchStats(corners=4, shots=10, shots_on_goal=3, possession_pct=45.0),
+        },
+        "2": {
+            "33": MatchStats(corners=8, shots=12, shots_on_goal=6, possession_pct=60.0),
+            "42": MatchStats(corners=2, shots=8, shots_on_goal=2, possession_pct=40.0),
+        },
+    }
+    detail = _parse_h2h_detail(meetings, "33", match_stats_by_fixture)
 
-    assert [m.home_goals for m in detail.recent_meetings] == [2, 0]
+    assert detail.avg_corners_home == pytest.approx((6 + 8) / 2)
+    assert detail.avg_corners_away == pytest.approx((4 + 2) / 2)
+    assert detail.avg_shots_home == pytest.approx((14 + 12) / 2)
+    assert detail.avg_shots_on_goal_away == pytest.approx((3 + 2) / 2)
+    assert detail.avg_possession_home == pytest.approx((55.0 + 60.0) / 2)
+    assert detail.avg_possession_away == pytest.approx((45.0 + 40.0) / 2)
+
+
+def test_parse_h2h_detail_averages_only_meetings_with_real_match_stats():
+    """A meeting whose /fixtures/statistics call never returned anything (missing from
+    match_stats_by_fixture entirely, or missing one specific field) must be excluded from that
+    specific average, not treated as a fabricated 0 — same convention as every other
+    missing-data path in this file."""
+    meetings = [
+        _meeting(33, "Man United", 42, "Arsenal", 2, 0, "2025-01-01T15:00:00+00:00", fixture_id=1),
+        _meeting(33, "Man United", 42, "Arsenal", 1, 1, "2024-06-01T15:00:00+00:00", fixture_id=2),
+    ]
+    match_stats_by_fixture = {
+        "1": {
+            "33": MatchStats(corners=6, shots=None, shots_on_goal=5, possession_pct=None),
+            "42": MatchStats(corners=4, shots=None, shots_on_goal=3, possession_pct=None),
+        },
+        # fixture "2" missing entirely — its own /fixtures/statistics call failed/returned
+        # nothing.
+    }
+    detail = _parse_h2h_detail(meetings, "33", match_stats_by_fixture)
+
+    assert detail.avg_corners_home == 6.0  # only meeting 1 counted
+    assert detail.avg_shots_home is None  # neither meeting had a real value
+    assert detail.avg_possession_home is None
+
+
+def test_parse_match_stats_block_real_shape():
+    # Confirmed live (see CLAUDE.md): real /fixtures/statistics response shape, including
+    # Ball Possession as a string percentage, not a number.
+    team_block = {
+        "team": {"id": 33, "name": "Manchester United"},
+        "statistics": [
+            {"type": "Shots on Goal", "value": 5},
+            {"type": "Shots off Goal", "value": 7},
+            {"type": "Total Shots", "value": 16},
+            {"type": "Corner Kicks", "value": 2},
+            {"type": "Ball Possession", "value": "27%"},
+            {"type": "Red Cards", "value": None},
+        ],
+    }
+    stats = _parse_match_stats_block(team_block)
+
+    assert stats.corners == 2
+    assert stats.shots == 16
+    assert stats.shots_on_goal == 5
+    assert stats.possession_pct == 27.0
+
+
+def test_parse_match_stats_block_missing_fields_stay_none():
+    stats = _parse_match_stats_block({"team": {"id": 33, "name": "X"}, "statistics": []})
+    assert stats.corners is None
+    assert stats.shots is None
+    assert stats.shots_on_goal is None
+    assert stats.possession_pct is None

@@ -14,7 +14,6 @@ from app.fixtures.schemas import (
     ExtraMarketsResponse,
     FixtureDetail,
     FixtureSummary,
-    H2HMeetingResponse,
     HeadToHeadResponse,
     LiveStateResponse,
     OddsLineResponse,
@@ -432,18 +431,16 @@ async def _fetch_head_to_head(
         home_wins=detail.home_wins,
         draws=detail.draws,
         away_wins=detail.away_wins,
-        avg_goals_scored_home=detail.avg_goals_scored_home,
-        avg_goals_allowed_home=detail.avg_goals_allowed_home,
-        recent_meetings=[
-            H2HMeetingResponse(
-                kickoff_utc=m.kickoff_utc,
-                home_team_name=m.home_team_name,
-                away_team_name=m.away_team_name,
-                home_goals=m.home_goals,
-                away_goals=m.away_goals,
-            )
-            for m in detail.recent_meetings
-        ],
+        avg_goals_home=detail.avg_goals_home,
+        avg_goals_away=detail.avg_goals_away,
+        avg_corners_home=detail.avg_corners_home,
+        avg_corners_away=detail.avg_corners_away,
+        avg_shots_home=detail.avg_shots_home,
+        avg_shots_away=detail.avg_shots_away,
+        avg_shots_on_goal_home=detail.avg_shots_on_goal_home,
+        avg_shots_on_goal_away=detail.avg_shots_on_goal_away,
+        avg_possession_home=detail.avg_possession_home,
+        avg_possession_away=detail.avg_possession_away,
     )
 
 

@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import delete
 
-from app.adapters.api_football import H2HDetail, H2HMeetingSummary
+from app.adapters.api_football import H2HDetail
 from app.core.database import async_session_factory
 from app.fixtures.models import Fixture, FixtureStatus, Team
 from app.fixtures.router import _fetch_head_to_head
@@ -157,24 +157,16 @@ async def test_fetch_head_to_head_maps_real_detail_for_football(
         home_wins=1,
         draws=1,
         away_wins=0,
-        avg_goals_scored_home=1.5,
-        avg_goals_allowed_home=1.0,
-        recent_meetings=[
-            H2HMeetingSummary(
-                kickoff_utc=datetime(2025, 1, 1, tzinfo=UTC),
-                home_team_name="Home FC",
-                away_team_name="Away FC",
-                home_goals=2,
-                away_goals=1,
-            ),
-            H2HMeetingSummary(
-                kickoff_utc=datetime(2024, 6, 1, tzinfo=UTC),
-                home_team_name="Home FC",
-                away_team_name="Away FC",
-                home_goals=1,
-                away_goals=1,
-            ),
-        ],
+        avg_goals_home=1.5,
+        avg_goals_away=1.0,
+        avg_corners_home=6.0,
+        avg_corners_away=4.5,
+        avg_shots_home=14.0,
+        avg_shots_away=10.0,
+        avg_shots_on_goal_home=5.0,
+        avg_shots_on_goal_away=3.0,
+        avg_possession_home=55.0,
+        avg_possession_away=45.0,
     )
 
     captured_ids = []
@@ -194,10 +186,11 @@ async def test_fetch_head_to_head_maps_real_detail_for_football(
     assert result.home_wins == 1
     assert result.draws == 1
     assert result.away_wins == 0
-    assert result.avg_goals_scored_home == 1.5
-    assert len(result.recent_meetings) == 2
-    assert result.recent_meetings[0].home_team_name == "Home FC"
-    assert result.recent_meetings[0].home_goals == 2
+    assert result.avg_goals_home == 1.5
+    assert result.avg_goals_away == 1.0
+    assert result.avg_corners_home == 6.0
+    assert result.avg_shots_on_goal_away == 3.0
+    assert result.avg_possession_home == 55.0
 
 
 async def test_fetch_head_to_head_returns_none_when_adapter_has_no_real_meetings(
