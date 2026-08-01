@@ -12,6 +12,17 @@ class FootballModel(BaseModel):
     library across both layers and both sports), followed by one-vs-rest isotonic probability
     calibration per class, renormalised to sum to 1.
 
+    xg_home/xg_away and corners_xg_home/away ALSO go through their own isotonic regression
+    calibration (mapping raw predicted rate -> empirically-observed real rate on validation
+    data) before being returned — added after a real, found-in-production issue: Over/Under
+    goals/corners (app/models_ml/markets.py) had NO calibration at all, just a raw Poisson CDF
+    on Layer 1's uncalibrated output, and for fixtures whose feature distribution the training
+    data barely covers (Scottish Premiership/MLS/CSL, sharing this EPL/Brasileirão-trained
+    model per CLAUDE.md), that produced implausibly extreme Over/Under probabilities (99-100%)
+    even once real, populated TeamFeatures ruled out stale/missing data as the cause. Layer 2
+    (the 1X2 classifier) deliberately keeps consuming the RAW, uncalibrated xG — this
+    correction only affects the value returned for the Over/Under markets.
+
     Training (ml/training/train_football.py) owns the actual model fitting, hyperparameter
     search, and calibration; this class only loads the resulting joblib artefact and runs
     inference — mirrors app/models_ml/nba.py's role exactly. See app/models_ml/
@@ -68,10 +79,14 @@ class FootballModel(BaseModel):
         calibrators = artefact["calibrators"]  # dict: class label -> fitted IsotonicRegression
 
         layer1_row = self._to_row(features, tuple(layer1_feature_names))
-        xg_home = max(0.0, float(layer1_home_model.predict(layer1_row)[0]))
-        xg_away = max(0.0, float(layer1_away_model.predict(layer1_row)[0]))
+        xg_home_raw = max(0.0, float(layer1_home_model.predict(layer1_row)[0]))
+        xg_away_raw = max(0.0, float(layer1_away_model.predict(layer1_row)[0]))
 
-        layer2_features = {"xg_home": xg_home, "xg_away": xg_away, **features}
+        # Layer 2 must keep consuming the RAW, uncalibrated xG — that's what
+        # train_football.py's add_xg() fed it during training (calibration is fit
+        # afterward, on top of Layer 1's own predictions). Feeding Layer 2 the calibrated
+        # value here would be a real train/serve mismatch, not an improvement.
+        layer2_features = {"xg_home": xg_home_raw, "xg_away": xg_away_raw, **features}
         layer2_row = self._to_row(
             layer2_features, ("xg_home", "xg_away", *self.LAYER2_CONTEXT_FEATURES)
         )
@@ -107,15 +122,55 @@ class FootballModel(BaseModel):
             if corners_feature_names is not None
             else layer1_row
         )
-        corners_xg_home = (
+        corners_xg_home_raw = (
             max(0.0, float(corners_home_model.predict(corners_row)[0]))
             if corners_home_model is not None
             else None
         )
-        corners_xg_away = (
+        corners_xg_away_raw = (
             max(0.0, float(corners_away_model.predict(corners_row)[0]))
             if corners_away_model is not None
             else None
+        )
+
+        # Regression calibration for the Over/Under markets (app/models_ml/markets.py) — a
+        # real, found-in-production issue, not a theoretical one: Layer 1/corners regressors
+        # can produce implausibly low expected-goals/corners totals for fixtures whose feature
+        # distribution the training data (EPL/Brasileirão only) barely covers — e.g. Scottish
+        # Premiership/MLS/CSL fixtures reusing this same model per CLAUDE.md's documented
+        # scope decision. Unlike the 1X2 classifier's probability calibrators above, these map
+        # a raw PREDICTED RATE to the empirically-observed actual rate on real validation-set
+        # fixtures (still IsotonicRegression — the same tool works for calibrating a monotonic
+        # regression output, not just a classifier's probability) — y_min=0.0 since goals/
+        # corners can't be negative, no y_max (unlike the [0.001, 0.999] probability bound).
+        # Only used for the FINAL xg_home/xg_away/corners_xg_* returned here — Layer 2 above
+        # deliberately keeps consuming the raw, uncalibrated value it was trained against.
+        # .get() keeps this working (uncalibrated) against an older artefact with no
+        # calibrator keys at all.
+        xg_home_calibrator = artefact.get("xg_home_calibrator")
+        xg_away_calibrator = artefact.get("xg_away_calibrator")
+        corners_home_calibrator = artefact.get("corners_home_calibrator")
+        corners_away_calibrator = artefact.get("corners_away_calibrator")
+
+        xg_home = (
+            max(0.0, float(xg_home_calibrator.predict([xg_home_raw])[0]))
+            if xg_home_calibrator is not None
+            else xg_home_raw
+        )
+        xg_away = (
+            max(0.0, float(xg_away_calibrator.predict([xg_away_raw])[0]))
+            if xg_away_calibrator is not None
+            else xg_away_raw
+        )
+        corners_xg_home = (
+            max(0.0, float(corners_home_calibrator.predict([corners_xg_home_raw])[0]))
+            if corners_xg_home_raw is not None and corners_home_calibrator is not None
+            else corners_xg_home_raw
+        )
+        corners_xg_away = (
+            max(0.0, float(corners_away_calibrator.predict([corners_xg_away_raw])[0]))
+            if corners_xg_away_raw is not None and corners_away_calibrator is not None
+            else corners_xg_away_raw
         )
 
         return PredictionResult(

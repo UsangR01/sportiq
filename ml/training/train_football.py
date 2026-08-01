@@ -101,28 +101,35 @@ TRAIN_SEASONS = [2021, 2022, 2023]
 VAL_SEASON = 2024
 TEST_SEASON = 2025
 
-CLASSES = FootballModel.CLASSES  # ("home", "draw", "away") — fixes the label encoding below
+CLASSES = (
+    FootballModel.CLASSES
+)  # ("home", "draw", "away") — fixes the label encoding below
 LABEL_BY_CLASS = {cls: i for i, cls in enumerate(CLASSES)}
 
 
 async def _load_team_key_players() -> dict[tuple[str, int], list[dict]]:
     """Thin wrapper around the shared app/models_ml/historical_key_players.py loader — needs
     its own async_session_factory() context since that module's function takes an already-open
-    db session (backfill_predictions.py already has one open when it calls it directly)."""
+    db session (backfill_predictions.py already has one open when it calls it directly).
+    """
     from app.core.database import async_session_factory
 
     async with async_session_factory() as db:
         return await load_team_key_players_by_team_season(db)
 
 
-def ranked_probability_score(probs: np.ndarray, actual_label: int, n_classes: int = 3) -> float:
+def ranked_probability_score(
+    probs: np.ndarray, actual_label: int, n_classes: int = 3
+) -> float:
     """Real RPS for an ordinal 3-way market (home/draw/away treated as ordered from
     home-favorable to away-favorable, matching FootballModel.CLASSES's own order) — the
     metric TDD §3.3 specifies for football, unlike NBA's 2-outcome shortcut
     (train_nba.py's `rps = brier`, valid only because a 2-outcome market has just one
     cumulative-probability boundary)."""
     cum_forecast = np.cumsum(probs)
-    cum_actual = np.cumsum([1.0 if i == actual_label else 0.0 for i in range(n_classes)])
+    cum_actual = np.cumsum(
+        [1.0 if i == actual_label else 0.0 for i in range(n_classes)]
+    )
     return float(np.sum((cum_forecast - cum_actual) ** 2) / (n_classes - 1))
 
 
@@ -162,7 +169,8 @@ def build_training_examples(
         "home_odds"
     ].max()
     odds_lookup = {
-        (row.date, row.home_short, row.away_short): row.home_odds for row in best_odds.itertuples()
+        (row.date, row.home_short, row.away_short): row.home_odds
+        for row in best_odds.itertuples()
     }
     played_names_index = index_played_names(lineups)
     elo_history = compute_elo_history(games)
@@ -196,15 +204,27 @@ def build_training_examples(
         moneyline_prob = (1 / home_odds) if home_odds else None
 
         key_avail_home, key_per_home = historical_key_player_availability(
-            played_names_index, team_key_players_by_team_season, home_id, season, fixture_id
+            played_names_index,
+            team_key_players_by_team_season,
+            home_id,
+            season,
+            fixture_id,
         )
         key_avail_away, key_per_away = historical_key_player_availability(
-            played_names_index, team_key_players_by_team_season, away_id, season, fixture_id
+            played_names_index,
+            team_key_players_by_team_season,
+            away_id,
+            season,
+            fixture_id,
         )
 
         elo_home = elo_history.get((fixture_id, home_id))
         elo_away = elo_history.get((fixture_id, away_id))
-        elo_diff = (elo_home - elo_away) if elo_home is not None and elo_away is not None else None
+        elo_diff = (
+            (elo_home - elo_away)
+            if elo_home is not None and elo_away is not None
+            else None
+        )
 
         features = assemble_from_game_log(
             games,
@@ -219,7 +239,11 @@ def build_training_examples(
             elo_diff=elo_diff,
         )
         features["label"] = LABEL_BY_CLASS[
-            "home" if home_row["WDL"] == "W" else ("draw" if home_row["WDL"] == "D" else "away")
+            (
+                "home"
+                if home_row["WDL"] == "W"
+                else ("draw" if home_row["WDL"] == "D" else "away")
+            )
         ]
         features["season"] = season
         features["fixture_id"] = fixture_id
@@ -243,13 +267,16 @@ async def _register_model(
     from app.sports.models import Sport
 
     async with async_session_factory() as db:
-        sport = (await db.execute(select(Sport).where(Sport.slug == "football"))).scalar_one()
+        sport = (
+            await db.execute(select(Sport).where(Sport.slug == "football"))
+        ).scalar_one()
 
         existing_active = (
             (
                 await db.execute(
                     select(ModelRegistry).where(
-                        ModelRegistry.sport_id == sport.id, ModelRegistry.is_active.is_(True)
+                        ModelRegistry.sport_id == sport.id,
+                        ModelRegistry.is_active.is_(True),
                     )
                 )
             )
@@ -282,15 +309,24 @@ async def main_async() -> None:
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
 
     games = pd.concat(
-        [pd.read_parquet(DATA_DIR / f"football_game_log_{league}.parquet") for league in LEAGUES],
+        [
+            pd.read_parquet(DATA_DIR / f"football_game_log_{league}.parquet")
+            for league in LEAGUES
+        ],
         ignore_index=True,
     )
     lineups = pd.concat(
-        [pd.read_parquet(DATA_DIR / f"football_lineups_{league}.parquet") for league in LEAGUES],
+        [
+            pd.read_parquet(DATA_DIR / f"football_lineups_{league}.parquet")
+            for league in LEAGUES
+        ],
         ignore_index=True,
     )
     corners = pd.concat(
-        [pd.read_parquet(DATA_DIR / f"football_corners_{league}.parquet") for league in LEAGUES],
+        [
+            pd.read_parquet(DATA_DIR / f"football_corners_{league}.parquet")
+            for league in LEAGUES
+        ],
         ignore_index=True,
     )
     # Attaches CORNERS_FOR/CORNERS_AGAINST onto `games` for the new corners-rolling features
@@ -304,7 +340,9 @@ async def main_async() -> None:
         codes_path = DATA_DIR / f"football_team_codes_{league}.parquet"
         if codes_path.exists():
             codes_df = pd.read_parquet(codes_path)
-            team_codes.update(dict(zip(codes_df["team_id"], codes_df["code"], strict=False)))
+            team_codes.update(
+                dict(zip(codes_df["team_id"], codes_df["code"], strict=False))
+            )
 
     # Odds: EPL only (see module docstring) — a league with no *_odds_sample.parquet at all
     # (Brasileirão) simply contributes nothing here, not an error.
@@ -319,7 +357,9 @@ async def main_async() -> None:
         else pd.DataFrame(columns=["date", "home_short", "away_short", "home_odds"])
     )
 
-    print("loading team_key_players (Stage 1 — run compute_football_key_players.py first)...")
+    print(
+        "loading team_key_players (Stage 1 — run compute_football_key_players.py first)..."
+    )
     team_key_players_by_team_season = await _load_team_key_players()
     print(f"  {len(team_key_players_by_team_season)} (team, season) entries loaded")
 
@@ -344,9 +384,13 @@ async def main_async() -> None:
     X_test = test_df[feature_cols].astype(float)
 
     # --- Layer 1: Poisson expected-goals regressors ---------------------------------------
-    layer1_home_model = xgb.XGBRegressor(objective="count:poisson", n_estimators=200, max_depth=4)
+    layer1_home_model = xgb.XGBRegressor(
+        objective="count:poisson", n_estimators=200, max_depth=4
+    )
     layer1_home_model.fit(X_train, train_df["home_goals"].astype(float))
-    layer1_away_model = xgb.XGBRegressor(objective="count:poisson", n_estimators=200, max_depth=4)
+    layer1_away_model = xgb.XGBRegressor(
+        objective="count:poisson", n_estimators=200, max_depth=4
+    )
     layer1_away_model.fit(X_train, train_df["away_goals"].astype(float))
 
     # --- Corners-Poisson-regressors (Over/Under corners market, app/models_ml/markets.py) ---
@@ -358,37 +402,61 @@ async def main_async() -> None:
     # call returned one) are excluded from fitting, not zero-filled.
     corners_feature_cols = list(CORNERS_FEATURE_NAMES)
     X_train_corners = train_df[corners_feature_cols].astype(float)
+    X_val_corners = val_df[corners_feature_cols].astype(float)
     X_test_corners = test_df[corners_feature_cols].astype(float)
 
-    corners_train_mask = train_df["home_corners"].notna() & train_df["away_corners"].notna()
-    corners_test_mask = test_df["home_corners"].notna() & test_df["away_corners"].notna()
+    corners_train_mask = (
+        train_df["home_corners"].notna() & train_df["away_corners"].notna()
+    )
+    corners_val_mask = val_df["home_corners"].notna() & val_df["away_corners"].notna()
+    corners_test_mask = (
+        test_df["home_corners"].notna() & test_df["away_corners"].notna()
+    )
     print(
         f"corners training rows: {corners_train_mask.sum()}/{len(train_df)} "
         f"(test rows with real corner counts: {corners_test_mask.sum()}/{len(test_df)})"
     )
-    corners_home_model = xgb.XGBRegressor(objective="count:poisson", n_estimators=200, max_depth=4)
+    corners_home_model = xgb.XGBRegressor(
+        objective="count:poisson", n_estimators=200, max_depth=4
+    )
     corners_home_model.fit(
         X_train_corners[corners_train_mask],
         train_df.loc[corners_train_mask, "home_corners"].astype(float),
     )
-    corners_away_model = xgb.XGBRegressor(objective="count:poisson", n_estimators=200, max_depth=4)
+    corners_away_model = xgb.XGBRegressor(
+        objective="count:poisson", n_estimators=200, max_depth=4
+    )
     corners_away_model.fit(
         X_train_corners[corners_train_mask],
         train_df.loc[corners_train_mask, "away_corners"].astype(float),
     )
     if corners_test_mask.sum() > 0:
-        corners_home_pred = corners_home_model.predict(X_test_corners[corners_test_mask])
-        corners_away_pred = corners_away_model.predict(X_test_corners[corners_test_mask])
+        corners_home_pred = corners_home_model.predict(
+            X_test_corners[corners_test_mask]
+        )
+        corners_away_pred = corners_away_model.predict(
+            X_test_corners[corners_test_mask]
+        )
         corners_mae = (
             float(
-                np.mean(np.abs(corners_home_pred - test_df.loc[corners_test_mask, "home_corners"]))
+                np.mean(
+                    np.abs(
+                        corners_home_pred
+                        - test_df.loc[corners_test_mask, "home_corners"]
+                    )
+                )
                 + np.mean(
-                    np.abs(corners_away_pred - test_df.loc[corners_test_mask, "away_corners"])
+                    np.abs(
+                        corners_away_pred
+                        - test_df.loc[corners_test_mask, "away_corners"]
+                    )
                 )
             )
             / 2
         )
-        print(f"corners regressors test MAE (avg of home/away, corners): {corners_mae:.3f}")
+        print(
+            f"corners regressors test MAE (avg of home/away, corners): {corners_mae:.3f}"
+        )
     else:
         corners_mae = None
 
@@ -401,6 +469,36 @@ async def main_async() -> None:
     train_df = add_xg(train_df, X_train)
     val_df = add_xg(val_df, X_val)
     test_df = add_xg(test_df, X_test)
+
+    # --- Regression calibration for xG/corners (Over/Under markets) -----------------------
+    # A real, found-in-production issue, not a theoretical one: Over/Under goals/corners
+    # (app/models_ml/markets.py) apply a raw Poisson CDF straight to Layer 1's own
+    # uncalibrated output, and for fixtures whose feature distribution this EPL/Brasileirão
+    # training data barely covers (Scottish Premiership/MLS/CSL fixtures reusing this same
+    # model, see CLAUDE.md), that produced implausibly extreme (99-100%) Over/Under
+    # probabilities even with real, populated TeamFeatures. IsotonicRegression works here for
+    # the same reason it works for the 1X2 classes above — it's just calibrating a different
+    # monotonic output (a predicted RATE, not a class probability) against its own real,
+    # empirically-observed value on validation-set fixtures. y_min=0.0 only (goals/corners
+    # can't be negative) — no y_max, unlike the 1X2 calibrators' [0.001, 0.999] probability
+    # bound, since a rate isn't bounded to [0, 1].
+    xg_home_calibrator = IsotonicRegression(out_of_bounds="clip", y_min=0.0)
+    xg_home_calibrator.fit(val_df["xg_home"], val_df["home_goals"].astype(float))
+    xg_away_calibrator = IsotonicRegression(out_of_bounds="clip", y_min=0.0)
+    xg_away_calibrator.fit(val_df["xg_away"], val_df["away_goals"].astype(float))
+
+    corners_val_pred_home = corners_home_model.predict(X_val_corners[corners_val_mask])
+    corners_val_pred_away = corners_away_model.predict(X_val_corners[corners_val_mask])
+    corners_home_calibrator = IsotonicRegression(out_of_bounds="clip", y_min=0.0)
+    corners_home_calibrator.fit(
+        corners_val_pred_home,
+        val_df.loc[corners_val_mask, "home_corners"].astype(float),
+    )
+    corners_away_calibrator = IsotonicRegression(out_of_bounds="clip", y_min=0.0)
+    corners_away_calibrator.fit(
+        corners_val_pred_away,
+        val_df.loc[corners_val_mask, "away_corners"].astype(float),
+    )
 
     layer2_cols = ["xg_home", "xg_away", *FootballModel.LAYER2_CONTEXT_FEATURES]
     X_train_l2 = train_df[layer2_cols].astype(float)
@@ -451,21 +549,52 @@ async def main_async() -> None:
     # fixtures with a real home_odds AND the model favouring home.
     home_idx = LABEL_BY_CLASS["home"]
     roi_rows = test_df[
-        test_df["home_odds"].notna() & (test_calibrated[:, home_idx] == test_calibrated.max(axis=1))
+        test_df["home_odds"].notna()
+        & (test_calibrated[:, home_idx] == test_calibrated.max(axis=1))
     ]
     if len(roi_rows) > 0:
         stakes = len(roi_rows)
         returns = sum(
-            row.home_odds if row.label == home_idx else 0.0 for row in roi_rows.itertuples()
+            row.home_odds if row.label == home_idx else 0.0
+            for row in roi_rows.itertuples()
         )
         flat_stake_roi = (returns - stakes) / stakes
     else:
         flat_stake_roi = None
 
-    print(f"test accuracy={accuracy:.4f} (baseline={baseline_accuracy:.4f}) RPS={rps:.4f}")
-    print(f"flat-stake ROI (home picks with real odds, n={len(roi_rows)}): {flat_stake_roi}")
+    print(
+        f"test accuracy={accuracy:.4f} (baseline={baseline_accuracy:.4f}) RPS={rps:.4f}"
+    )
+    print(
+        f"flat-stake ROI (home picks with real odds, n={len(roi_rows)}): {flat_stake_roi}"
+    )
 
-    artefact_path = ARTIFACT_DIR / f"football_xgb_{datetime.now(UTC):%Y%m%d%H%M%S}.joblib"
+    # Honest before/after check on the real test set — same "report it straight, not spun
+    # positively" convention as the corners-rolling-features MAE result already in CLAUDE.md.
+    xg_home_raw_mae = float(np.mean(np.abs(test_df["xg_home"] - test_df["home_goals"])))
+    xg_home_calibrated_mae = float(
+        np.mean(
+            np.abs(
+                xg_home_calibrator.predict(test_df["xg_home"]) - test_df["home_goals"]
+            )
+        )
+    )
+    xg_away_raw_mae = float(np.mean(np.abs(test_df["xg_away"] - test_df["away_goals"])))
+    xg_away_calibrated_mae = float(
+        np.mean(
+            np.abs(
+                xg_away_calibrator.predict(test_df["xg_away"]) - test_df["away_goals"]
+            )
+        )
+    )
+    print(
+        f"xg_home MAE: raw={xg_home_raw_mae:.4f} calibrated={xg_home_calibrated_mae:.4f} "
+        f"| xg_away MAE: raw={xg_away_raw_mae:.4f} calibrated={xg_away_calibrated_mae:.4f}"
+    )
+
+    artefact_path = (
+        ARTIFACT_DIR / f"football_xgb_{datetime.now(UTC):%Y%m%d%H%M%S}.joblib"
+    )
     joblib.dump(
         {
             "layer1_home_model": layer1_home_model,
@@ -476,6 +605,10 @@ async def main_async() -> None:
             "corners_home_model": corners_home_model,
             "corners_away_model": corners_away_model,
             "corners_feature_names": corners_feature_cols,
+            "xg_home_calibrator": xg_home_calibrator,
+            "xg_away_calibrator": xg_away_calibrator,
+            "corners_home_calibrator": corners_home_calibrator,
+            "corners_away_calibrator": corners_away_calibrator,
         },
         artefact_path,
     )
@@ -495,6 +628,10 @@ async def main_async() -> None:
             mlflow.log_metric("flat_stake_roi_home_picks", flat_stake_roi)
         if corners_mae is not None:
             mlflow.log_metric("corners_test_mae", corners_mae)
+        mlflow.log_metric("xg_home_raw_mae", xg_home_raw_mae)
+        mlflow.log_metric("xg_home_calibrated_mae", xg_home_calibrated_mae)
+        mlflow.log_metric("xg_away_raw_mae", xg_away_raw_mae)
+        mlflow.log_metric("xg_away_calibrated_mae", xg_away_calibrated_mae)
         mlflow.log_artifact(str(artefact_path))
 
     await _register_model(artefact_path, rps, accuracy, flat_stake_roi)

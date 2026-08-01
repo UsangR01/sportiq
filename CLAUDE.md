@@ -387,6 +387,49 @@ async test functions both make a real Redis call (`GET /picks`'s caching) in the
 Surfaced as `RuntimeError: Event loop is closed` on the second test. Fixed by adding the exact
 same dispose-after-every-test pattern for `app.core.redis._pool`.
 
+**A real, found-in-production overconfidence bug in Over/Under goals/corners, reported by the
+user from a real screenshot** ("the % probability outputted for predictions... appears too
+high for some markets"): confirmed live — several real Scottish Premiership/MLS/CSL picks
+showed 98-100% confidence on an Over/Under goals line, an implausible number for any real
+match. Root-caused to two independent, stacking issues:
+- **Stale `TeamFeatures`** for the specific affected fixtures (`attack_str`/`defence_str`/
+  `form_pts_5` all `None`, only `elo_rating` populated) — traced to the same ingest-isolation
+  gap fixed earlier the same session (tennis's real 401 silently killing the shared
+  `ingest_fixtures`/`ingest_live_scores` run before it reached these teams). Fixed by manually
+  re-running `_ingest_fixtures_for_league` for `mls`/`csl`, confirmed live the real, populated
+  stats came back immediately (matching a direct live adapter call for the same teams).
+- **Over/Under had NO calibration at all** — confirmed by re-running predictions for the same
+  fixtures with the now-real features: total xG was still only ~0.8 (implausibly low for a
+  real match), proving the null-feature theory was only half the story. The deeper issue:
+  `app/models_ml/markets.py:over_under_probs` always ran a raw Poisson CDF straight off Layer
+  1's own uncalibrated xG output — unlike the core 1X2 market, which gets isotonic probability
+  calibration, Over/Under had none at all. For fixtures whose feature distribution the
+  EPL/Brasileirão training data barely covers (Scottish Premiership/MLS/CSL reusing this same
+  model, see above), Layer 1 can produce implausibly low expected-goals values, and an
+  uncalibrated Poisson CDF turns that straight into an overconfident probability with no
+  correction.
+- **Fix**: `app/models_ml/football.py:FootballModel.predict` now runs `xg_home`/`xg_away`/
+  `corners_xg_home`/`corners_xg_away` through their own `IsotonicRegression` calibrators
+  (`ml/training/train_football.py`, fit on real validation-set fixtures — same tool as the 1X2
+  calibrators, just calibrating a predicted RATE against its own empirically-observed real
+  value instead of a class probability, hence `y_min=0.0` and no `y_max`, unlike the 1X2
+  calibrators' `[0.001, 0.999]` probability bound). **Layer 2 (the 1X2 classifier)
+  deliberately keeps consuming the RAW, uncalibrated xG** — that's what it was trained against
+  in `train_football.py`; feeding it the calibrated value would be a real train/serve
+  mismatch introduced by this very fix, not an improvement. `.get()` on every new calibrator
+  key keeps an older artefact predating this working exactly as before (uncalibrated).
+  Regression-tested in `backend/tests/test_football_model.py` with a fake "doubling"
+  calibrator stub, confirming the returned `xg_home`/`xg_away`/`corners_xg_*` are calibrated
+  while the row sent to the (also faked) Layer 2 model is provably still the raw value.
+- **Retrained and verified live, honestly (not spun positively)**: real test-set xG MAE
+  improved modestly — `xg_home` 0.9945 → 0.9625, `xg_away` 0.8602 → 0.8240 — while 1X2
+  accuracy/RPS stayed byte-identical (0.4789/0.2138, exactly as expected since Layer 2 is
+  untouched). New artefact registered as `football_xgb_v20260801084740`. Re-ran the two real,
+  originally-reported fixtures end to end: Tianjin Teda vs Yunnan Yukun's total xG went from
+  0.813 → 2.257 (P(under 3.5) 99% → 81%); Beijing Guoan vs Hangzhou Greentown's total xG went
+  from 0.859 → 2.016 (99% → 85%) — both now sit in a plausible, real range instead of the
+  original implausible extreme.
+
 ## Head-to-head panel replaces the raw Odds table on fixture detail
 
 Per direct user request: "Users don't find the Odds section useful, instead they've asked that

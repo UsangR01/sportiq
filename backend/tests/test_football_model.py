@@ -5,6 +5,7 @@ XGBoost fitting) so this stays fast and dependency-free; the goal is proving pre
 the RIGHT row for the RIGHT model, not testing XGBoost/isotonic regression itself."""
 
 import numpy as np
+import pytest
 
 from app.models_ml.football import FootballModel
 
@@ -30,6 +31,17 @@ class _FakeLayer2Model:
 class _IdentityCalibrator:
     def predict(self, values):
         return np.array(values)
+
+
+class _ScalingCalibrator:
+    """A fake xG/corners calibrator that doubles its input — distinct enough from identity
+    that tests can tell whether a value passed through calibration or not."""
+
+    def __init__(self, factor: float = 2.0):
+        self.factor = factor
+
+    def predict(self, values):
+        return np.array([v * self.factor for v in values])
 
 
 LAYER1_FEATURE_NAMES = ("attack_str_home", "attack_str_away")
@@ -100,6 +112,61 @@ def test_predict_corners_row_falls_back_to_layer1_row_for_old_artefact():
     assert list(corners_home.last_row[0]) == [1.0, 2.0]
     assert result.corners_xg_home == 2.0
     assert result.corners_xg_away == 2.5
+
+
+def test_predict_calibrates_xg_but_layer2_still_sees_raw_value():
+    """The real, found-in-production fix: xg_home/xg_away returned to the caller (and used for
+    the Over/Under goals market) must be calibrated, but Layer 2 (the 1X2 classifier) must
+    keep receiving the RAW, uncalibrated value — that's what it was trained against in
+    train_football.py, and feeding it the calibrated value would be a real train/serve
+    mismatch, not an improvement."""
+    layer2 = _FakeLayer2Model()
+    artefact = _base_artefact()
+    artefact["layer2_model"] = layer2
+    artefact["xg_home_calibrator"] = _ScalingCalibrator(2.0)
+    artefact["xg_away_calibrator"] = _ScalingCalibrator(3.0)
+
+    model = _model_with_artefact(artefact)
+    result = model.predict({"attack_str_home": 1.0, "attack_str_away": 2.0})
+
+    # layer1_home_model/layer1_away_model are fixed-value stubs returning 1.2/0.8 regardless
+    # of input (see _base_artefact) — calibrated should be exactly double/triple that.
+    assert result.xg_home == pytest.approx(2.4)  # 1.2 * 2.0
+    assert result.xg_away == pytest.approx(2.4)  # 0.8 * 3.0
+
+
+def test_predict_xg_uncalibrated_when_no_calibrator_in_artefact():
+    """An older artefact with no xg_*_calibrator keys at all must behave exactly as before —
+    xg_home/xg_away are the raw Layer 1 output, unmodified."""
+    artefact = _base_artefact()
+    model = _model_with_artefact(artefact)
+    result = model.predict({"attack_str_home": 1.0, "attack_str_away": 2.0})
+
+    assert result.xg_home == pytest.approx(1.2)
+    assert result.xg_away == pytest.approx(0.8)
+
+
+def test_predict_calibrates_corners_xg():
+    corners_home = _CapturingRegressor(4.0)
+    corners_away = _CapturingRegressor(3.0)
+    artefact = _base_artefact()
+    artefact["corners_home_model"] = corners_home
+    artefact["corners_away_model"] = corners_away
+    artefact["corners_feature_names"] = CORNERS_FEATURE_NAMES
+    artefact["corners_home_calibrator"] = _ScalingCalibrator(1.5)
+    artefact["corners_away_calibrator"] = _ScalingCalibrator(0.5)
+
+    model = _model_with_artefact(artefact)
+    features = {
+        "attack_str_home": 1.0,
+        "attack_str_away": 2.0,
+        "corners_for_home": 6.0,
+        "corners_for_away": 3.0,
+    }
+    result = model.predict(features)
+
+    assert result.corners_xg_home == pytest.approx(6.0)  # 4.0 * 1.5
+    assert result.corners_xg_away == pytest.approx(1.5)  # 3.0 * 0.5
 
 
 def test_predict_corners_xg_none_when_no_corners_models_at_all():
