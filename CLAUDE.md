@@ -424,11 +424,21 @@ match. Root-caused to two independent, stacking issues:
 - **Retrained and verified live, honestly (not spun positively)**: real test-set xG MAE
   improved modestly — `xg_home` 0.9945 → 0.9625, `xg_away` 0.8602 → 0.8240 — while 1X2
   accuracy/RPS stayed byte-identical (0.4789/0.2138, exactly as expected since Layer 2 is
-  untouched). New artefact registered as `football_xgb_v20260801084740`. Re-ran the two real,
-  originally-reported fixtures end to end: Tianjin Teda vs Yunnan Yukun's total xG went from
-  0.813 → 2.257 (P(under 3.5) 99% → 81%); Beijing Guoan vs Hangzhou Greentown's total xG went
-  from 0.859 → 2.016 (99% → 85%) — both now sit in a plausible, real range instead of the
-  original implausible extreme.
+  untouched). New artefact registered as `football_xgb_v20260801084740`.
+- **First fix pass only covered 2 of the affected fixtures, confirmed insufficient from a
+  follow-up screenshot** ("2 are adjusted but 2 are not") — re-ingesting fixtures/refreshing
+  `TeamFeatures` and regenerating a *sample* prediction proved the fix worked, but every OTHER
+  already-predicted fixture in these leagues still held its OLD stale-feature,
+  pre-calibration `Prediction` row, since a league re-ingest only auto-queues
+  `run_predictions` for a fixture with *no* prediction yet (deliberately, so a routine daily
+  re-run doesn't waste real API calls re-predicting something unchanged) — it does not
+  retroactively regenerate ones that already exist. Fixed properly: re-ingested
+  `scottish_prem`/`mls`/`csl` (all three share this EPL/Brasileirão-trained model) to refresh
+  every team's features, then deleted and regenerated **all 34** real scheduled fixtures'
+  predictions across the three leagues, not just a couple. Every single one now lands in a
+  realistic total-xG range (1.69–2.77, matching typical real match scoring) — including the
+  two the user specifically flagged as still-broken, SHANGHAI SIPG vs Shandong Luneng
+  (98% → 85.7%) and Chengdu Better City vs Wuhan Three Towns (99% → 90.8%).
 
 ## Head-to-head panel replaces the raw Odds table on fixture detail
 
