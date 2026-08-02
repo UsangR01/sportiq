@@ -73,6 +73,9 @@ import mlflow  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import xgboost as xgb  # noqa: E402
+from sklearn.isotonic import IsotonicRegression  # noqa: E402
+from sklearn.metrics import accuracy_score, log_loss  # noqa: E402
+
 from app.models_ml.elo import compute_elo_history  # noqa: E402
 from app.models_ml.football import FootballModel  # noqa: E402
 from app.models_ml.football_features import (  # noqa: E402
@@ -86,8 +89,7 @@ from app.models_ml.historical_key_players import (  # noqa: E402
     index_played_names,
     load_team_key_players_by_team_season,
 )
-from sklearn.isotonic import IsotonicRegression  # noqa: E402
-from sklearn.metrics import accuracy_score, log_loss  # noqa: E402
+from app.models_ml.markets import GOALS_LINES, over_under_probs  # noqa: E402
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 ML_DIR = Path(__file__).resolve().parent.parent
@@ -609,6 +611,48 @@ async def main_async() -> None:
         f"| xg_away MAE: raw={xg_away_raw_mae:.4f} calibrated={xg_away_calibrated_mae:.4f}"
     )
 
+    # Over/Under goals evaluation — this market had NO held-out evaluation of any kind until
+    # now, which is the honest root cause of it shipping visibly overconfident: 1X2 has had
+    # accuracy/RPS from the start, but nobody had ever measured whether a stated "85% chance of
+    # under 3.5" was right. A one-off query against completed fixtures showed the 0.8-0.9 band
+    # delivering ~0.72. Measuring it here, every run, is what stops that recurring.
+    #
+    # Brier score (lower is better) plus a reliability table: predicted-probability bucket vs
+    # the frequency the event ACTUALLY occurred. A well-calibrated model has actual ≈ bucket
+    # midpoint; a systematic positive gap is overconfidence. Reported per line, since 1.5/2.5/
+    # 3.5 have very different base rates and an aggregate number would hide a bad one.
+    actual_totals = (test_df["home_goals"] + test_df["away_goals"]).to_numpy()
+    xg_totals = (
+        xg_home_calibrator.predict(test_df["xg_home"])
+        + xg_away_calibrator.predict(test_df["xg_away"])
+    )
+    over_under_metrics: dict[str, float] = {}
+    print("Over/Under goals — held-out calibration (predicted vs actually observed):")
+    for line in GOALS_LINES:
+        predicted_under = np.array(
+            [over_under_probs(float(t), (line,))[line][0] for t in xg_totals]
+        )
+        actual_under = (actual_totals < line).astype(float)
+        brier = float(np.mean((predicted_under - actual_under) ** 2))
+        over_under_metrics[f"ou_{line}_brier"] = brier
+        # Mean predicted vs mean actual across the whole test set: the single clearest
+        # overconfidence signal, and directly comparable to the live measurement above.
+        mean_gap = float(predicted_under.mean() - actual_under.mean())
+        over_under_metrics[f"ou_{line}_mean_gap"] = mean_gap
+        print(
+            f"  under {line}: brier={brier:.4f} "
+            f"mean predicted={predicted_under.mean():.3f} actual={actual_under.mean():.3f} "
+            f"gap={mean_gap:+.3f}"
+        )
+        for lo in (0.5, 0.6, 0.7, 0.8, 0.9):
+            in_bucket = (predicted_under >= lo) & (predicted_under < lo + 0.1)
+            n = int(in_bucket.sum())
+            if n >= 20:  # below this a bucket rate is noise, not a signal
+                print(
+                    f"      predicted {lo:.1f}-{lo + 0.1:.1f}: n={n:4d} "
+                    f"actual={actual_under[in_bucket].mean():.3f}"
+                )
+
     artefact_path = (
         ARTIFACT_DIR / f"football_xgb_{datetime.now(UTC):%Y%m%d%H%M%S}.joblib"
     )
@@ -649,6 +693,8 @@ async def main_async() -> None:
         mlflow.log_metric("xg_home_calibrated_mae", xg_home_calibrated_mae)
         mlflow.log_metric("xg_away_raw_mae", xg_away_raw_mae)
         mlflow.log_metric("xg_away_calibrated_mae", xg_away_calibrated_mae)
+        for metric_name, metric_value in over_under_metrics.items():
+            mlflow.log_metric(metric_name, metric_value)
         mlflow.log_artifact(str(artefact_path))
 
     await _register_model(artefact_path, rps, accuracy, flat_stake_roi)
