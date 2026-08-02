@@ -66,9 +66,21 @@ def run_task(coro: Coroutine[Any, Any, None]) -> None:
 # run_predictions and notify_users are triggered by other tasks (new odds/injury data, late
 # injury re-inference) rather than run on a fixed cadence — not scheduled here (TDD §2.3/§5.4).
 celery_app.conf.beat_schedule = {
-    "ingest-odds-every-5-minutes": {
+    "ingest-odds-every-6-hours": {
         "task": "app.workers.ingest_odds.ingest_odds",
-        "schedule": 300.0,
+        # Every 6 hours, NOT every 5 minutes. The 5-minute cadence was inherited from
+        # ingest_live_scores, but odds are quota-metered per request in a way live scores are
+        # not: 7 leagues x 8 dates x 288 runs/day is ~16,000 requests/day against TheRundown's
+        # 1,000-request MONTHLY allowance, which it duly exhausted in ~90 minutes and then 429'd
+        # for weeks. Combined with _dates_with_fixtures (only real fixture dates) and a
+        # 3-day lookahead, this brings a run down to roughly the number of match days actually
+        # scheduled.
+        #
+        # Honest caveat: at PEAK season (most leagues playing, several match days each) even
+        # this may exceed a 1,000/month free allowance. If odds coverage matters more than the
+        # subscription cost, the fix is a plan upgrade, not a further cadence cut - dropping
+        # below daily would make prices too stale to rank on.
+        "schedule": 21600.0,
     },
     "ingest-live-scores-every-5-minutes": {
         "task": "app.workers.ingest_live_scores.ingest_live_scores",

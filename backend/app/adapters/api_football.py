@@ -392,7 +392,13 @@ class APIFootballAdapter(DataSourceAdapter):
             base_url=BASE_URL, headers={"x-apisports-key": self._api_key}, timeout=15.0
         )
 
-    async def fetch_odds(self, sport: str, league: str, days_ahead: int) -> list[OddsPayload]:
+    async def fetch_odds(
+        self,
+        sport: str,
+        league: str,
+        days_ahead: int,
+        dates: list[date] | None = None,
+    ) -> list[OddsPayload]:
         """Real for leagues API-Football covers odds for (currently only Brasileirão —
         see class docstring); genuinely empty (not an error) for a recognised league this
         plan has zero odds coverage for (confirmed live: EPL returns results=0, not a 4xx) —

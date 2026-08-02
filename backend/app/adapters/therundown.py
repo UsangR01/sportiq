@@ -1,5 +1,5 @@
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import httpx
 
@@ -194,14 +194,33 @@ class TheRundownAdapter(DataSourceAdapter):
         response.raise_for_status()
         return response
 
-    async def fetch_odds(self, sport: str, league: str, days_ahead: int) -> list[OddsPayload]:
+    async def fetch_odds(
+        self,
+        sport: str,
+        league: str,
+        days_ahead: int,
+        dates: list[date] | None = None,
+    ) -> list[OddsPayload]:
         rundown_sport_id = _rundown_sport_id_for(sport, league)
         now = datetime.now(UTC)
         payloads: list[OddsPayload] = []
 
+        # Only the dates the caller actually needs, when it knows them. This endpoint is
+        # one-request-per-date, so blindly walking every day in the lookahead window spends a
+        # request on dates with no fixtures at all — which is most of them for most leagues.
+        # That waste is what exhausted a 1,000-request MONTHLY quota in roughly 90 minutes and
+        # left football with no odds for weeks (see ingest_odds.py:_dates_with_fixtures).
+        request_dates = (
+            [d.isoformat() for d in dates]
+            if dates is not None
+            else [
+                (now + timedelta(days=offset)).date().isoformat()
+                for offset in range(days_ahead + 1)
+            ]
+        )
+
         async with self._client() as client:
-            for offset in range(days_ahead + 1):
-                date_str = (now + timedelta(days=offset)).date().isoformat()
+            for date_str in request_dates:
                 response = await self._get_with_retry(
                     client,
                     f"/sports/{rundown_sport_id}/events/{date_str}",

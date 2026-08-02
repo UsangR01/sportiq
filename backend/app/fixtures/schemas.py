@@ -77,6 +77,9 @@ class FixtureSummary(BaseModel):
     tournament_name: str | None = None
     tournament_surface: str | None = None
     tournament_location: str | None = None
+    # True when kickoff_utc was inferred, not reported by the provider - the client shows
+    # "Time TBC" rather than asserting a precise time we don't have (tennis in practice).
+    kickoff_is_estimated: bool = False
     best_pick: BestPick | None = None
     # Every real candidate across all four markets (h2h, double chance, goals/corners O/U) —
     # NOT just best_pick's single winner — so a past/completed fixture can show a full

@@ -72,6 +72,10 @@ export interface FixtureSummary {
   tournament_name: string | null;
   tournament_surface: string | null;
   tournament_location: string | null;
+  // True when kickoff_utc was INFERRED, not reported by the provider - the card shows
+  // "Time TBC" rather than asserting a precise time. Real and common for tennis: ~95% of ATP
+  // matches carry no usable kickoff time, so they all inherit the tournament's start date.
+  kickoff_is_estimated: boolean;
   best_pick: BestPick | null;
   // Every real candidate across all four markets (h2h, double chance, goals/corners O/U) —
   // not just best_pick's single winner. Used to show a full win/loss breakdown for a

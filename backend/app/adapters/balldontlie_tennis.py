@@ -16,7 +16,13 @@ nesting, set_scores, rankings' date param, season-scoped /matches) is now real-r
 confirmed against live ATP data, not guessed from the OpenAPI spec.
 
 REAL, LIVE-CONFIRMED API BEHAVIOR (not in the OpenAPI spec extraction):
-  - `scheduled_time` is the real per-match kickoff field (ISO datetime).
+  - `scheduled_time` is the per-match kickoff field, but it is USUALLY ABSENT. An earlier
+    version of this note called it "the real per-match kickoff field" on the strength of a
+    handful of sampled matches; measured across a full real ATP tournament (600 matches) that
+    is wrong: 570 had no `scheduled_time` at all, and of the 30 that did, 17 were exactly
+    midnight (a date, not a time). Only ~2% carry a genuine kickoff time. Callers must use
+    _match_kickoff_is_estimated alongside _match_kickoff_utc and must not present an estimated
+    kickoff as a real one — see that function for why this mattered in production.
   - `/matches?player_ids[]=X` with NO `season` param returns only a thin, recent window
     (confirmed live: ~3.5 months for a real, active player) — NOT full career history. Full
     history requires looping an explicit `season` param per year (confirmed working back to
@@ -158,7 +164,28 @@ def _match_date(match: dict) -> date:
     return date.fromisoformat(str(match["tournament"]["start_date"])[:10])
 
 
+def _match_kickoff_is_estimated(match: dict) -> bool:
+    """Whether this match's kickoff had to be INFERRED rather than read from the provider.
+
+    Measured across a full real ATP tournament (600 matches): 570 had no `scheduled_time` at
+    all, and of the 30 that did, 17 were exactly midnight — a date with no time of day. Only
+    ~2% carried a genuine kickoff time. An earlier note in CLAUDE.md called `scheduled_time`
+    "the real per-match kickoff field" on the strength of a small sample; at scale that is
+    wrong, and this function exists to stop the codebase asserting a precision it does not have.
+
+    A midnight timestamp is treated as estimated for the same reason a missing one is: real
+    tennis matches are not scheduled for 00:00 UTC, so it encodes a date, not a time."""
+    raw = match.get("scheduled_time")
+    if not raw:
+        return True
+    parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    return (parsed.hour, parsed.minute, parsed.second) == (0, 0, 0)
+
+
 def _match_kickoff_utc(match: dict) -> datetime:
+    """Best available kickoff. Callers must pair this with _match_kickoff_is_estimated — when
+    that returns True this is a DATE placeholder (the provider's own midnight timestamp, or the
+    tournament's start date), not a real start time, and must not be displayed as one."""
     raw = match.get("scheduled_time")
     if raw:
         return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
@@ -317,6 +344,7 @@ def _map_match_to_fixture_payload(match: dict, tour: str) -> FixturePayload:
         tournament_name=tournament.get("name"),
         tournament_surface=tournament.get("surface"),
         tournament_location=tournament.get("location"),
+        kickoff_is_estimated=_match_kickoff_is_estimated(match),
     )
 
 
@@ -508,7 +536,13 @@ class BallDontLieTennisAdapter(DataSourceAdapter):
             timeout=10.0,
         )
 
-    async def fetch_odds(self, sport: str, league: str, days_ahead: int) -> list[OddsPayload]:
+    async def fetch_odds(
+        self,
+        sport: str,
+        league: str,
+        days_ahead: int,
+        dates: list[date] | None = None,
+    ) -> list[OddsPayload]:
         raise NotImplementedError(
             "BallDontLie tennis odds require the GOAT tier — not wired up yet (predictions "
             "ship first, odds are an explicit fast-follow; see CLAUDE.md)"

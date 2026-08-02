@@ -1,5 +1,5 @@
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import httpx
 
@@ -175,7 +175,13 @@ class BallDontLieAdapter(DataSourceAdapter):
             base_url=BASE_URL, headers={"Authorization": self._api_key}, timeout=10.0
         )
 
-    async def fetch_odds(self, sport: str, league: str, days_ahead: int) -> list[OddsPayload]:
+    async def fetch_odds(
+        self,
+        sport: str,
+        league: str,
+        days_ahead: int,
+        dates: list[date] | None = None,
+    ) -> list[OddsPayload]:
         raise NotImplementedError("BallDontLie does not provide odds — use TheRundownAdapter")
 
     async def fetch_fixtures(

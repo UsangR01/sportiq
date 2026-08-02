@@ -124,6 +124,7 @@ def _to_summary(
         tournament_name=fixture.tournament_name,
         tournament_surface=fixture.tournament_surface,
         tournament_location=fixture.tournament_location,
+        kickoff_is_estimated=fixture.kickoff_is_estimated,
         best_pick=best_pick,
         all_market_picks=all_market_picks or [],
         live_state=live_state,

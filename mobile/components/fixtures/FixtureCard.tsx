@@ -172,6 +172,15 @@ export function FixtureCard({ fixture }: { fixture: FixtureSummary }) {
                 <Text className="text-xs font-semibold uppercase text-amber-600 dark:text-amber-500">
                   Postponed
                 </Text>
+              ) : fixture.kickoff_is_estimated ? (
+                /* The provider gave no real start time, so kickoff_utc is a DATE placeholder,
+                   not a time. Showing it as "01:00" was doubly misleading: wrong by hours, and
+                   because every untimed match in a tournament inherits the same placeholder,
+                   later-round matches appeared on today's schedule and couldn't be found on any
+                   real platform. Say what we actually know instead. */
+                <Text className="text-xs text-gray-400">
+                  {kickoff.toLocaleDateString()} · <Text className="text-amber-600">Time TBC</Text>
+                </Text>
               ) : (
                 <Text className="text-xs text-gray-400">
                   {kickoff.toLocaleDateString()}{" "}

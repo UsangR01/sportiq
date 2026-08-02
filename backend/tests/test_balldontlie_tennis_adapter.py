@@ -24,6 +24,7 @@ from app.adapters.balldontlie_tennis import (
     _latest_rank_points,
     _map_match_to_fixture_payload,
     _map_status,
+    _match_kickoff_is_estimated,
     _match_result_type,
     _match_winner_id,
     _sets_won,
@@ -411,3 +412,25 @@ async def test_get_with_retry_retries_on_429_then_succeeds():
 
     assert call_count["n"] == 2
     assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("scheduled_time", "expected_estimated"),
+    [
+        ("2026-08-15T14:30:00.000Z", False),  # a genuine kickoff time
+        ("2026-08-15T00:00:00.000Z", True),  # midnight = a DATE, not a time
+        (None, True),  # absent entirely -> falls back to tournament start
+    ],
+)
+def test_match_kickoff_is_estimated(scheduled_time, expected_estimated):
+    """Real tennis matches are never scheduled for 00:00 UTC, so a midnight timestamp encodes
+    a date with no time of day and must be treated exactly like a missing one.
+
+    This matters because the fallback assigns the TOURNAMENT'S START DATE to every untimed
+    match. Measured on a real ATP tournament, 570 of 600 matches had no scheduled_time and 17
+    more were midnight — so all of them collapsed onto one timestamp. That showed every match
+    at the same wrong time AND made later-round matches appear on today's schedule, where users
+    could not find them on any real platform."""
+    match = make_match(scheduled_time=scheduled_time)
+    assert _match_kickoff_is_estimated(match) is expected_estimated
+    assert _map_match_to_fixture_payload(match, "atp").kickoff_is_estimated is expected_estimated

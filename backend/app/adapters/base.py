@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 
 
 @dataclass(frozen=True)
@@ -71,6 +71,15 @@ class FixturePayload:
     tournament_name: str | None = None
     tournament_surface: str | None = None
     tournament_location: str | None = None
+    # True when kickoff_utc was INFERRED rather than reported by the provider, so the client
+    # can say "time TBC" instead of stating a precise time we don't actually have. Real and
+    # common for tennis: measured across a full ATP tournament, 570 of 600 matches had no
+    # scheduled_time at all, and of the 30 that did, 17 were midnight (date only). Falling
+    # back to the tournament's start date gave every match in a 12-day draw the same
+    # timestamp, which both showed wrong times AND made matches appear on days they were not
+    # played. Fabricating a kickoff contradicts this codebase's own rule of never inventing a
+    # neutral value; flagging it keeps the fixture usable without asserting false precision.
+    kickoff_is_estimated: bool = False
 
 
 @dataclass(frozen=True)
@@ -121,7 +130,13 @@ class DataSourceAdapter(ABC):
     Ingest workers and routes must never call a provider's SDK/HTTP client directly."""
 
     @abstractmethod
-    async def fetch_odds(self, sport: str, league: str, days_ahead: int) -> list[OddsPayload]:
+    async def fetch_odds(
+        self,
+        sport: str,
+        league: str,
+        days_ahead: int,
+        dates: list[date] | None = None,
+    ) -> list[OddsPayload]:
         """Deliberately mirrors fetch_fixtures's shape, not a fixture_ids list as originally
         drafted: real odds providers (TheRundown) are queried by sport+date-range, not by IDs
         the caller already knows — those IDs live in a different provider's ID space

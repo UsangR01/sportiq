@@ -1,4 +1,5 @@
 import logging
+from datetime import UTC, date, datetime, timedelta
 
 import httpx
 from sqlalchemy import select
@@ -7,7 +8,7 @@ from app.adapters.base import OddsPayload
 from app.adapters.factory import AdapterFactory
 from app.core.database import async_session_factory
 from app.core.redis import get_redis
-from app.fixtures.models import Fixture
+from app.fixtures.models import Fixture, FixtureStatus
 from app.fixtures.service import find_fixture_by_abbreviations_and_time
 from app.odds.models import Odds
 from app.sports.models import League, Sport
@@ -16,7 +17,10 @@ from app.workers.celery import celery_app, run_task
 logger = logging.getLogger(__name__)
 
 ODDS_CACHE_TTL_SECONDS = 10 * 60
-ODDS_LOOKAHEAD_DAYS = 7
+# Shortened from 7. Each extra day of lookahead is another potential request per league per
+# run, and odds more than a few days out are both less accurate and less useful — the feed's
+# value is concentrated in near-term fixtures.
+ODDS_LOOKAHEAD_DAYS = 3
 
 
 async def _resolve_fixture(db, sport_id, league_id, payload: OddsPayload) -> Fixture | None:
@@ -69,6 +73,34 @@ async def _resolve_fixture(db, sport_id, league_id, payload: OddsPayload) -> Fix
     return fixture
 
 
+async def _dates_with_fixtures(sport: Sport, league: League) -> list[date]:
+    """The distinct kickoff dates this league actually has upcoming fixtures on.
+
+    Odds endpoints are queried one request per DATE, so walking every day in the lookahead
+    window spends a request on dates with no fixtures at all — which is most days, for most
+    leagues. That waste is not theoretical: it exhausted TheRundown's 1,000-request MONTHLY
+    quota in roughly 90 minutes (7 leagues x 8 dates x 288 runs/day ~= 16,000 requests/day),
+    after which football had no odds at all for weeks. With no odds, expected-value ranking
+    and the min_odds filter both silently degrade to probability-only behaviour, so the damage
+    surfaced as an apparent modelling problem rather than an ingestion one.
+
+    Querying only real fixture dates makes the cost proportional to the actual schedule
+    instead of to the calendar."""
+    now = datetime.now(UTC)
+    async with async_session_factory() as db:
+        rows = (
+            await db.execute(
+                select(Fixture.kickoff_utc).where(
+                    Fixture.league_id == league.id,
+                    Fixture.status.in_([FixtureStatus.SCHEDULED, FixtureStatus.LIVE]),
+                    Fixture.kickoff_utc >= now - timedelta(days=1),
+                    Fixture.kickoff_utc <= now + timedelta(days=ODDS_LOOKAHEAD_DAYS),
+                )
+            )
+        ).scalars()
+    return sorted({kickoff.date() for kickoff in rows})
+
+
 async def _fetch_odds_payloads(sport: Sport, league: League) -> list[OddsPayload]:
     """Queries every odds adapter registered for this sport (see
     AdapterFactory.get_odds_adapters) and merges their results — football queries both
@@ -76,12 +108,19 @@ async def _fetch_odds_payloads(sport: Sport, league: League) -> list[OddsPayload
     redundant (see CLAUDE.md). A league one adapter has no mapping for raises ValueError from
     that adapter alone (e.g. TheRundown for Brasileirão) — caught per-adapter so it can't
     block a DIFFERENT adapter's real data for the same league."""
+    dates = await _dates_with_fixtures(sport, league)
+    if not dates:
+        return []
+
     payloads: list[OddsPayload] = []
     for adapter in AdapterFactory.get_odds_adapters(sport.slug):
         try:
             payloads.extend(
                 await adapter.fetch_odds(
-                    sport=sport.slug, league=league.slug, days_ahead=ODDS_LOOKAHEAD_DAYS
+                    sport=sport.slug,
+                    league=league.slug,
+                    days_ahead=ODDS_LOOKAHEAD_DAYS,
+                    dates=dates,
                 )
             )
         except ValueError:

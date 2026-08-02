@@ -2,7 +2,17 @@ import enum
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import Date, DateTime, Enum, Float, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -98,6 +108,13 @@ class Fixture(Base):
     tournament_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     tournament_surface: Mapped[str | None] = mapped_column(String(30), nullable=True)
     tournament_location: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # True when kickoff_utc was INFERRED rather than reported by the provider, so the client
+    # can show "Time TBC" instead of a precise time we don't actually have. Tennis in practice:
+    # ~95% of ATP matches carry no usable kickoff time, and falling back to the tournament's
+    # start date gave every match in a 12-day draw the same timestamp — which showed wrong
+    # times AND made matches appear on days they were never played. See
+    # balldontlie_tennis.py:_match_kickoff_is_estimated.
+    kickoff_is_estimated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     __table_args__ = (
         UniqueConstraint("sport_id", "external_id", name="uq_fixtures_sport_external_id"),
