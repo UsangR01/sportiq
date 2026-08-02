@@ -498,6 +498,36 @@ fixture and told the user nothing**; 0.35 separates "no real data yet" from "par
 genuine data". Below it the badge dims and reads "limited data", worded as a limitation of the
 DATA rather than a hedge on the number.
 
+**Negative Binomial for Over/Under was investigated and DELIBERATELY NOT BUILT — the premise
+was measured and found false.** The stated reasoning for it (twice, confidently) was: "real
+football goals are overdispersed, so Poisson's variance-equals-mean assumption gives too-thin
+tails and overstates UNDER, and home/away goals are positively correlated so the Poisson-sum
+independence assumption compounds it." Measured across all 8,718 real pooled fixtures, both
+halves of that are wrong:
+
+    total goals   mean=2.794  var=2.802  var/mean=1.0030   <- Poisson assumes exactly 1.0
+    corr(home goals, away goals) = -0.058                  <- slightly NEGATIVE, not positive
+    P(under 1.5/2.5/3.5): Poisson-at-the-mean vs empirical differs by <= 0.007
+
+Total goals are essentially **exactly** Poisson-dispersed. The two sides are individually very
+mildly overdispersed (1.047, 1.088), but their slight NEGATIVE correlation cancels it, leaving
+the total at 1.003. Adding a Negative Binomial dispersion parameter would fit a dispersion that
+does not exist — added complexity, no gain, and a real risk of fitting noise. Dixon-Coles-style
+correlation adjustment is equally unjustified at r = -0.058.
+
+**The distribution was never the problem; the signal is.** Two independent measurements agree:
+the retrained model's own reliability buckets for under 3.5 all land at ~0.675 (the base rate)
+across n=1,704 test fixtures, and on completed fixtures with a stored prediction the
+correlation between predicted total xG and actual total goals is **+0.030 — about 0.1% of
+variance explained** (n=66, so wide error bars, but pointing the same way as the much larger
+bucket evidence). Predicted xG spans 0.53-4.13 while actual totals span 0-7 with more than
+twice the standard deviation.
+
+So Over/Under goals is currently a base-rate guess wearing the clothes of a prediction. The
+honest options are better goal-predictive features, or not surfacing it as a confident pick —
+NOT another distributional or calibration layer, both of which would only relabel the same
+absent signal.
+
 **`scripts/purge_tennis_test_pollution.py`** removed 2,729 pre-2021 tennis fixtures left by
 exploratory ingest runs during the tennis build-out (6,277 → 3,548). Conservative by design:
 only fixtures predating the 2021-2025 training window, and Teams (players) are deliberately
