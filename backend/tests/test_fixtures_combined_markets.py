@@ -89,9 +89,12 @@ async def seeded_multi_market_fixtures():
             Prediction(
                 fixture_id=fixture_a.id,
                 model_version="test_model_v1",
-                home_prob=0.40,
-                draw_prob=0.30,
-                away_prob=0.30,
+                # 0.55 sits +0.092 above football's real 0.4582 home base rate, so h2h has a
+                # genuinely informative candidate for the market=h2h tests. It stays below the
+                # +0.10 a 0.6 floor demands, so corners (+0.265) still wins unrestricted.
+                home_prob=0.55,
+                draw_prob=0.25,
+                away_prob=0.20,
                 confidence_tier=ConfidenceTier.MEDIUM,
                 corners_xg_home=4.5,
                 corners_xg_away=3.5,  # total 8.0 -> P(under 9.5) ~= 0.72, a realistic edge
@@ -136,9 +139,12 @@ async def seeded_multi_market_fixtures():
             Prediction(
                 fixture_id=fixture_b.id,
                 model_version="test_model_v1",
-                home_prob=0.45,
-                draw_prob=0.10,
-                away_prob=0.45,
+                # away 0.38 is +0.092 over the 0.2879 away base rate: informative enough to
+                # surface when no floor is set, but short of the +0.10 a 0.6 floor requires,
+                # so this fixture is still correctly dropped by that floor.
+                home_prob=0.42,
+                draw_prob=0.20,
+                away_prob=0.38,
                 confidence_tier=ConfidenceTier.LOW,
                 created_at=now,
             )
@@ -309,9 +315,13 @@ async def seeded_completed_low_confidence_fixture():
             Prediction(
                 fixture_id=fixture.id,
                 model_version="test_model_v1",
-                home_prob=0.45,
-                draw_prob=0.10,
-                away_prob=0.45,
+                # Nothing here clears the +0.10 edge a 0.6 floor demands (best is away at
+                # +0.052 over its 0.2879 base rate), but away and X2 both clear the +0.05 a
+                # 0.5 floor demands - so the same fixture is correctly dropped by one and kept
+                # by the other.
+                home_prob=0.40,
+                draw_prob=0.26,
+                away_prob=0.34,
                 confidence_tier=ConfidenceTier.LOW,
                 created_at=datetime.now(UTC),
             )
@@ -489,52 +499,64 @@ async def test_postponed_fixtures_never_show_a_stale_pick(
     assert row["all_market_picks"] == []
 
 
-def test_pick_best_ranks_by_expected_value_not_raw_probability():
-    """The core of the fix: a lower-probability pick at a much better price is better VALUE,
-    and should win. Ranking by raw probability was what filled the feed with near-identical
-    high-probability/low-price UNDER picks."""
+def test_pick_best_ranks_by_highest_probability_among_informative_picks():
+    """Highest probability wins — but only among picks that actually say something.
+
+    This is the Shenyang Urban 3-1 Shanghai Shenhua case. "Under 3.5 at 68%" looks like the
+    confident choice and would win on raw probability, yet it sits BELOW its own 69.4% base
+    rate, so it carries no information about this fixture at all. The 57% home call sits well
+    above football's 0.4582 home base rate, and it was the correct call."""
     from app.fixtures.router import _MarketCandidate, _pick_best
 
-    likely_but_poor_value = _MarketCandidate("under", 0.80, 1.10, "goals_total", 3.5)  # EV -0.12
-    less_likely_better_value = _MarketCandidate("away", 0.40, 3.00, "h2h", None)  # EV +0.20
+    uninformative = _MarketCandidate("under", 0.68, 1.68, "goals_total", 3.5)  # below base rate
+    informative = _MarketCandidate("home", 0.57, 3.90, "h2h", None)  # +0.11 over base rate
 
-    best = _pick_best([likely_but_poor_value, less_likely_better_value])
-    assert best.selection == "away"
+    best = _pick_best([uninformative, informative])
     assert best.market == "h2h"
+    assert best.selection == "home"
 
 
-def test_pick_best_guard_rejects_a_pick_that_implausibly_beats_the_market():
-    """A pick claiming far more probability than the bookmaker's price implies is treated as
-    model error, not edge — the measured real case was ~85% claimed at 1.60 (≈62% implied),
-    which was delivering only ~70%. With no other priced candidate, the fixture falls back to
-    an unpriced one rather than surfacing the rejected pick."""
+def test_pick_best_excludes_picks_at_or_below_their_market_base_rate():
+    """A pick at its base rate is the league average with a percentage sign on it. With nothing
+    else available the fixture correctly yields no pick, rather than a confident-looking one
+    that says nothing."""
     from app.fixtures.router import _MarketCandidate, _pick_best
 
-    implausible = _MarketCandidate("under", 0.85, 1.60, "goals_total", 3.5)  # ~23pt edge
-    unpriced_alternative = _MarketCandidate("1X", 0.70, None, "double_chance", None)
-
-    best = _pick_best([implausible, unpriced_alternative])
-    assert best.market == "double_chance"
+    assert _pick_best([_MarketCandidate("under", 0.68, 1.68, "goals_total", 3.5)]) is None
+    assert _pick_best([_MarketCandidate("1X", 0.70, 1.40, "double_chance", None)]) is None
 
 
-def test_pick_best_returns_none_when_every_priced_candidate_fails_the_guard():
-    """With nothing trustworthy and no unpriced fallback, "no pick" is the honest answer — the
-    caller then drops the fixture rather than showing a pick we've measured as untrustworthy."""
+def test_pick_best_guard_only_rejects_an_absurd_disagreement_with_the_market():
+    """The edge guard is a sanity backstop now, not an active filter.
+
+    At its old 0.15 bound it rejected Qingdao's 85% under-3.5 purely for beating the price by
+    20 points - and that pick won. The base-rate gate removes uninformative picks far more
+    precisely than penalising confident ones, so only a genuinely absurd gap (more likely stale
+    odds or a broken feature vector than a view) is filtered here."""
     from app.fixtures.router import _MarketCandidate, _pick_best
 
-    assert _pick_best([_MarketCandidate("under", 0.95, 1.30, "goals_total", 3.5)]) is None
+    # 0.85 vs a 1.53 price (implied 0.65) is a real disagreement, but a legitimate one.
+    plausible = _MarketCandidate("under", 0.85, 1.53, "goals_total", 3.5)
+    assert _pick_best([plausible]).selection == "under"
+
+    # 0.95 against a 5.00 price (implied 0.20) is not a view, it is broken input.
+    absurd = _MarketCandidate("under", 0.95, 5.00, "goals_total", 3.5)
+    unpriced_alternative = _MarketCandidate("1X", 0.80, None, "double_chance", None)
+    assert _pick_best([absurd, unpriced_alternative]).market == "double_chance"
+    assert _pick_best([absurd]) is None
 
 
-def test_pick_best_applies_the_probability_floor_before_ranking():
-    """Filtering after ranking silently dropped whole fixtures: the highest-EV candidate is
-    often a high-odds/low-probability one, so a fixture with a perfectly good high-probability
-    pick could still fail the floor. The floor must constrain the choice, not veto it."""
+def test_min_probability_sets_how_informative_a_pick_must_be():
+    """The caller's floor drives the INFORMATIVENESS requirement rather than acting as an
+    absolute cut, anchored on 0.5.
+
+    Under the old absolute reading a 0.6 setting was simultaneously trivial for Over/Under
+    (base rate already 0.69) and unreachable for 1X2, whose highest observed probability across
+    every stored prediction was 0.588 - so it silently excluded the entire 1X2 market."""
     from app.fixtures.router import _MarketCandidate, _pick_best
 
-    high_ev_low_prob = _MarketCandidate("over", 0.28, 3.50, "corners_total", 9.5)  # EV -0.02
-    clears_the_floor = _MarketCandidate("under", 0.72, 1.30, "corners_total", 9.5)  # EV -0.06
+    # +0.052 over the 0.2879 away base rate: informative, but only modestly so.
+    modest = _MarketCandidate("away", 0.34, 3.10, "h2h", None)
 
-    assert _pick_best([high_ev_low_prob, clears_the_floor]).selection == "over"
-    assert (
-        _pick_best([high_ev_low_prob, clears_the_floor], min_probability=0.6).selection == "under"
-    )
+    assert _pick_best([modest], min_probability=0.5).selection == "away"  # needs +0.05
+    assert _pick_best([modest], min_probability=0.6) is None  # needs +0.10
