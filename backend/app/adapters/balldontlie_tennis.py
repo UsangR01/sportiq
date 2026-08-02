@@ -166,21 +166,94 @@ def _match_kickoff_utc(match: dict) -> datetime:
     return datetime.fromisoformat(tournament_start).replace(tzinfo=UTC)
 
 
+def _is_completed_set(p1_games: int, p2_games: int) -> bool:
+    """Whether a set was actually WON, per real tennis scoring — not merely "someone is ahead".
+
+    A set needs 6+ games with a 2-game margin (6-0..6-4, 7-5, and long deciding sets like
+    70-68), or a 7-6 tiebreak. A partial score like 2-3 (play abandoned mid-set when a player
+    retires) is NOT a won set, and neither is 6-5 (play continues to 7-5 or 7-6).
+
+    This is the fix for a real, user-reported bug: the previous implementation counted ANY set
+    where a player happened to lead, so a real retirement (Popyrin 6-4, 2-3 vs Kokkinakis, who
+    retired) was scored 1-1 — an impossible tennis scoreline, since tennis has no draws. Worse,
+    it inverted the win/loss verdict: Popyrin genuinely WON, but a stored 1-1 made the mobile
+    feed mark a CORRECT prediction as a failure, and made _maybe_settle_outcome derive a
+    MatchResult.DRAW that can never happen in tennis."""
+    hi, lo = max(p1_games, p2_games), min(p1_games, p2_games)
+    if hi == 7 and lo == 6:
+        return True  # tiebreak
+    return hi >= 6 and (hi - lo) >= 2
+
+
 def _sets_won(match: dict) -> tuple[int | None, int | None]:
-    """(player1 sets won, player2 sets won) from set_scores — the real "score" convention
-    Outcome.home_score/away_score use for tennis (see module docstring). None, None when
-    set_scores is genuinely absent (e.g. a scheduled/live match, or a walkover with no sets
-    played at all) rather than fabricating 0-0."""
+    """(player1 sets won, player2 sets won) from set_scores, counting only genuinely COMPLETED
+    sets (see _is_completed_set) — the real "score" convention Outcome.home_score/away_score
+    use for tennis (see module docstring). None, None when set_scores is genuinely absent (e.g.
+    a scheduled/live match, or a walkover with no sets played at all) rather than fabricating
+    0-0."""
     set_scores = match.get("set_scores") or []
     if not set_scores:
         return None, None
-    p1_sets = sum(
-        1 for s in set_scores if (s.get("player1_games") or 0) > (s.get("player2_games") or 0)
-    )
-    p2_sets = sum(
-        1 for s in set_scores if (s.get("player2_games") or 0) > (s.get("player1_games") or 0)
-    )
+    p1_sets = 0
+    p2_sets = 0
+    for s in set_scores:
+        p1_games, p2_games = (s.get("player1_games") or 0), (s.get("player2_games") or 0)
+        if not _is_completed_set(p1_games, p2_games):
+            continue  # abandoned/in-progress set — belongs to neither player
+        if p1_games > p2_games:
+            p1_sets += 1
+        else:
+            p2_sets += 1
     return p1_sets, p2_sets
+
+
+# Every real tennis format (best-of-3, best-of-5) needs at least 2 won sets to take the match,
+# so a "winner" with fewer than this did not win on court — the match ended irregularly.
+MIN_SETS_TO_WIN_A_MATCH = 2
+
+
+def _match_result_type(match: dict) -> str | None:
+    """None for a normally-completed match; "retired" / "walkover" for one that ended without
+    being played out. Detected STRUCTURALLY, not from match_status — a real, live-confirmed
+    finding that invalidated this adapter's original assumption: BallDontLie reported a genuine
+    mid-match retirement (Popyrin/Kokkinakis, real set_scores 6-4, 2-3) as plain
+    match_status="finished", with no retirement marker anywhere in the response. Relying on
+    _COMPLETED_MATCH_STATUSES' "retired"/"walkover"/"defaulted" values alone would therefore
+    silently miss real retirements, so this instead infers it from the score itself:
+
+      - a set left incomplete (play abandoned mid-set), or
+      - a winner who never reached MIN_SETS_TO_WIN_A_MATCH won sets
+
+    Either means the result stands (there IS a real winner) but the match wasn't played out —
+    which is why these render as a neutral "RET" badge with NO win/loss verdict rather than
+    counting against the model: most bookmakers void bets on a retirement, so showing a tick
+    would imply a payout the user may never have received. The provider's own explicit
+    match_status is still honoured when present, since a "walkover" with zero sets played can
+    only be identified that way."""
+    status = (match.get("match_status") or "").lower()
+    if status in ("walkover", "defaulted"):
+        return "walkover"
+    if status == "retired":
+        return "retired"
+
+    if match.get("winner") is None:
+        return None  # not finished — nothing to classify yet
+
+    set_scores = match.get("set_scores") or []
+    if not set_scores:
+        # A finished match with a real winner but no sets at all was never played.
+        return "walkover"
+
+    if any(
+        not _is_completed_set((s.get("player1_games") or 0), (s.get("player2_games") or 0))
+        for s in set_scores
+    ):
+        return "retired"
+
+    p1_sets, p2_sets = _sets_won(match)
+    if max(p1_sets or 0, p2_sets or 0) < MIN_SETS_TO_WIN_A_MATCH:
+        return "retired"
+    return None
 
 
 def _match_winner_id(match: dict) -> str | None:
@@ -226,6 +299,7 @@ def _map_match_to_fixture_payload(match: dict, tour: str) -> FixturePayload:
     home_sets = p1_sets if home_is_player1 else p2_sets
     away_sets = p2_sets if home_is_player1 else p1_sets
     status = _map_status(match.get("match_status", ""))
+    tournament = match.get("tournament") or {}
 
     return FixturePayload(
         external_id=_external_id(tour, match["id"]),
@@ -239,6 +313,10 @@ def _map_match_to_fixture_payload(match: dict, tour: str) -> FixturePayload:
         status=status,
         home_score=home_sets if status == "completed" else None,
         away_score=away_sets if status == "completed" else None,
+        result_type=_match_result_type(match) if status == "completed" else None,
+        tournament_name=tournament.get("name"),
+        tournament_surface=tournament.get("surface"),
+        tournament_location=tournament.get("location"),
     )
 
 

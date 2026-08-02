@@ -20,9 +20,11 @@ from app.adapters.balldontlie_tennis import (
     _filter_meetings_vs_opponent,
     _get_with_retry,
     _home_away_players,
+    _is_completed_set,
     _latest_rank_points,
     _map_match_to_fixture_payload,
     _map_status,
+    _match_result_type,
     _match_winner_id,
     _sets_won,
     _strip_tour_prefix,
@@ -127,6 +129,97 @@ def test_map_match_to_fixture_payload_falls_back_to_tournament_start_date():
     # own start_date rather than crash or fabricate a value.
     payload = _map_match_to_fixture_payload(make_match(scheduled_time=None), "wta")
     assert payload.kickoff_utc == datetime(2026, 8, 10, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("p1", "p2", "expected"),
+    [
+        (6, 4, True),  # standard
+        (6, 0, True),
+        (7, 5, True),  # went to 7-5
+        (7, 6, True),  # tiebreak
+        (70, 68, True),  # long deciding set (real, e.g. Isner-Mahut)
+        (6, 5, False),  # NOT over yet — must reach 7-5 or 7-6
+        (2, 3, False),  # abandoned mid-set (the real retirement case)
+        (0, 0, False),
+        (5, 4, False),
+    ],
+)
+def test_is_completed_set(p1, p2, expected):
+    assert _is_completed_set(p1, p2) is expected
+
+
+def test_sets_won_ignores_an_abandoned_set__real_retirement_regression():
+    """The real, user-reported bug: Popyrin beat Kokkinakis 6-4, then Kokkinakis retired at
+    2-3 in set two. Counting "whoever is ahead" scored this 1-1 — an impossible tennis
+    scoreline (there are no draws), which ALSO inverted the verdict: Popyrin genuinely won,
+    but a stored 1-1 made the feed mark a CORRECT prediction as failed."""
+    match = make_match(
+        winner=PLAYER_A,
+        set_scores=[
+            {"set_number": 1, "player1_games": 6, "player2_games": 4},
+            {"set_number": 2, "player1_games": 2, "player2_games": 3},
+        ],
+    )
+    assert _sets_won(match) == (1, 0)
+
+
+def test_match_result_type_detects_retirement_despite_status_finished():
+    """Live-confirmed: BallDontLie reports a genuine mid-match retirement as plain
+    match_status="finished" with no retirement marker at all, so this MUST be inferred from
+    the score structurally rather than read off match_status."""
+    match = make_match(
+        match_status="finished",
+        winner=PLAYER_A,
+        set_scores=[
+            {"set_number": 1, "player1_games": 6, "player2_games": 4},
+            {"set_number": 2, "player1_games": 2, "player2_games": 3},
+        ],
+    )
+    assert _match_result_type(match) == "retired"
+
+
+def test_match_result_type_none_for_a_normally_completed_match():
+    match = make_match(
+        match_status="finished",
+        winner=PLAYER_A,
+        set_scores=[
+            {"set_number": 1, "player1_games": 6, "player2_games": 4},
+            {"set_number": 2, "player1_games": 6, "player2_games": 3},
+        ],
+    )
+    assert _match_result_type(match) is None
+
+
+def test_match_result_type_walkover_when_no_sets_were_played():
+    match = make_match(match_status="finished", winner=PLAYER_A, set_scores=[])
+    assert _match_result_type(match) == "walkover"
+
+
+def test_match_result_type_detects_retirement_after_a_single_completed_set():
+    """A winner who only ever took one set can't have won any real tennis format outright,
+    even when every listed set is itself complete."""
+    match = make_match(
+        match_status="finished",
+        winner=PLAYER_A,
+        set_scores=[{"set_number": 1, "player1_games": 6, "player2_games": 4}],
+    )
+    assert _match_result_type(match) == "retired"
+
+
+def test_map_match_to_fixture_payload_carries_result_type_and_tournament():
+    match = make_match(
+        winner=PLAYER_A,
+        set_scores=[
+            {"set_number": 1, "player1_games": 6, "player2_games": 4},
+            {"set_number": 2, "player1_games": 2, "player2_games": 3},
+        ],
+    )
+    payload = _map_match_to_fixture_payload(match, "atp")
+    assert payload.home_score == 1 and payload.away_score == 0
+    assert payload.result_type == "retired"
+    assert payload.tournament_name == "Example Open"
+    assert payload.tournament_surface == "Hard"
 
 
 def test_home_away_players_is_id_based_not_player1_player2_position():

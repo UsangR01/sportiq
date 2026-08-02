@@ -35,6 +35,11 @@ export interface LiveStateResponse {
   // this existed. See lib/pickFormat.ts:evaluatePickCorrectness.
   home_corners: number | null;
   away_corners: number | null;
+  // null for a normally-played-out result; "retired"/"walkover" for a match that ended
+  // without being played out (tennis in practice). These render a neutral "RET" badge with
+  // NO win/loss verdict — bookmakers generally void bets on a retirement, so a tick would
+  // imply a payout the user may never have received.
+  result_type: string | null;
   last_updated_utc: string;
 }
 
@@ -54,6 +59,14 @@ export interface FixtureSummary {
   // prediction as if it were still live), so FixtureCard renders a plain neutral badge here.
   status: "scheduled" | "live" | "completed" | "postponed";
   season: string;
+  // Tennis only — a tour (ATP/WTA) is a single league, so the feed groups by TOURNAMENT
+  // instead, giving users something they can actually look up in a betting app. Null for
+  // football/NBA, where league_name/league_country already serve that role.
+  // tournament_location is a CITY, not a country (the provider has no country field) — see
+  // lib/countryFlags.tsx:countryForTournamentLocation.
+  tournament_name: string | null;
+  tournament_surface: string | null;
+  tournament_location: string | null;
   best_pick: BestPick | null;
   // Every real candidate across all four markets (h2h, double chance, goals/corners O/U) —
   // not just best_pick's single winner. Used to show a full win/loss breakdown for a

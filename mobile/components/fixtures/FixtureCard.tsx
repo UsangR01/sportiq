@@ -15,12 +15,19 @@ function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
   if (!live_state) return null;
 
   const isCompleted = status === "completed";
+  // A match that ended without being played out (a tennis retirement/walkover — see
+  // backend/app/adapters/balldontlie_tennis.py:_match_result_type). The result stands and
+  // there IS a real winner, but we deliberately withhold the win/loss verdict: most
+  // bookmakers void bets on a retirement, so a green tick would imply a payout the user may
+  // never have actually received. Shown as a neutral "RET" marker instead of counting the
+  // prediction as either a hit or a miss.
+  const isRetired = isCompleted && live_state.result_type != null;
   // Covers every market, including corners_total when real corner counts were fetched at
   // settlement time (see lib/pickFormat.ts:evaluatePickCorrectness) — null only for a fixture
   // settled before that existed, or NBA. null means "genuinely can't verify this one", not
   // "wrong" — shown as a neutral grey badge, not red.
   const wasCorrect =
-    isCompleted && best_pick
+    isCompleted && best_pick && !isRetired
       ? evaluatePickCorrectness(
           best_pick,
           live_state.home_score,
@@ -38,6 +45,11 @@ function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
       {status === "live" && live_state.match_minute != null && (
         <Text className="text-xs text-red-500">{live_state.match_minute}&apos;</Text>
       )}
+      {isRetired && (
+        <Text className="text-[10px] font-semibold uppercase text-amber-600 dark:text-amber-500">
+          {live_state.result_type === "walkover" ? "Walkover" : "Retired"}
+        </Text>
+      )}
       {/* Retrodicted prediction vs. the real result (see
           app/workers/backfill_predictions.py) — colour is never the only signal (a
           checkmark/cross is redundant with it) so this stays legible for colour-blind
@@ -48,11 +60,15 @@ function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
       {isCompleted && best_pick && (
         <View
           className={`mt-1 items-center justify-center rounded px-1 py-1 ${BADGE_WIDTH} ${
-            wasCorrect === null ? "bg-gray-500" : wasCorrect ? "bg-green-600" : "bg-red-500"
+            isRetired || wasCorrect === null
+              ? "bg-gray-500"
+              : wasCorrect
+                ? "bg-green-600"
+                : "bg-red-500"
           }`}
         >
           <Text className="text-center text-[10px] font-bold text-white" numberOfLines={1}>
-            {wasCorrect === null ? "" : wasCorrect ? "✓ " : "✗ "}
+            {isRetired ? "VOID · " : wasCorrect === null ? "" : wasCorrect ? "✓ " : "✗ "}
             {pickHeadline(best_pick)}
           </Text>
           <Text className="text-center text-[10px] text-white" numberOfLines={1}>

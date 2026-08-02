@@ -88,6 +88,16 @@ class Fixture(Base):
     # team+kickoff-time match (see app/fixtures/service.py:find_fixture_by_abbreviations_and_time)
     # so subsequent odds ingests can look the fixture up directly instead of re-matching.
     odds_provider_external_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Tennis-only: a tour (ATP/WTA) is one League row, but users need to know WHICH TOURNAMENT
+    # a match belongs to — "ATP Tour" alone doesn't tell you what to look up in a betting app.
+    # Denormalised onto the fixture rather than given its own table: these are display/grouping
+    # values that arrive already embedded in every match response (no extra API call, no join
+    # needed for the list feed), matching this schema's existing pragmatic-nullable-column
+    # convention. `tournament_location` is a CITY ("Montreal"), not a country — the provider
+    # exposes no country field, so the mobile flag maps city -> country itself.
+    tournament_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    tournament_surface: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    tournament_location: Mapped[str | None] = mapped_column(String(120), nullable=True)
 
     __table_args__ = (
         UniqueConstraint("sport_id", "external_id", name="uq_fixtures_sport_external_id"),
@@ -205,6 +215,16 @@ class FixtureLiveState(Base):
     # (no corners concept) and for any fixture settled before this column existed.
     home_corners: Mapped[int | None] = mapped_column(Integer, nullable=True)
     away_corners: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # NULL for a normally-played-out result; "retired"/"walkover" for one that ended without
+    # being played out (tennis-only in practice). Deliberately a column here rather than a new
+    # FixtureStatus value: the match genuinely IS completed and has a real winner, so every
+    # existing `status == COMPLETED` code path (settlement, retrodiction, feed filtering)
+    # should keep treating it normally — this only changes how the RESULT is presented. The
+    # mobile feed shows a neutral "RET" badge and withholds the win/loss verdict for these,
+    # since bookmakers generally void bets on a retirement, so a tick would imply a payout the
+    # user may never have received. See app/adapters/balldontlie_tennis.py:_match_result_type
+    # for why this must be inferred from the score rather than read off match_status.
+    result_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
     last_updated_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     fixture: Mapped["Fixture"] = relationship(back_populates="live_state")

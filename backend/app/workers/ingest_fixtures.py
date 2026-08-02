@@ -47,6 +47,7 @@ async def _upsert_live_state(db, fixture_id, payload: FixturePayload) -> None:
     live_state.away_score = payload.away_score or 0
     live_state.match_minute = payload.match_minute
     live_state.status = payload.status
+    live_state.result_type = payload.result_type
     live_state.last_updated_utc = datetime.now(UTC)
 
 
@@ -182,6 +183,9 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
                     kickoff_utc=payload.kickoff_utc,
                     status=FixtureStatus(payload.status),
                     season=payload.season,
+                    tournament_name=payload.tournament_name,
+                    tournament_surface=payload.tournament_surface,
+                    tournament_location=payload.tournament_location,
                 )
                 db.add(fixture)
                 await db.flush()  # populate fixture.id for the live-state upsert below
@@ -196,6 +200,14 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
                 new_status = FixtureStatus(payload.status)
                 if existing.status != new_status:
                     existing.status = new_status
+                # Backfills tournament metadata onto fixtures ingested before these columns
+                # existed, without clobbering real values if a later payload omits them.
+                if payload.tournament_name is not None:
+                    existing.tournament_name = payload.tournament_name
+                if payload.tournament_surface is not None:
+                    existing.tournament_surface = payload.tournament_surface
+                if payload.tournament_location is not None:
+                    existing.tournament_location = payload.tournament_location
                 fixture = existing
 
             await _upsert_live_state(db, fixture.id, payload)

@@ -11,7 +11,7 @@ import { SportFilterChips } from "@/components/SportFilterChips";
 import { listFixtures } from "@/lib/api/fixtures";
 import { listSports } from "@/lib/api/sports";
 import type { FixtureSummary } from "@/lib/api/types";
-import { CountryFlag } from "@/lib/countryFlags";
+import { CountryFlag, countryForTournamentLocation } from "@/lib/countryFlags";
 import { useAuthStore } from "@/store/authStore";
 import { usePreferencesStore } from "@/store/preferencesStore";
 
@@ -38,21 +38,42 @@ interface LeagueSection {
   title: string;
   slug: string;
   country: string | null;
+  /** Court surface (Hard/Clay/Grass) — tennis only, shown alongside the tournament name. */
+  surface: string | null;
   data: FixtureSummary[];
 }
 
+/** Groups a day's fixtures into the sections the feed renders.
+ *
+ * Football/NBA group by LEAGUE, but tennis groups by TOURNAMENT: a whole tour is a single
+ * league row ("ATP Tour"), so grouping by it would render one undifferentiated wall of
+ * matches. Per explicit user request, a tennis section is one tournament, headed by its name,
+ * host-country flag and surface — the details a user needs to find the right event in their
+ * betting app. Surface matters enough in tennis to belong in the header rather than buried in
+ * fixture detail: it materially changes who's favoured.
+ *
+ * A tennis fixture with no tournament data (ingested before those columns existed) falls back
+ * to its league grouping rather than being dropped or grouped under a fabricated name. */
 function groupByLeague(fixtures: FixtureSummary[]): LeagueSection[] {
   const bySlug = new Map<string, LeagueSection>();
   for (const fixture of fixtures) {
-    let section = bySlug.get(fixture.league_slug);
+    const groupByTournament = fixture.tournament_name != null;
+    // Namespaced so a tournament can never collide with a league slug in the same map.
+    const key = groupByTournament
+      ? `tournament:${fixture.tournament_name}`
+      : `league:${fixture.league_slug}`;
+    let section = bySlug.get(key);
     if (!section) {
       section = {
-        title: fixture.league_name,
-        slug: fixture.league_slug,
-        country: fixture.league_country,
+        title: groupByTournament ? fixture.tournament_name! : fixture.league_name,
+        slug: key,
+        country: groupByTournament
+          ? countryForTournamentLocation(fixture.tournament_location)
+          : fixture.league_country,
+        surface: groupByTournament ? fixture.tournament_surface : null,
         data: [],
       };
-      bySlug.set(fixture.league_slug, section);
+      bySlug.set(key, section);
     }
     section.data.push(fixture);
   }
@@ -203,13 +224,26 @@ export default function PicksScreen() {
             <View className="mr-2">
               <CountryFlag country={section.country} size={24} />
             </View>
-            <View>
-              <Text className="text-sm font-bold text-gray-900 dark:text-gray-100">
+            <View className="flex-1">
+              <Text
+                className="text-sm font-bold text-gray-900 dark:text-gray-100"
+                numberOfLines={1}
+              >
                 {section.title}
               </Text>
-              {section.country && (
-                <Text className="text-xs text-gray-400">{section.country}</Text>
-              )}
+              <View className="flex-row items-center">
+                {section.country && (
+                  <Text className="text-xs text-gray-400">{section.country}</Text>
+                )}
+                {section.country && section.surface && (
+                  <Text className="text-xs text-gray-400"> · </Text>
+                )}
+                {section.surface && (
+                  <Text className="text-xs font-medium text-gray-500 dark:text-gray-400">
+                    {section.surface}
+                  </Text>
+                )}
+              </View>
             </View>
           </View>
         )}

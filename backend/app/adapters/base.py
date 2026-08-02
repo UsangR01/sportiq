@@ -56,6 +56,21 @@ class FixturePayload:
     # Elapsed match minute — real for API-Football (fixture.status.elapsed), None where the
     # provider doesn't expose it (BallDontLie's /games has no equivalent field).
     match_minute: int | None = None
+    # None for a normally-played-out result; "retired"/"walkover" for one that ended without
+    # being played out. Tennis-only in practice (see balldontlie_tennis.py:_match_result_type,
+    # which has to infer this structurally from the score because the provider reports real
+    # retirements as plain match_status="finished"). Consumed by the mobile feed to show a
+    # neutral "RET" badge instead of a win/loss verdict, since bookmakers generally void bets
+    # on a retirement. Football/NBA adapters leave it None.
+    result_type: str | None = None
+    # Tennis-only: matches are grouped by TOURNAMENT rather than by league/tour, since "ATP
+    # Tour" alone tells a user nothing about which event to look up in a betting app. Real,
+    # already-embedded fields on every BallDontLie match response — no extra API call.
+    # `tournament_location` is a CITY (e.g. "Montreal"), not a country: the provider exposes no
+    # country field at all, which is why the mobile flag needs its own city->country map.
+    tournament_name: str | None = None
+    tournament_surface: str | None = None
+    tournament_location: str | None = None
 
 
 @dataclass(frozen=True)

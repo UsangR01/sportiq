@@ -313,6 +313,86 @@ extended in this pass**: WTA data collection/training (blocked on that tour's ow
 subscription — the code is generic enough to just point `TOUR`/`league` at `"wta"` once it
 is), and tennis odds (explicit fast-follow, not v1 scope).
 
+### Tennis retirements + tournament grouping (both from real user-reported bugs)
+
+**A real, triple bug in set counting, reported from a screenshot** ("The game shown actually
+ended 1:0 with the away player retiring. So, where did you get the 1:1 from"): `_sets_won`
+counted **any** set where a player happened to be ahead, including a set abandoned mid-play
+when a player retires. Confirmed against real API data for Popyrin vs Kokkinakis (`set_scores`
+= 6-4, then 2-3 when Kokkinakis retired): the second, never-completed set was credited to
+Kokkinakis, producing **1-1** — an impossible tennis scoreline, since tennis has no draws.
+Three consequences, not one:
+1. Wrong score displayed (1-1 instead of the real 1-0).
+2. **Inverted verdict** — Popyrin genuinely WON, but a stored 1-1 made
+   `evaluatePickCorrectness` (`home_score > away_score`) mark a **correct** prediction as a
+   red ✗ failure.
+3. `_maybe_settle_outcome` settled a `MatchResult.DRAW`, which can never happen in tennis.
+
+Fixed with `_is_completed_set` (6+ games with a 2-game margin, 7-5, or a 7-6 tiebreak — also
+covers long deciding sets like 70-68); `_sets_won` now skips any set that isn't genuinely won.
+
+**The load-bearing discovery that shaped the fix**: this real retirement came back as
+`match_status: "finished"` — BallDontLie exposes **no retirement marker at all** in that
+field, so the adapter's original assumption that `_COMPLETED_MATCH_STATUSES`' "retired"/
+"walkover"/"defaulted" values would identify these is wrong against real data.
+`_match_result_type` therefore infers it **structurally** from the score: an incomplete set, or
+a winner who never reached `MIN_SETS_TO_WIN_A_MATCH` (2). The provider's explicit status is
+still honoured when present, since a walkover with zero sets played can only be identified
+that way.
+
+**A retirement is deliberately shown as VOID, not as a win or a loss** — per the user's own
+framing ("not a failed prediction"). `fixture_live_state.result_type` (Alembic migration
+`a1d5c3e7b904`, NULL for a normal result) drives a neutral grey "VOID · <pick>" badge plus a
+"Retired"/"Walkover" label in `FixtureCard.tsx`, and suppresses the ✓/✗ entirely. Chosen over
+crediting the model with the win it genuinely earned here, because **most bookmakers void bets
+on a retirement** — a green tick would imply a payout the user may never have received.
+Deliberately a column rather than a new `FixtureStatus` value: the match really IS completed
+with a real winner, so every existing `status == COMPLETED` path (settlement, retrodiction,
+feed filtering) keeps working untouched; only the *presentation* of the result changes.
+
+**"Impossible draw" turned out to be too strong a framing, corrected mid-repair**: a
+retirement can legitimately leave equal completed sets (real example: `6-1, 6-7, 0-2 ret.` —
+1-1 in completed sets, but Cruz Hewitt is the real winner). `scripts/repair_tennis_retirement_scores.py`
+(one-off, re-fetches from the real API and recomputes through the fixed code path, never
+patching values by hand) correctly *skips* those rather than forcing a fabricated winner —
+they're already handled by `result_type`, which is what actually suppresses the bogus verdict.
+**Known, currently-inert gap**: ~20 tennis `Outcome` rows still carry `MatchResult.DRAW` for
+exactly these, since `_maybe_settle_outcome` derives the result from the score alone (correct
+for football/NBA, wrong for a tennis retirement where the winner is known independently).
+Nothing consumes tennis `Outcome` rows yet (`GET /history` is still a 501 stub), so this is
+recorded rather than silently left — fix it when `/history` is built. Elo is likewise not
+recomputed for those (it would need a full ordered replay) and is genuinely inert here, since
+tennis's feature set uses `rank_diff`, not Elo.
+
+**Tournament grouping with flag + surface** (direct user request: "I want the games separated
+by tournament name. Inline with the tournament name, add country flag and surface... This will
+guide users to the right sections in their betting apps"). A whole tour is ONE `League` row, so
+the feed previously rendered an undifferentiated wall of matches under "ATP Tour".
+`fixtures.tournament_name`/`.tournament_surface`/`.tournament_location` (same migration) are
+populated from the tournament object **already embedded in every match response** — zero extra
+API calls. `groupByLeague` in `(tabs)/index.tsx` now keys on tournament when present (namespaced
+`tournament:`/`league:` so the two can never collide), falling back to league grouping for a
+fixture ingested before these columns existed rather than dropping it.
+- **The flag needed a hand-built map, and this is a real constraint, not a shortcut**:
+  BallDontLie's tournament `location` is a **CITY** ("Montreal", "Indian Wells") and there is
+  **no country field at all**, so `countryForTournamentLocation` in `lib/countryFlags.tsx` maps
+  city → country client-side. Every key was taken from the real `/tournaments` response (all 60
+  distinct locations for the current season), not guessed; 21 additional flag PNGs were added
+  (an ATP season visits ~30 countries vs football's handful). An unmapped city falls through to
+  the existing 🌍 globe rather than showing a wrong flag — the safe direction to fail.
+  "Multiple Locations" (Davis Cup) is deliberately unmapped for that reason.
+- Verified live via the real API: 75 matches under "National Bank Open presented by Rogers |
+  Hard | Montreal", 59 under "Mubadala Citi DC Open | Hard | Washington".
+
+**A third instance of the stale-worker trap, worth internalising**: the corrected scores kept
+reverting to 1-1 mid-verification. Cause: the Celery worker had been running since *before* the
+fix (worker started 08:17:55, fix written 09:38:38), so its in-memory copy of `_sets_won` was
+the buggy one and `ingest_live_scores`' 5-minute schedule re-wrote the bad score every cycle.
+The local `uvicorn` was even staler (two days). **Neither Celery nor a plain `uvicorn` picks up
+code changes without a restart**, and the symptom is never an error — it looks like "my fix
+didn't take". Restart both after any worker/adapter change before concluding anything from live
+data.
+
 ## Score display, history backfill, and real live-score ingestion
 
 Added so completed fixtures show a final score and the Home feed can browse past/future days, not just the next 7 days forward — see `mobile/app/(tabs)/index.tsx`'s day-strip and `mobile/components/fixtures/FixtureCard.tsx`'s score badge.

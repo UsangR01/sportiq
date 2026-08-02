@@ -46,6 +46,11 @@ class LiveStateResponse(BaseModel):
     # win/loss verdict instead of staying permanently unverifiable.
     home_corners: int | None = None
     away_corners: int | None = None
+    # Null for a normally-played-out result; "retired"/"walkover" for one that ended without
+    # being played out (tennis in practice). The mobile feed shows a neutral "RET" badge and
+    # withholds the win/loss verdict for these rather than counting them against the model,
+    # since bookmakers generally void bets on a retirement.
+    result_type: str | None = None
     last_updated_utc: datetime
 
 
@@ -60,6 +65,13 @@ class FixtureSummary(BaseModel):
     kickoff_utc: datetime
     status: str
     season: str
+    # Tennis only — a tour (ATP/WTA) is one league, so the feed groups by TOURNAMENT instead,
+    # giving users something they can actually find in a betting app. Null for football/NBA,
+    # where league_name/league_country already serve that role. `tournament_location` is a
+    # CITY, not a country (the provider exposes no country field) — the client maps it.
+    tournament_name: str | None = None
+    tournament_surface: str | None = None
+    tournament_location: str | None = None
     best_pick: BestPick | None = None
     # Every real candidate across all four markets (h2h, double chance, goals/corners O/U) —
     # NOT just best_pick's single winner — so a past/completed fixture can show a full
