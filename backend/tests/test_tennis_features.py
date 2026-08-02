@@ -93,8 +93,11 @@ def test_feature_names_are_stable_and_ordered():
         "win_streak_home",
         "win_streak_away",
         "h2h_win_rate_home",
+        "h2h_win_rate_surface_home",
         "surface_win_rate_home",
         "surface_win_rate_away",
+        "surface_streak_home",
+        "surface_streak_away",
         "moneyline_implied_prob_home",
     )
 
@@ -171,7 +174,89 @@ def test_missing_history_returns_none_not_a_fabricated_default():
     assert features["form_win_rate_home"] is None
     assert features["win_streak_home"] is None
     assert features["h2h_win_rate_home"] is None
+    assert features["h2h_win_rate_surface_home"] is None
     assert features["surface_win_rate_home"] is None
+    assert features["surface_streak_home"] is None
+
+
+# A separate, small dataset specifically for distinguishing overall H2H/streak from their
+# surface-conditioned counterparts — added per direct user request ("when considering H2H
+# between players, also consider H2H on the particular surface... also their streak on the
+# surface separately"). HOME beat AWAY on Clay in mid-2023, then lost to AWAY on Hard in
+# early January — overall H2H and Hard-only H2H must therefore differ.
+SURFACE_H2H_ROWS = [
+    {
+        "PLAYER_ID": "HOME",
+        "GAME_DATE": "2023-06-01",
+        "OPPONENT_ID": "AWAY",
+        "WL": "W",
+        "SURFACE": "Clay",
+    },
+    {
+        "PLAYER_ID": "AWAY",
+        "GAME_DATE": "2023-06-01",
+        "OPPONENT_ID": "HOME",
+        "WL": "L",
+        "SURFACE": "Clay",
+    },
+    {
+        "PLAYER_ID": "HOME",
+        "GAME_DATE": "2023-12-01",
+        "OPPONENT_ID": "OTHER",
+        "WL": "W",
+        "SURFACE": "Hard",
+    },
+    {
+        "PLAYER_ID": "HOME",
+        "GAME_DATE": "2024-01-02",
+        "OPPONENT_ID": "AWAY",
+        "WL": "L",
+        "SURFACE": "Hard",
+    },
+    {
+        "PLAYER_ID": "AWAY",
+        "GAME_DATE": "2024-01-02",
+        "OPPONENT_ID": "HOME",
+        "WL": "W",
+        "SURFACE": "Hard",
+    },
+    # The match being predicted, on Hard.
+    {
+        "PLAYER_ID": "HOME",
+        "GAME_DATE": "2024-01-06",
+        "OPPONENT_ID": "AWAY",
+        "WL": "W",
+        "SURFACE": "Hard",
+    },
+    {
+        "PLAYER_ID": "AWAY",
+        "GAME_DATE": "2024-01-06",
+        "OPPONENT_ID": "HOME",
+        "WL": "L",
+        "SURFACE": "Hard",
+    },
+]
+
+
+def test_h2h_win_rate_on_surface_differs_from_overall():
+    games_df = make_games_df(SURFACE_H2H_ROWS)
+    features = assemble_from_game_log(games_df, date(2024, 1, 6), "HOME", "AWAY")
+
+    # Overall: 1 win (Clay, 2023-06-01), 1 loss (Hard, 2024-01-02) -> 0.5.
+    assert features["h2h_win_rate_home"] == pytest.approx(0.5)
+    # Hard-only: just the 2024-01-02 loss -> 0.0. Genuinely different from the overall figure.
+    assert features["h2h_win_rate_surface_home"] == pytest.approx(0.0)
+
+
+def test_surface_streak_is_independent_of_overall_streak():
+    games_df = make_games_df(SURFACE_H2H_ROWS)
+    features = assemble_from_game_log(games_df, date(2024, 1, 6), "HOME", "AWAY")
+
+    # HOME's most recent prior Hard match (01-02) was a loss -> no active Hard win streak,
+    # even though HOME's overall most-recent-anything streak calc is a separate question.
+    assert features["surface_streak_home"] == 0.0
+    # AWAY's only prior Hard match (01-02) was a win -> a streak of 1.
+    assert features["surface_streak_away"] == 1.0
 
 
 def test_rank_diff_none_when_either_side_missing():

@@ -25,16 +25,26 @@ Deliberate omissions, relative to the NBA/football templates:
     composed of multiple individually-tracked players" — not applicable to an individual
     sport. Simply never populated for tennis; every read path already degrades gracefully.
 
-The 10 features (this module's FEATURE_NAMES, in order):
+The 14 features (this module's FEATURE_NAMES, in order):
   rank_diff, form_win_rate_home, form_win_rate_away, days_since_last_match_home,
   days_since_last_match_away, win_streak_home, win_streak_away, h2h_win_rate_home,
-  surface_win_rate_home, surface_win_rate_away, moneyline_implied_prob_home.
+  h2h_win_rate_surface_home, surface_win_rate_home, surface_win_rate_away,
+  surface_streak_home, surface_streak_away, moneyline_implied_prob_home.
 
-surface_win_rate_home/away is fixture-specific (the CURRENT tournament's surface) and is
-deliberately NOT a cached TeamFeatures column — see
-app/adapters/balldontlie_tennis.py:fetch_surface_win_rate's own docstring. It's fetched live
-in assemble_from_live_db, and passed into assemble_from_game_log by the caller for training
-(train_tennis.py already has each historical match's own surface in the game log).
+h2h_win_rate_surface_home and surface_streak_home/away were added per direct user request,
+after the initial 11-feature version shipped — real tennis-domain signals distinct from their
+overall counterparts: a player's H2H edge over a specific opponent, and their own form, can
+both look meaningfully different on one surface than across their career as a whole (e.g. a
+clay-court specialist's H2H record against a hard-court specialist skews toward whichever
+surface most of their meetings happened on, which may not be the surface of THIS match).
+
+surface_win_rate_home/away, h2h_win_rate_surface_home, and surface_streak_home/away are all
+fixture-specific (the CURRENT tournament's surface) and deliberately NOT cached TeamFeatures
+columns — see app/adapters/balldontlie_tennis.py:fetch_surface_stats/fetch_h2h_stats's own
+docstrings. They're fetched live in assemble_from_live_db (via one shared
+fetch_match_surface call, not re-fetched per feature), and passed into assemble_from_game_log
+by the caller for training (train_tennis.py already has each historical match's own surface
+in the game log).
 
 moneyline_implied_prob_home is always None for v1 — tennis odds are an explicit fast-follow,
 not v1 scope (BallDontLie's own /odds needs GOAT tier; TheRundown tennis coverage is
@@ -59,8 +69,11 @@ FEATURE_NAMES = (
     "win_streak_home",
     "win_streak_away",
     "h2h_win_rate_home",
+    "h2h_win_rate_surface_home",
     "surface_win_rate_home",
     "surface_win_rate_away",
+    "surface_streak_home",
+    "surface_streak_away",
     "moneyline_implied_prob_home",
 )
 
@@ -116,6 +129,24 @@ def _h2h_win_rate(prior_sorted_desc: pd.DataFrame, opponent_id: str) -> float | 
     return float((meetings["WL"] == "W").mean())
 
 
+def _h2h_win_rate_on_surface(
+    prior_sorted_desc: pd.DataFrame, opponent_id: str, surface: str | None
+) -> float | None:
+    """H2H win rate against this specific opponent, further filtered to meetings played on
+    the CURRENT match's surface — a player's overall H2H edge over an opponent can look very
+    different on one surface than across their whole history together (see module
+    docstring)."""
+    if not surface:
+        return None
+    meetings = prior_sorted_desc[
+        (prior_sorted_desc["OPPONENT_ID"] == opponent_id)
+        & (prior_sorted_desc["SURFACE"] == surface)
+    ]
+    if meetings.empty:
+        return None
+    return float((meetings["WL"] == "W").mean())
+
+
 def _surface_win_rate(prior_sorted_desc: pd.DataFrame, surface: str | None) -> float | None:
     if not surface:
         return None
@@ -123,6 +154,25 @@ def _surface_win_rate(prior_sorted_desc: pd.DataFrame, surface: str | None) -> f
     if same_surface.empty:
         return None
     return float((same_surface["WL"] == "W").mean())
+
+
+def _surface_streak(prior_sorted_desc: pd.DataFrame, surface: str | None) -> float | None:
+    """Current consecutive-WIN streak specifically on this surface (mirrors
+    _current_streak's overall version, but pre-filtered to same-surface matches only, and
+    only the win-streak side — losing streak is already implied by "not on a win streak",
+    same convention as the overall win_streak_home/away features)."""
+    if not surface:
+        return None
+    same_surface = prior_sorted_desc[prior_sorted_desc["SURFACE"] == surface]
+    if same_surface.empty:
+        return None
+    streak = 0
+    for _, row in same_surface.iterrows():
+        if row["WL"] == "W":
+            streak += 1
+        else:
+            break
+    return float(streak)
 
 
 def assemble_from_game_log(
@@ -181,8 +231,11 @@ def assemble_from_game_log(
         "win_streak_home": win_streak_home,
         "win_streak_away": win_streak_away,
         "h2h_win_rate_home": _h2h_win_rate(home_prior, away_player),
+        "h2h_win_rate_surface_home": _h2h_win_rate_on_surface(home_prior, away_player, surface),
         "surface_win_rate_home": _surface_win_rate(home_prior, surface),
         "surface_win_rate_away": _surface_win_rate(away_prior, surface),
+        "surface_streak_home": _surface_streak(home_prior, surface),
+        "surface_streak_away": _surface_streak(away_prior, surface),
         "moneyline_implied_prob_home": moneyline_implied_prob_home,
     }
 
@@ -192,16 +245,21 @@ async def assemble_from_live_db(db, fixture, home_features, away_features) -> di
     (computed at the last ingest_fixtures.py run — see
     app/adapters/balldontlie_tennis.py:_compute_team_stats for what populates them).
 
-    h2h_win_rate_home and surface_win_rate_home/away are live BallDontLie calls (fixture-
-    specific, don't fit the generic TeamFeatures cache — see
-    app/adapters/balldontlie_tennis.py's fetch_h2h_win_rate_tennis/fetch_surface_win_rate
-    docstrings). moneyline_implied_prob_home reads the Odds table exactly like
-    nba_features.py does — always None until tennis odds are wired up (fast-follow, not v1
-    scope), but this starts working automatically the moment they are, with no code change
-    here."""
+    h2h_win_rate_home/h2h_win_rate_surface_home and surface_win_rate_home/away/
+    surface_streak_home/away are live BallDontLie calls (fixture-specific, don't fit the
+    generic TeamFeatures cache — see app/adapters/balldontlie_tennis.py's fetch_h2h_stats/
+    fetch_surface_stats docstrings). The current fixture's surface is fetched ONCE
+    (fetch_match_surface) and threaded into both, rather than each independently re-fetching
+    it. moneyline_implied_prob_home reads the Odds table exactly like nba_features.py does —
+    always None until tennis odds are wired up (fast-follow, not v1 scope), but this starts
+    working automatically the moment they are, with no code change here."""
     from sqlalchemy import select
 
-    from app.adapters.balldontlie_tennis import fetch_h2h_win_rate_tennis, fetch_surface_win_rate
+    from app.adapters.balldontlie_tennis import (
+        fetch_h2h_stats,
+        fetch_match_surface,
+        fetch_surface_stats,
+    )
     from app.fixtures.models import Team
     from app.odds.models import Odds
     from app.sports.models import League
@@ -237,20 +295,25 @@ async def assemble_from_live_db(db, fixture, home_features, away_features) -> di
     ).scalar_one_or_none()
 
     h2h_win_rate_home = None
+    h2h_win_rate_surface_home = None
     surface_win_rate_home = None
     surface_win_rate_away = None
+    surface_streak_home = None
+    surface_streak_away = None
     if home_team and away_team and league and home_team.external_id and away_team.external_id:
         tour = league.slug
-        h2h_win_rate_home = await fetch_h2h_win_rate_tennis(
-            tour, home_team.external_id, away_team.external_id
+        surface = (
+            await fetch_match_surface(tour, fixture.external_id) if fixture.external_id else None
         )
-        if fixture.external_id:
-            surface_win_rate_home = await fetch_surface_win_rate(
-                tour, home_team.external_id, fixture.external_id
-            )
-            surface_win_rate_away = await fetch_surface_win_rate(
-                tour, away_team.external_id, fixture.external_id
-            )
+        h2h_win_rate_home, h2h_win_rate_surface_home = await fetch_h2h_stats(
+            tour, home_team.external_id, away_team.external_id, surface
+        )
+        surface_win_rate_home, surface_streak_home = await fetch_surface_stats(
+            tour, home_team.external_id, surface
+        )
+        surface_win_rate_away, surface_streak_away = await fetch_surface_stats(
+            tour, away_team.external_id, surface
+        )
 
     best_odds = (
         (
@@ -278,7 +341,10 @@ async def assemble_from_live_db(db, fixture, home_features, away_features) -> di
         "win_streak_home": home_features.win_streak if home_features else None,
         "win_streak_away": away_features.win_streak if away_features else None,
         "h2h_win_rate_home": h2h_win_rate_home,
+        "h2h_win_rate_surface_home": h2h_win_rate_surface_home,
         "surface_win_rate_home": surface_win_rate_home,
         "surface_win_rate_away": surface_win_rate_away,
+        "surface_streak_home": surface_streak_home,
+        "surface_streak_away": surface_streak_away,
         "moneyline_implied_prob_home": moneyline_implied_prob_home,
     }

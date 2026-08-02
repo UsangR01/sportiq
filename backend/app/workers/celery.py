@@ -20,6 +20,15 @@ celery_app = Celery(
         "app.workers.ingest_injuries",
         "app.workers.run_predictions",
         "app.workers.notify_users",
+        # Both were previously omitted, relying on ingest_fixtures.py's own lazy
+        # in-function import (for the same module) to have already registered them as a
+        # side effect by the time anyone invokes the standalone task directly — real,
+        # live-confirmed latent bug: a freshly-started worker that hasn't yet processed a
+        # football/tennis ingest_fixtures run raises `KeyError` ("Received unregistered
+        # task") the first time backfill_predictions/backfill_tennis_predictions.delay()
+        # is called on it, defeating their own docstrings' "standalone entry point" promise.
+        "app.workers.backfill_predictions",
+        "app.workers.backfill_tennis_predictions",
     ],
 )
 

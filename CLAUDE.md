@@ -85,24 +85,116 @@ Built once the user obtained a genuine API-Football **Pro** subscription (7,500 
 - **A real simplification fell out of this**: API-Football's `/odds` response carries its own fixture id — the *same* id space as `Fixture.external_id` for any football fixture (since API-Football is also the fixtures/stats provider). `app/workers/ingest_odds.py:_resolve_fixture` now tries a direct `Fixture.external_id` match before falling back to the fuzzy team-abbreviation-plus-kickoff-time join TheRundown-sourced odds still need (a genuinely different ID space, per TDD §6.2's original design) — real Brasileirão odds matched **111 real rows across all 10 fixtures** on the first run with zero fuzzy-match misses, versus needing name-based matching for every European-league fixture.
 - Verified fully live end-to-end, including in the actual mobile app (not just the API): after ingesting real odds and running predictions for the remaining Brasileirão fixtures, `GET /picks?min_odds=1.5&sport_slug=football` returned real picks with real expected-value math (e.g. Internacional vs Flamengo: away @ 1.97, 57.3% model probability, EV +0.13) — confirmed visually in the Picks tab (Expo web, headless-screenshotted) showing 6 real football picks sorted by probability, exactly matching the API response.
 
-## Tennis (ATP + WTA) — real code, blocked on a BallDontLie tier upgrade
+## Tennis (ATP) — real, trained, live-verified end to end; WTA still blocked on tier
 
 Added per direct user request, using BallDontLie's tennis API (the same account/key already
 used for NBA). Live research against the real OpenAPI specs
-(`https://www.balldontlie.io/openapi/atp.yml`/`.../wta.yml`) found a hard constraint that
-shapes the whole feature: **`/matches` requires the ALL-STAR plan tier; `/odds`,
-`/head_to_head`, `/match_stats` require GOAT tier; only `/players`, `/tournaments`,
-`/rankings` are on the Free plan.** The user's BallDontLie plan was unconfirmed at build time
-("need to check") — since almost every real piece of this feature (fixtures, team form, H2H,
-surface win rate) depends on `/matches`, **none of it has been live-verified against a real
-response yet**, the same "correct code, no live credential yet" status this codebase already
-has for RotoWire/BallDontLie NBA injuries and EAS push tokens. Confirm/upgrade to at least
-ALL-STAR before trusting any of this end-to-end.
+(`https://www.balldontlie.io/openapi/atp.yml`/`.../wta.yml`), later corroborated by BallDontLie's
+official PDF API documentation (kept locally at the repo root as
+`balldontlie_api_documentation.pdf` but deliberately NOT committed — a 4.5MB binary of
+third-party docs freely available online isn't worth permanent git history in a public repo;
+every fact attributed to it below was also independently confirmed live against the real API),
+found a hard constraint that shapes the whole feature: **`/matches` requires the ALL-STAR plan tier;
+`/odds`, `/head_to_head`, `/match_stats` require GOAT tier; only `/players`, `/tournaments`,
+`/rankings` are on the Free plan.** The user confirmed their real subscription is **ALL-STAR
+for ATP only** — WTA still genuinely 401s on `/matches` until that tour is separately
+subscribed (a real, live-confirmed 401, isolated by the per-league exception handling in
+`ingest_fixtures.py`/`ingest_live_scores.py` so it can never block ATP or any other sport).
+Confirm/upgrade WTA's own subscription before trusting any of that tour end-to-end — ATP
+itself is now fully real and verified (see below).
 
 **Scope decisions, explicit and user-confirmed**: build both ATP and WTA together from the
-start (not a phased ATP-then-WTA rollout), and ship predictions before odds — tennis odds are
-an explicit fast-follow, not v1 scope (mirrors NBA/football's own graceful
-probability-only-pick degradation when no real odds exist yet).
+start (not a phased ATP-then-WTA rollout — WTA's code is real and unit-tested, just blocked
+live on tier), and ship predictions before odds — tennis odds are an explicit fast-follow, not
+v1 scope (mirrors NBA/football's own graceful probability-only-pick degradation when no real
+odds exist yet). A later direct request added two more real features on top of the original
+plan — **H2H on the specific surface, and each player's streak on that surface separately,
+alongside their overall H2H/streak** — see `FEATURE_NAMES` below (14, not the original 11).
+
+**A real, serious target-leakage bug was found and fixed only after the first real training
+run** (impossible to catch before ALL-STAR access, since it only shows up in genuinely
+completed match data): BallDontLie's `/matches` response always lists the eventual **WINNER**
+as `player1` for a completed match — confirmed live, 20/20 in a sampled batch of real 2022
+matches — while a genuinely scheduled (not-yet-played) match shows no such pattern (the winner
+isn't known yet, confirmed live against real 2026 upcoming matches). The original design
+(inherited from the plan's own, pre-ALL-STAR assumption that `player1`/`player2` was a neutral
+positional label) trusted that ordering directly as home/away — which baked the outcome
+straight into the label. First real training run: train (2021-2023) and validation (2024)
+splits came back **100% "home won"**, test (2025) "only" 93.6% — XGBoost couldn't even fit
+(`ValueError: Invalid classes inferred... Expected: [0], got [1]`), since a single-class `y`
+can't be fit at all. Fixed with `app/adapters/balldontlie_tennis.py:_home_away_players` — a
+stable, outcome-independent tiebreak (lower external player id = home) applied identically
+whether a match is scheduled or completed, used by **both** the live adapter's
+`_map_match_to_fixture_payload` (so a fixture's home/away identity can never flip between an
+early scheduled-ingest and a later completed one, since the provider's own player1/player2
+slots may get reordered post-hoc but the id-based rule never does) and
+`ml/training/collect_tennis_data.py`'s `collect_game_log` (train/serve parity, same principle
+as every other sport in this codebase). Regression-tested in
+`test_balldontlie_tennis_adapter.py` (`test_home_away_players_is_id_based_not_player1_player2_position`,
+`test_map_match_to_fixture_payload_home_away_survives_player1_player2_swap`) — a match where
+the winner is deliberately placed in the player1 slot must still resolve home/away (and the
+correctly-paired sets-won score) by id, not by position. After the fix, real label
+distribution is sane: 60-64% "home won" across all three season splits (train/val/test each
+have both classes present) — the residual skew above 50% is a real, understood, and accepted
+artifact of the id-based tiebreak (BallDontLie's player ids likely correlate loosely with
+account-creation order, not match outcome), not a leak.
+
+**Real ranking-points collection was rewritten around a genuine efficiency finding in the
+official PDF, after the first attempt crashed a ~7-hour run at 11,000/17,008 lookups with zero
+progress saved** (an `httpx.ReadTimeout`, only retried-on-429 before this): the PDF documents
+`/rankings`' `player_ids` query param as an `array` type, combinable with `date` — confirmed
+live that a single call with several `player_ids[]` values plus one `date` returns real,
+distinct per-player rows in one round trip. `ml/training/collect_tennis_data.py:collect_rank_points`
+now batches by ISO week (153 distinct weeks replace 17,008 individual (player, week) calls,
+chunked to `RANK_BATCH_SIZE=100` per call) and paces every real request proactively
+(`RANK_REQUEST_DELAY_SECONDS=1.1`, mirroring `collect_football_data.py`'s own
+`ODDS_REQUEST_DELAY_SECONDS` precedent) — the original script fired one request per
+(player, week) back-to-back with no proactive pacing, which on ALL-STAR's documented 60
+req/min limit exhausts the whole per-minute budget in under a second, then waits out an entire
+~50s cooldown per subsequent request, repeating forever; a stale, still-running duplicate copy
+of the same crashed script was separately found and killed mid-diagnosis, itself eating the
+rate budget (the same "duplicate background process" footgun already documented elsewhere in
+this project). The rewritten collection completed all 17,008 real lookups in about 7 minutes
+(97.9% real coverage, 2.1% null for players genuinely unranked/outside the tracked field at
+that date — never fabricated as 0), replacing a run that hadn't finished in ~7 hours.
+
+**Real training result, honestly reported**: `ml/training/train_tennis.py` (temporal split
+2021-2023 train / 2024 val / 2025 test, 17,741 real examples, Optuna 50 trials, isotonic
+calibration) — **test accuracy 63.86% vs. a 64.11% "always pick home" baseline**. Unlike
+NBA/football, that baseline isn't a meaningful comparison here — "home" is just the
+id-based tiebreak above, not a real signal (tennis has no home-court advantage), so beating or
+losing to it doesn't say much either way. A more meaningful sanity check — "always pick the
+higher-ranked player" by real rank points — scores **62.22%** on the same test set, so the
+model does show a real, modest edge over that baseline (63.86% vs 62.22%), though a small one
+on a genuinely new model with a modest feature set. Registered as `tennis_xgb_v20260801195314`
+(`is_active=True`), RPS/Brier logged to MLflow under the `tennis_win_probability` experiment.
+No historical odds were collected (predictions ship first, odds are the explicit fast-follow —
+see below), so `roi_simulation` is `None` for this model, an honest gap, not a bug.
+
+**Verified live end-to-end, not just unit-tested**: `_ingest_fixtures_for_league` pulled real
+ATP fixtures (5 real tournaments overlapping the ingest window, confirmed correctly scoped —
+see the tournament-window note below), and every real scheduled fixture in the next 7 days
+(19 total) got a real `Prediction` row from the newly-registered model — e.g. Taylor Fritz
+(home) 71.6% vs Brandon Nakashima 28.4%, HIGH confidence, a sensible result given Fritz is the
+more established, higher-ranked player. **The Celery-queued auto-prediction path
+(`ingest_fixtures.py`'s "queue `run_predictions` for any fixture with no prediction yet"
+mechanism, see the NBA/football section above) did not drain during this verification** — a
+pre-existing worker/queue health issue unrelated to tennis's own code (the already-running
+Celery worker process from earlier in this session didn't pick up the newly-queued tasks);
+predictions were generated by calling `_run_predictions` directly instead, which exercises the
+exact same feature-assembly/model/DB-write path Celery would have run. Worth checking the
+Celery worker's actual health before assuming this reproduces for other sports too — flagged,
+not root-caused further here (out of scope for the tennis feature itself).
+
+**A separate, real oddity noticed while ingesting**: the dev DB now also holds several
+thousand real ATP fixture rows spanning 2007-2025, well outside the ±7-day ingest window
+`_ingest_fixtures_for_league` actually requests — confirmed this is NOT a bug in the current
+adapter (a direct, isolated test of `fetch_fixtures`'s tournament-window overlap logic against
+the live API returned exactly 5 correctly-scoped current tournaments, no historical leakage)
+— it's leftover data from this session's own earlier live-verification/testing steps before
+ALL-STAR access was confirmed. Harmless (completed fixtures are excluded from the
+prediction-queueing loop regardless of age) but not cleaned up — flagged rather than silently
+left undocumented.
 
 **A tennis player is a `Team` row (a "team" of one)** — `Team`/`TeamStats`/`TeamFeatures` had
 no roster/multi-player assumption anywhere, confirmed by reading the actual models, so this
@@ -120,11 +212,17 @@ through the `league` parameter `fetch_fixtures`/`fetch_team_stats` already carry
   independently-sequenced provider IDs, an unprefixed id=142 in both tours would silently
   collide into one `Team`/`Fixture` row. Caught during planning via a dedicated Plan-agent
   review, not discovered live (can't be, without ALL-STAR access yet).
-- **`fetch_fixtures` does NOT assume `/matches` supports a date-range filter** (unconfirmed
-  in the real spec, and tennis matches are tournament-scoped, unlike NBA's `/games`) — it
-  lists `/tournaments` (Free tier, has real `start_date`/`end_date`) overlapping the ingest
-  window, then fetches `/matches?tournament_id=X` per tournament, client-side date-filtered
-  rather than trusting an unconfirmed server-side param.
+- **`fetch_fixtures` does NOT assume `/matches` supports a date-range filter** (confirmed
+  live: `/matches?start_date=X&end_date=Y` is silently ignored, and tennis matches are
+  tournament-scoped, unlike NBA's `/games`) — it lists `/tournaments` (Free tier, real
+  `start_date`/`end_date`, confirmed live that an unfiltered call already returns only the
+  current season's ~64 real tournaments rather than full history) overlapping the ingest
+  window, then fetches `/matches?tournament_ids[]=X` per tournament. **The plural
+  `tournament_ids[]` is load-bearing** — the singular `tournament_id` (matching every other
+  single-resource filter convention in this API, and this provider's own OpenAPI spec) is
+  silently IGNORED, confirmed live with a nonsense id returning the same unfiltered results as
+  any real one; only the array form actually filters. Independently confirmed via the official
+  PDF's own query-parameter table, which lists only the plural form.
 - **`Outcome.home_score`/`away_score` = sets won** (e.g. 2–0, 3–1), not games or points — this
   is what `_maybe_settle_outcome`'s win/loss derivation and the free, already-wired
   `Team.elo_rating` auto-update key off (`apply_match_result` only reads the sign of the
@@ -138,19 +236,25 @@ through the `league` parameter `fetch_fixtures`/`fetch_team_stats` already carry
   forfeited game has no real market to show — whether tennis's zero-play `walkover` should
   follow that precedent instead is worth revisiting once real `match_status` proportions are
   visible.
-- **No confirmed per-match kickoff-time field** in the real spec extraction — `_match_date`/
-  `_match_kickoff_utc` try a few plausible field names first, then fall back to the
-  tournament's own `start_date`. Treat as a placeholder until a real response confirms the
-  actual field (or its absence).
-- **H2H is derived manually from a player's own match history** (`fetch_h2h_win_rate_tennis`,
-  mirrors `balldontlie.py:fetch_h2h_win_rate`'s existing NBA precedent), not the GOAT-gated
-  `/head_to_head` endpoint — keeps H2H reachable at ALL-STAR tier alone.
-- **`surface_win_rate` is fixture-specific** (the *current* tournament's surface) and
-  deliberately NOT a cached `TeamStats`/`TeamFeatures` column — it doesn't fit
-  `ingest_fixtures.py`'s per-team-per-run cache. `fetch_surface_win_rate` makes one extra live
-  call to `/matches/{id}` to read the current match's own `tournament.surface`, then searches
-  the player's own history for same-surface meetings — mirrors NBA's `h2h_win_rate_home`
-  being a live call rather than a cached column.
+- **`scheduled_time` is the real, live-confirmed per-match kickoff field** (`_match_date`/
+  `_match_kickoff_utc` fall back to the tournament's own `start_date` only in the rare case
+  it's genuinely absent).
+- **H2H is derived manually from a player's own match history** (`fetch_h2h_stats`, mirrors
+  `balldontlie.py:fetch_h2h_win_rate`'s existing NBA precedent), not the GOAT-gated
+  `/head_to_head` endpoint — keeps H2H reachable at ALL-STAR tier alone. Returns both the
+  overall H2H win rate AND the H2H win rate restricted to the current match's surface from one
+  shared fetch of the two players' match history (no extra API call for the surface cut).
+- **`surface_win_rate`/`surface_streak` are fixture-specific** (the *current* tournament's
+  surface) and deliberately NOT cached `TeamStats`/`TeamFeatures` columns — they don't fit
+  `ingest_fixtures.py`'s per-team-per-run cache. `fetch_match_surface` makes one live call to
+  `/matches/{id}` to read the current match's own `tournament.surface`; that surface is then
+  threaded into both `fetch_h2h_stats` and `fetch_surface_stats` so it's fetched once and
+  shared, not re-fetched per feature — mirrors NBA's `h2h_win_rate_home` being a live call
+  rather than a cached column.
+- **Real per-season history requires looping an explicit `season` param** —
+  `/matches?player_ids[]=X` with no `season` returns only a thin ~3.5-month recent window
+  (confirmed live), not full career history; `_fetch_matches_across_seasons` loops
+  `TENNIS_SEASONS_BACK=3` seasons explicitly for every form/streak/H2H/surface computation.
 - **No goals-scoring or home-court concept exists for tennis** — `attack_str`/`defence_str`/
   `xg_for_5`/`xg_against_5`/`home_win_rate`/`away_win_rate`/`season_point_diff` all stay
   `None` (never fabricated). `elo_rating` also stays `None` on this adapter's own `TeamStats`
@@ -159,18 +263,23 @@ through the `league` parameter `fetch_fixtures`/`fetch_team_stats` already carry
 - **`fetch_injuries` returns `[]`** — no tennis injury feed at MVP, same as every
   non-NBA/football sport today.
 
-**`app/models_ml/tennis_features.py`** (new) — 11 features: `rank_diff`,
+**`app/models_ml/tennis_features.py`** (new) — 14 features: `rank_diff`,
 `form_win_rate_home/away`, `days_since_last_match_home/away`, `win_streak_home/away`,
-`h2h_win_rate_home`, `surface_win_rate_home/away`, `moneyline_implied_prob_home` (always
-`None` for v1). **No `home_court_indicator`** — a real NBA signal (genuine home-court
-advantage) with no tennis analog (which player is "home" is an arbitrary positional label),
-omitted rather than inherited as a fabricated constant. **`rank_diff` instead of Elo as the
-primary strength signal** — real, provider-computed ranking points from `/rankings`, simpler
-and more honest than approximating Elo the way football did (from the user's own notebook);
-needed one new nullable column, `TeamFeatures.rank_points` (Alembic migration
-`e4f6a2c8b1d9`), since the existing `elo_rating` column is semantically Elo and shouldn't be
-overloaded. `assemble_from_game_log`/`assemble_from_live_db` mirror `nba_features.py`'s
-train/serve-parity contract and leakage guard (`GAME_DATE < as_of_date`) exactly.
+`h2h_win_rate_home`, `h2h_win_rate_surface_home`, `surface_win_rate_home/away`,
+`surface_streak_home/away`, `moneyline_implied_prob_home` (always `None` for v1). The surface
+H2H/streak features (added per a direct follow-up request, on top of the original 11) capture
+a real tennis-domain signal distinct from their overall counterparts — a player's H2H edge or
+current form can look meaningfully different on one surface than across their career as a
+whole. **No `home_court_indicator`** — a real NBA signal (genuine home-court advantage) with
+no tennis analog, omitted rather than inherited as a fabricated constant ("home" here is only
+ever the `_home_away_players` id-based tiebreak, a label-stability device, never a real
+signal — see the leakage-bug writeup above). **`rank_diff` instead of Elo as the primary
+strength signal** — real, provider-computed ranking points from `/rankings`, simpler and more
+honest than approximating Elo the way football did (from the user's own notebook); needed one
+new nullable column, `TeamFeatures.rank_points` (Alembic migration `e4f6a2c8b1d9`), since the
+existing `elo_rating` column is semantically Elo and shouldn't be overloaded.
+`assemble_from_game_log`/`assemble_from_live_db` mirror `nba_features.py`'s train/serve-parity
+contract and leakage guard (`GAME_DATE < as_of_date`) exactly.
 
 **`app/models_ml/tennis.py`** (new) — `TennisModel`, a direct copy of `nba.py`'s shape (single
 XGBoost `binary:logistic` + isotonic calibration, no draw) — not football's two-layer Poisson
@@ -185,20 +294,24 @@ predictions-first/odds-fast-follow decision). `scripts/seed_sports.py:seed_tenni
 `League.country` is nullable and `League.tier` is never read anywhere in the backend, so a
 tour that isn't country-scoped is a clean fit).
 
-**Unit-tested, not live-verified**: every pure mapping/aggregation function
-(`test_balldontlie_tennis_adapter.py`) and the full feature-assembly leakage guard
-(`test_tennis_features.py`) against recorded-shape JSON matching the real OpenAPI spec — 218
-backend tests pass total (up from 187), `ruff`/`black` clean. **Not yet built, blocked on
-ALL-STAR tier confirmation**: `ml/training/collect_tennis_data.py`/`train_tennis.py` (the
-actual historical data collection + Optuna/XGBoost/isotonic training run, mirroring
-`train_nba.py`'s exact single-`asyncio.run()`-wrapped shape) and any live end-to-end
-verification of `fetch_fixtures`/`fetch_team_stats`/the H2H/surface helpers against a real
-response. A real risk beyond mere reachability, flagged for when that data collection is
-attempted: unlike NBA (whose historical data comes from a separate, free, unthrottled
-`nba_api`), tennis has no free equivalent provider — bulk multi-season history would have to
-come from the same rate-limited, tier-gated BallDontLie API used for live serving, so realistic
-per-page caps/quotas need checking before assuming a multi-season pull is feasible in one
-sitting.
+**Real historical data collection** (`ml/training/collect_tennis_data.py`, ATP only —
+re-runnable unchanged for WTA once that tour's subscription is confirmed, nothing else about
+the shape is ATP-specific): pulls each season directly via `/matches?season=X` (confirmed
+live, working back to at least 2021, correctly scoped and non-duplicated — no `/tournaments`
+call needed at all here, since each match embeds its own `tournament` object with surface).
+Real result: **35,482 game-log rows** (one per player per completed match, 2021-2025) and
+**17,008 real rank-point lookups** (batched/paced per the efficiency finding above). Confirmed
+BallDontLie has no free/unthrottled equivalent to NBA's separate `nba_api` — bulk history
+comes from the same rate-limited, tier-gated API used for live serving, which is exactly why
+the rank-points batching/pacing rework mattered.
+
+**218 backend tests passing before this round of fixes, 235 after** (the leakage-bug
+regression tests above plus the existing pure mapping/aggregation and feature-assembly
+leakage-guard tests), `ruff`/`black` clean. `ml/training/train_tennis.py` is real and run;
+`GET /fixtures`/`GET /fixtures/{id}` serve real ATP predictions today. **Deliberately not
+extended in this pass**: WTA data collection/training (blocked on that tour's own
+subscription — the code is generic enough to just point `TOUR`/`league` at `"wta"` once it
+is), and tennis odds (explicit fast-follow, not v1 scope).
 
 ## Score display, history backfill, and real live-score ingestion
 

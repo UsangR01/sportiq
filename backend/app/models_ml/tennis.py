@@ -5,7 +5,7 @@ from app.models_ml.schemas import ModelMetrics, PredictionResult
 
 
 class TennisModel(BaseModel):
-    """XGBoost binary classifier (objective="binary:logistic") on the 11 pre-match features
+    """XGBoost binary classifier (objective="binary:logistic") on the 14 pre-match features
     in app/models_ml/tennis_features.py, followed by isotonic calibration — the same shape as
     app/models_ml/nba.py (2-outcome, no draw), not football's two-layer Poisson xG stack,
     since tennis has no draw either.
