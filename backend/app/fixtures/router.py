@@ -234,6 +234,79 @@ def _candidate_to_best_pick(candidate: _MarketCandidate) -> BestPick:
 # a ~25-point disagreement — and those picks were measured delivering only ~70%. 0.15 is
 # deliberately loose enough to keep genuine value while removing the egregious cases.
 MAX_EDGE_OVER_MARKET = 0.15
+# That bound was calibrated against MEASURED Over/Under overconfidence, and applying it
+# unchanged to the 3-way markets proved too strict. A totals market has two outcomes and a
+# tight price, so a double-digit disagreement there really is a red flag. A 1X2 market has
+# three, and a genuine underdog call legitimately diverges far from the price: in a real case
+# (Shenyang Urban 3-1 Shanghai Shenhua) the model said home 57% against a 3.90 price implying
+# 25.6% — a 31-point gap — and was RIGHT. Under one shared bound that fixture surfaced no pick
+# at all, because every 1X2 and double-chance candidate was rejected while the only survivor
+# sat below its own base rate.
+#
+# So the strict bound stays where it was earned, and a looser one applies where three-way
+# uncertainty makes a large disagreement ordinary rather than suspicious.
+MAX_EDGE_BY_MARKET: dict[str, float] = {
+    "h2h": 0.35,
+    "double_chance": 0.35,
+    "goals_total": MAX_EDGE_OVER_MARKET,
+    "corners_total": MAX_EDGE_OVER_MARKET,
+}
+
+
+def _max_edge_for(market: str) -> float:
+    return MAX_EDGE_BY_MARKET.get(market, MAX_EDGE_OVER_MARKET)
+
+
+# What each market returns "for free", measured across all 8,718 real pooled fixtures
+# (EPL/Brasileirao/MLS/CSL/Scottish Premiership). These are empirical, not assumed.
+#
+# They exist because an ABSOLUTE probability floor structurally selects for the LEAST
+# informative market. Over/Under probabilities sit naturally near their base rate - "under 3.5
+# at 68%" clears a 60% floor arithmetically while carrying no information at all, since 69.4%
+# of real fixtures finish under 3.5 anyway. Meanwhile a genuine 57% home call, which is 11
+# points above football's real home-win rate, fails the same floor. Measured across every
+# prediction, no h2h probability ever reached 0.60 at all.
+#
+# The real case that exposed this: Shenyang Urban 3-1 Shanghai Shenhua. The model called home
+# at 57% and was RIGHT, but that pick failed the 60% floor, leaving only "under 3.5 at 68%" -
+# which is below its own base rate, and lost.
+MARKET_BASE_RATES: dict[tuple[str, str, float | None], float] = {
+    ("h2h", "home", None): 0.4582,
+    ("h2h", "draw", None): 0.2538,
+    ("h2h", "away", None): 0.2879,
+    ("double_chance", "1X", None): 0.7121,
+    ("double_chance", "X2", None): 0.5418,
+    ("goals_total", "under", 1.5): 0.2338,
+    ("goals_total", "over", 1.5): 0.7662,
+    ("goals_total", "under", 2.5): 0.4641,
+    ("goals_total", "over", 2.5): 0.5359,
+    ("goals_total", "under", 3.5): 0.6941,
+    ("goals_total", "over", 3.5): 0.3059,
+    ("corners_total", "under", 9.5): 0.4545,
+    ("corners_total", "over", 9.5): 0.5455,
+}
+
+# How far above its market's base rate a pick must sit to count as saying anything. A pick at
+# or below base rate is not a prediction, it is the league average wearing a percentage sign.
+MIN_EDGE_OVER_BASE_RATE = 0.05
+
+
+def _base_rate(candidate: _MarketCandidate) -> float | None:
+    """The share of real fixtures this outcome occurs in regardless of who is playing.
+
+    None for a market/line with no measured base rate (a line we have not quantified). Such a
+    candidate is not filtered out - we cannot judge its informativeness, and silently dropping
+    it would be worse than admitting we do not know."""
+    return MARKET_BASE_RATES.get((candidate.market, candidate.selection, candidate.line))
+
+
+def _edge_over_base_rate(candidate: _MarketCandidate) -> float | None:
+    """How much this pick beats its own market's base rate by - i.e. how much the model is
+    actually telling us about THIS fixture, rather than about the sport in general."""
+    base = _base_rate(candidate)
+    if base is None or candidate.probability is None:
+        return None
+    return candidate.probability - base
 
 
 def _implied_probability(odds: float) -> float:
@@ -283,16 +356,40 @@ def _pick_best(
     so the fixture's best pick would fail a 60% floor even though a perfectly good 72%
     candidate existed. Filtering first answers the question the user is actually asking —
     "the best VALUE among picks at least this likely" — instead of "the best value overall,
-    then hide it if it isn't likely enough"."""
+    then hide it if it isn't likely enough".
+
+    That floor is now applied RELATIVE TO EACH MARKET'S BASE RATE rather than as one absolute
+    number, because an absolute floor structurally selects for the least informative market.
+    See MARKET_BASE_RATES: "under 3.5 at 68%" clears a 60% floor while sitting BELOW its own
+    69.4% base rate, so it says nothing; a 57% home call sits 11 points above football's real
+    home-win rate and says quite a lot, yet fails the same floor. Measured over every stored
+    prediction, no h2h probability ever reached 0.60 at all, so an absolute 60% floor silently
+    excluded the entire 1X2 market.
+
+    A candidate whose market has no measured base rate is NOT dropped — we can't judge its
+    informativeness, and discarding it silently would be worse than admitting that."""
+    # The caller's probability floor drives the INFORMATIVENESS requirement rather than acting
+    # as an absolute cut. Anchoring on 0.5 keeps the slider meaningful and monotonic - a higher
+    # setting still demands a stronger pick - while expressing the demand in the only terms
+    # that compare fairly across markets. Under the old absolute reading, a 0.6 setting was
+    # simultaneously trivial for Over/Under (whose base rate is already 0.69) and unreachable
+    # for 1X2 (whose highest observed probability across every stored prediction was 0.588).
+    required_edge = MIN_EDGE_OVER_BASE_RATE
     if min_probability is not None:
-        candidates = [
-            c for c in candidates if c.probability is not None and c.probability >= min_probability
-        ]
+        required_edge = max(required_edge, min_probability - 0.5)
+    # A pick at or below its market's base rate is the league average with a percentage sign
+    # on it, not a prediction about THIS fixture.
+    candidates = [
+        c
+        for c in candidates
+        if c.probability is not None
+        and ((edge := _edge_over_base_rate(c)) is None or edge >= required_edge)
+    ]
     priced = [c for c in candidates if c.probability is not None and c.odds is not None]
     unpriced = [c for c in candidates if c.probability is not None and c.odds is None]
 
     trustworthy = [
-        c for c in priced if c.probability - _implied_probability(c.odds) <= MAX_EDGE_OVER_MARKET
+        c for c in priced if c.probability - _implied_probability(c.odds) <= _max_edge_for(c.market)
     ]
     if trustworthy:
         return _candidate_to_best_pick(max(trustworthy, key=_expected_value))
