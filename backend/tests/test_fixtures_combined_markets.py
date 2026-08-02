@@ -174,11 +174,14 @@ async def test_min_probability_best_pick_drawn_from_corners_market(
     assert row["best_pick"]["probability"] >= 0.6
 
 
-async def test_min_odds_excludes_probability_only_picks(api_client, seeded_multi_market_fixtures):
-    """A fixture whose only qualifying-probability pick has NO real odds must be excluded when
-    min_odds is set — never fabricate an odds floor against a probability-only pick."""
+async def test_min_odds_excludes_a_pick_whose_real_odds_are_below_the_floor(
+    api_client, seeded_multi_market_fixtures
+):
+    """A pick with a REAL price below the floor is still excluded — the odds slider must keep
+    working wherever odds actually exist. (Only the no-odds-at-all case is exempt; see
+    test_min_odds_does_not_hide_a_pick_that_has_no_odds_at_all.)"""
     sport, fixture_a, _fixture_b = seeded_multi_market_fixtures
-    # Push min_odds above fixture_a's real corners odds (1.30) so it should be excluded too.
+    # Push min_odds above fixture_a's real corners odds (1.30) so it should be excluded.
     response = await api_client.get(
         "/fixtures",
         params={"sport_slug": sport.slug, "min_probability": 0.6, "min_odds": 2.0},
@@ -246,8 +249,13 @@ async def test_all_market_picks_ignores_market_query_param(
 
 @pytest.fixture
 async def seeded_completed_low_confidence_fixture():
-    """A COMPLETED fixture whose best pick never clears 60% anywhere — used to prove
-    min_probability/min_odds don't hide past results (they only gate future/live picks)."""
+    """A COMPLETED fixture whose best pick genuinely never clears 60% in ANY market.
+
+    The probabilities below are deliberately 0.45/0.10/0.45: both double-chance combinations
+    (1X = home+draw, X2 = away+draw) land at 0.55, and no xg_* values are set so there are no
+    Over/Under candidates either. An earlier version used 0.40/0.30/0.30, which looked
+    low-confidence but actually produced a 1X pick at 0.70 — so the test that depended on it
+    was passing for the wrong reason from the moment combined-market picks were introduced."""
     kickoff = datetime.now(UTC) - timedelta(days=1)
     async with async_session_factory() as db:
         slug = f"test-sport-{uuid.uuid4().hex[:8]}"
@@ -284,9 +292,9 @@ async def seeded_completed_low_confidence_fixture():
             Prediction(
                 fixture_id=fixture.id,
                 model_version="test_model_v1",
-                home_prob=0.40,
-                draw_prob=0.30,
-                away_prob=0.30,
+                home_prob=0.45,
+                draw_prob=0.10,
+                away_prob=0.45,
                 confidence_tier=ConfidenceTier.LOW,
                 created_at=datetime.now(UTC),
             )
@@ -306,18 +314,55 @@ async def seeded_completed_low_confidence_fixture():
         await db.commit()
 
 
-async def test_completed_fixtures_are_never_hidden_by_min_probability_or_min_odds(
+async def test_min_probability_applies_to_completed_fixtures_too(
     api_client, seeded_completed_low_confidence_fixture
 ):
-    """Per explicit user report: "Results of past games are missing" — min_probability/
-    min_odds encode "is this worth betting on", which doesn't apply to a finished game being
-    reviewed for how the model actually performed."""
+    """Per explicit user request ("the probability and odd slider does not apply to the tennis
+    records. Make it apply"): a COMPLETED fixture whose best pick is below the probability
+    floor is now hidden, so past-performance review is scoped to the picks the user would
+    actually have taken at their own confidence bar.
+
+    This deliberately narrows the earlier blanket "completed fixtures bypass every floor"
+    exemption (added for "Results of past games are missing") rather than removing it — a
+    completed fixture that DOES clear the bar is still shown, as the next test proves."""
     sport, fixture = seeded_completed_low_confidence_fixture
     response = await api_client.get(
         "/fixtures",
-        params={"sport_slug": sport.slug, "min_probability": 0.6, "min_odds": 1.5},
+        params={"sport_slug": sport.slug, "min_probability": 0.6},
     )
     assert response.status_code == 200
+    ids = {row["id"] for row in response.json()}
+    assert str(fixture.id) not in ids
+
+
+async def test_completed_fixtures_clearing_the_floor_are_still_shown(
+    api_client, seeded_completed_low_confidence_fixture
+):
+    """The other half of the contract above — past results don't vanish wholesale, which was
+    the original "Results of past games are missing" complaint. Same fixture, a floor its best
+    pick (0.55 double chance) does clear."""
+    sport, fixture = seeded_completed_low_confidence_fixture
+    response = await api_client.get(
+        "/fixtures",
+        params={"sport_slug": sport.slug, "min_probability": 0.5},
+    )
+    ids = {row["id"] for row in response.json()}
+    assert str(fixture.id) in ids
+
+
+async def test_min_odds_does_not_hide_a_pick_that_has_no_odds_at_all(
+    api_client, seeded_completed_low_confidence_fixture
+):
+    """An odds floor is unanswerable for a sport with no odds coverage yet (tennis —
+    BallDontLie's tennis /odds is GOAT-tier gated). The previous "no odds -> fails the floor"
+    rule made every upcoming tennis fixture silently invisible the moment the odds slider moved
+    off its minimum. This fixture has a real prediction but no Odds rows at all, so it must
+    survive an odds floor rather than being filtered on a price we don't have."""
+    sport, fixture = seeded_completed_low_confidence_fixture
+    response = await api_client.get(
+        "/fixtures",
+        params={"sport_slug": sport.slug, "min_probability": 0.5, "min_odds": 1.5},
+    )
     ids = {row["id"] for row in response.json()}
     assert str(fixture.id) in ids
 

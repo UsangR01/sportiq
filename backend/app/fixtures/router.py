@@ -373,21 +373,31 @@ async def list_fixtures(
     # A fixture with no qualifying pick at all (no best_pick, or one that doesn't clear the
     # floor(s)) is dropped from the response entirely — the user's own words: "the intention
     # is not to surface all the games... we just want the best odds with the highest
-    # probability of winning." min_odds only applies to fixtures with REAL odds on their best
-    # pick — a probability-only pick can never clear an odds floor, by design (never fabricate
-    # a price), so it's excluded too when min_odds is set.
+    # probability of winning."
     #
-    # COMPLETED fixtures are a real exception to all of this: min_probability/min_odds encode
-    # "is this worth betting on", a question that only makes sense for a game that hasn't been
-    # decided yet. A finished game is being reviewed for how the model actually performed, not
-    # considered as a bet — filtering those out by the same threshold hid every past result
-    # from the feed entirely (the user's own report: "Results of past games are missing").
-    # POSTPONED fixtures are the same kind of exception, for the same reason plus one more:
-    # they have no best_pick at all now (see above), so the ordinary "pick is None -> drop it"
-    # branch below would silently hide them too — exactly the bug the user reported.
+    # min_probability applies to COMPLETED fixtures too, per an explicit later user request
+    # ("the probability and odd slider does not apply to the tennis records. Make it apply").
+    # This deliberately narrows an earlier, broader exemption that had let every completed
+    # fixture bypass both floors: that exemption was itself added in response to "Results of
+    # past games are missing", but it went too far — reviewing past performance is more useful
+    # when it's scoped to the picks you'd actually have taken at your own confidence bar,
+    # rather than mixing in ones you'd have filtered out anyway.
+    #
+    # min_odds deliberately does NOT reject a pick that has no odds at all. An odds floor is
+    # unanswerable for a sport with no odds coverage yet (tennis — BallDontLie's tennis /odds
+    # is GOAT-tier gated, see app/adapters/factory.py), and the previous "no odds -> fails the
+    # floor" rule made every upcoming tennis fixture silently invisible the moment the odds
+    # slider moved off its minimum. Filtering on a price we don't have would hide real picks
+    # rather than inform anyone; a real price, once ingested, is still filtered normally. The
+    # narrow cost is that a football pick with genuinely no ingested price is no longer
+    # excluded by an odds floor — rare in practice, since football odds coverage is real.
+    #
+    # POSTPONED fixtures stay fully exempt: they have no best_pick at all (the backend nulls it
+    # out so a pre-postponement prediction can't be shown as if the game were still on), so
+    # every branch below would drop them — exactly the bug the user reported.
     filtered = []
     for summary in summaries:
-        if summary.status in ("completed", "postponed"):
+        if summary.status == "postponed":
             filtered.append(summary)
             continue
         pick = summary.best_pick
@@ -395,7 +405,7 @@ async def list_fixtures(
             continue
         if min_probability is not None and pick.probability < min_probability:
             continue
-        if min_odds is not None and (pick.odds is None or pick.odds < min_odds):
+        if min_odds is not None and pick.odds is not None and pick.odds < min_odds:
             continue
         filtered.append(summary)
     return filtered
