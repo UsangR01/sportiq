@@ -233,7 +233,7 @@ def _candidate_to_best_pick(candidate: _MarketCandidate) -> BestPick:
 # feed was surfacing Over/Under picks claiming ~85% at odds of 1.60 (≈60% implied after vig) —
 # a ~25-point disagreement — and those picks were measured delivering only ~70%. 0.15 is
 # deliberately loose enough to keep genuine value while removing the egregious cases.
-MAX_EDGE_OVER_MARKET = 0.15
+MAX_EDGE_OVER_MARKET = 0.40
 # That bound was calibrated against MEASURED Over/Under overconfidence, and applying it
 # unchanged to the 3-way markets proved too strict. A totals market has two outcomes and a
 # tight price, so a double-digit disagreement there really is a red flag. A 1X2 market has
@@ -245,12 +245,16 @@ MAX_EDGE_OVER_MARKET = 0.15
 #
 # So the strict bound stays where it was earned, and a looser one applies where three-way
 # uncertainty makes a large disagreement ordinary rather than suspicious.
-MAX_EDGE_BY_MARKET: dict[str, float] = {
-    "h2h": 0.35,
-    "double_chance": 0.35,
-    "goals_total": MAX_EDGE_OVER_MARKET,
-    "corners_total": MAX_EDGE_OVER_MARKET,
-}
+# Loosened to a sanity backstop rather than an active filter. The tight 0.15 bound was
+# introduced to suppress overconfident Over/Under picks, but the base-rate gate
+# (MARKET_BASE_RATES) does that job better and more precisely: it removes picks that say
+# NOTHING, instead of penalising picks merely for being confident. Keeping both meant the
+# guard rejected genuinely winning picks - in a real case (Qingdao 2-0, i.e. under 3.5) the
+# 85% under-3.5 call was thrown out for beating the price by 20 points, and it would have won.
+#
+# What survives here is only the truly absurd: a claim so far from the market that it almost
+# certainly reflects stale odds or a broken feature vector rather than a view.
+MAX_EDGE_BY_MARKET: dict[str, float] = {}
 
 
 def _max_edge_for(market: str) -> float:
@@ -392,7 +396,7 @@ def _pick_best(
         c for c in priced if c.probability - _implied_probability(c.odds) <= _max_edge_for(c.market)
     ]
     if trustworthy:
-        return _candidate_to_best_pick(max(trustworthy, key=_expected_value))
+        return _candidate_to_best_pick(max(trustworthy, key=lambda c: c.probability))
     # Every priced candidate disagreed implausibly with the market. Rather than fall back to
     # the very picks the guard just rejected, fall back only to unpriced ones — and if there
     # are none, return None so the caller drops the fixture entirely. "We have no pick we
