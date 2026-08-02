@@ -217,8 +217,11 @@ CORNERS_OVER_UNDER_BET_NAME = "Corners Over Under"
 # The lines this product supports (see app/models_ml/markets.py) — real bookmaker responses
 # offer many more (0.5, 1.5, ..., 4.5+ for goals; 6.5 through 14.5+ for corners), but only
 # these are ever mapped, matching the scope confirmed useful live (CLAUDE.md).
-GOALS_LINES = (1.5, 2.5, 3.5)
-CORNERS_LINES = (9.5,)  # the standard, most-traded corners line (confirmed live via Bet365)
+GOALS_LINES = (1.5, 2.5, 3.5, 4.5)
+# 9.5 is the standard, most-traded corners line (confirmed live via Bet365); 10.5 was added
+# alongside it on request. Both are commonly offered, so this is an ingestion question, not a
+# modelling one - the Poisson CDF in app/models_ml/markets.py handles any line unchanged.
+CORNERS_LINES = (9.5, 10.5)
 
 
 def _map_odds_response_to_payloads(row: dict) -> list[OddsPayload]:

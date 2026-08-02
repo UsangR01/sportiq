@@ -13,6 +13,7 @@ from sqlalchemy import delete, select
 from app.core.database import async_session_factory
 from app.fixtures.models import Fixture, FixtureStatus, Team
 from app.main import app
+from app.models_ml.markets import CORNERS_LINES, GOALS_LINES
 from app.predictions.models import ConfidenceTier, Prediction
 from app.sports.models import League, Sport
 
@@ -106,7 +107,8 @@ async def test_fixture_detail_includes_goals_totals_for_all_supported_lines(
     response = await api_client.get(f"/fixtures/{fixture.id}")
     goals_totals = response.json()["prediction"]["extra_markets"]["goals_totals"]
     lines = {t["line"] for t in goals_totals}
-    assert lines == {1.5, 2.5, 3.5}
+    # Derived from the constant, not hardcoded, so adding a line doesn't break this.
+    assert lines == set(GOALS_LINES)
     for t in goals_totals:
         assert t["under_prob"] + t["over_prob"] == pytest.approx(1.0)
 
@@ -117,7 +119,7 @@ async def test_fixture_detail_includes_corners_totals(
     _sport, fixture = seeded_fixture_with_full_prediction
     response = await api_client.get(f"/fixtures/{fixture.id}")
     corners_totals = response.json()["prediction"]["extra_markets"]["corners_totals"]
-    assert len(corners_totals) == 1
+    assert len(corners_totals) == len(CORNERS_LINES)
     assert corners_totals[0]["line"] == 9.5
     assert corners_totals[0]["under_prob"] + corners_totals[0]["over_prob"] == pytest.approx(1.0)
 

@@ -286,8 +286,12 @@ MARKET_BASE_RATES: dict[tuple[str, str, float | None], float] = {
     ("goals_total", "over", 2.5): 0.5359,
     ("goals_total", "under", 3.5): 0.6941,
     ("goals_total", "over", 3.5): 0.3059,
+    ("goals_total", "under", 4.5): 0.8481,
+    ("goals_total", "over", 4.5): 0.1519,
     ("corners_total", "under", 9.5): 0.4545,
     ("corners_total", "over", 9.5): 0.5455,
+    ("corners_total", "under", 10.5): 0.5703,
+    ("corners_total", "over", 10.5): 0.4297,
 }
 
 # How far above its market's base rate a pick must sit to count as saying anything. A pick at

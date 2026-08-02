@@ -20,8 +20,8 @@ which has no live odds at all).
 
 import math
 
-GOALS_LINES: tuple[float, ...] = (1.5, 2.5, 3.5)
-CORNERS_LINES: tuple[float, ...] = (9.5,)
+GOALS_LINES: tuple[float, ...] = (1.5, 2.5, 3.5, 4.5)
+CORNERS_LINES: tuple[float, ...] = (9.5, 10.5)
 
 
 def double_chance_probs(
