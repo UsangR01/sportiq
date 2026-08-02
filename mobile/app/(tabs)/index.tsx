@@ -20,7 +20,13 @@ import { usePreferencesStore } from "@/store/preferencesStore";
 // explicitly (previously 34%, which was only ever a client-side highlight threshold, not a
 // real filter — this is now a real server-side filter, see app/fixtures/router.py's
 // min_probability param).
-const MIN_PROBABILITY_FLOOR = 0.6;
+// Slider bottom lowered from 0.6 to 0.5. A 60% minimum silently excluded the ENTIRE 1X2
+// market: measured across every stored prediction, no home/draw/away probability ever reached
+// 0.60 (the highest away probability observed was 0.588). So the feed could only ever show
+// Over/Under and double chance, which is why it looked so monotonous. 0.5 lets a genuinely
+// strong 1X2 call — a 57% home pick sits well above football's real 45.8% home base rate —
+// actually reach the user, while the default stays at 0.6 so nothing changes unless they ask.
+const MIN_PROBABILITY_FLOOR = 0.5;
 const DEFAULT_MIN_PROBABILITY = 0.6;
 // A full day across every league can easily exceed the old flat-list default of 50 — 200 is
 // the backend's own ceiling (app/fixtures/router.py's `limit` Query(..., le=200)).

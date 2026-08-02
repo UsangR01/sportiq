@@ -315,13 +315,14 @@ async def seeded_completed_low_confidence_fixture():
             Prediction(
                 fixture_id=fixture.id,
                 model_version="test_model_v1",
-                # Nothing here clears the +0.10 edge a 0.6 floor demands (best is away at
-                # +0.052 over its 0.2879 base rate), but away and X2 both clear the +0.05 a
-                # 0.5 floor demands - so the same fixture is correctly dropped by one and kept
-                # by the other.
-                home_prob=0.40,
-                draw_prob=0.26,
-                away_prob=0.34,
+                # Tuned so ONE fixture exercises both halves of the contract. X2 lands at
+                # 0.595: above the 0.5 floor and +0.053 over its 0.5418 base rate, so a 0.5
+                # floor keeps it; below the 0.6 floor, so a 0.6 floor drops it. 1X lands at
+                # 0.60 - it would clear a 0.6 floor on probability alone, but sits 0.112 BELOW
+                # its own 0.7121 base rate, so the informativeness bar correctly refuses it.
+                home_prob=0.405,
+                draw_prob=0.195,
+                away_prob=0.40,
                 confidence_tier=ConfidenceTier.LOW,
                 created_at=datetime.now(UTC),
             )
@@ -546,17 +547,30 @@ def test_pick_best_guard_only_rejects_an_absurd_disagreement_with_the_market():
     assert _pick_best([absurd]) is None
 
 
-def test_min_probability_sets_how_informative_a_pick_must_be():
-    """The caller's floor drives the INFORMATIVENESS requirement rather than acting as an
-    absolute cut, anchored on 0.5.
+def test_min_probability_filters_on_the_probability_actually_shown():
+    """The floor must mean what the UI label says.
 
-    Under the old absolute reading a 0.6 setting was simultaneously trivial for Over/Under
-    (base rate already 0.69) and unreachable for 1X2, whose highest observed probability across
-    every stored prediction was 0.588 - so it silently excluded the entire 1X2 market."""
+    An earlier version made this drive the informativeness requirement instead, which produced
+    an indefensible result: at a "75%" setting a pick displaying 85% was hidden (only +0.156
+    over its 0.694 base rate) while one displaying 80% was kept (+0.258 over its 0.542 base
+    rate). A control labelled "minimum probability" has to filter on the number beside it."""
     from app.fixtures.router import _MarketCandidate, _pick_best
 
-    # +0.052 over the 0.2879 away base rate: informative, but only modestly so.
-    modest = _MarketCandidate("away", 0.34, 3.10, "h2h", None)
+    # Both are informative; they differ only in displayed probability.
+    lower = _MarketCandidate("under", 0.85, 1.53, "goals_total", 3.5)
+    higher = _MarketCandidate("X2", 0.88, 2.04, "double_chance", None)
 
-    assert _pick_best([modest], min_probability=0.5).selection == "away"  # needs +0.05
-    assert _pick_best([modest], min_probability=0.6) is None  # needs +0.10
+    assert _pick_best([lower, higher], min_probability=0.75).probability == 0.88
+    assert _pick_best([lower], min_probability=0.75).probability == 0.85
+    assert _pick_best([lower], min_probability=0.90) is None
+
+
+def test_informativeness_is_a_fixed_bar_not_something_the_slider_moves():
+    """Raising the floor must never ADMIT a pick that a lower floor excluded. The base-rate
+    gate is a fixed quality bar; the slider only ever tightens the probability requirement."""
+    from app.fixtures.router import _MarketCandidate, _pick_best
+
+    # 0.68 sits below its own 0.694 base rate — uninformative at every slider position.
+    uninformative = _MarketCandidate("under", 0.68, 1.68, "goals_total", 3.5)
+    for floor in (0.5, 0.6, 0.65):
+        assert _pick_best([uninformative], min_probability=floor) is None

@@ -372,22 +372,24 @@ def _pick_best(
 
     A candidate whose market has no measured base rate is NOT dropped — we can't judge its
     informativeness, and discarding it silently would be worse than admitting that."""
-    # The caller's probability floor drives the INFORMATIVENESS requirement rather than acting
-    # as an absolute cut. Anchoring on 0.5 keeps the slider meaningful and monotonic - a higher
-    # setting still demands a stronger pick - while expressing the demand in the only terms
-    # that compare fairly across markets. Under the old absolute reading, a 0.6 setting was
-    # simultaneously trivial for Over/Under (whose base rate is already 0.69) and unreachable
-    # for 1X2 (whose highest observed probability across every stored prediction was 0.588).
-    required_edge = MIN_EDGE_OVER_BASE_RATE
-    if min_probability is not None:
-        required_edge = max(required_edge, min_probability - 0.5)
-    # A pick at or below its market's base rate is the league average with a percentage sign
-    # on it, not a prediction about THIS fixture.
+    # min_probability is an ABSOLUTE floor on the displayed probability, because that is what
+    # the UI promises. An earlier version made it drive the informativeness requirement
+    # instead, and the result was indefensible from the user's side: at a "75%" setting a pick
+    # displaying 85% was hidden (only +0.156 over its 0.694 base rate) while one displaying 80%
+    # was kept (+0.258 over its 0.542 base rate). A control labelled "minimum probability" must
+    # filter on the number shown next to it, or it is lying.
+    #
+    # Informativeness is enforced SEPARATELY, as a fixed quality bar rather than something the
+    # user dials. The two answer different questions - "how likely do you want it" versus "does
+    # this pick say anything at all" - and conflating them made both incomprehensible.
     candidates = [
         c
         for c in candidates
         if c.probability is not None
-        and ((edge := _edge_over_base_rate(c)) is None or edge >= required_edge)
+        and (min_probability is None or c.probability >= min_probability)
+        # A pick at or below its market's base rate is the league average with a percentage
+        # sign on it, not a prediction about THIS fixture.
+        and ((edge := _edge_over_base_rate(c)) is None or edge >= MIN_EDGE_OVER_BASE_RATE)
     ]
     priced = [c for c in candidates if c.probability is not None and c.odds is not None]
     unpriced = [c for c in candidates if c.probability is not None and c.odds is None]
