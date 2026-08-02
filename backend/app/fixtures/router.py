@@ -216,20 +216,92 @@ def _candidate_to_best_pick(candidate: _MarketCandidate) -> BestPick:
     )
 
 
-def _pick_best(candidates: list[_MarketCandidate]) -> BestPick | None:
-    """The single highest-probability candidate that has real odds; if NONE of the candidates
-    have real odds yet, falls back to the highest-probability candidate overall (probability-
-    only, odds=None) — same fallback semantics the old h2h-only version had, just extended
-    across every market instead of just three outcomes."""
-    with_odds = [c for c in candidates if c.probability is not None and c.odds is not None]
-    pool = with_odds or [c for c in candidates if c.probability is not None]
-    if not pool:
-        return None
-    return _candidate_to_best_pick(max(pool, key=lambda c: c.probability))
+# How far the model's probability may exceed the bookmaker's implied probability before the
+# pick is treated as model error rather than edge. Real betting edges are small (low single
+# digits); a double-digit disagreement with a liquid market is overwhelmingly more likely to be
+# a miscalibrated model than free money. Chosen against real measured data, not intuition: the
+# feed was surfacing Over/Under picks claiming ~85% at odds of 1.60 (≈60% implied after vig) —
+# a ~25-point disagreement — and those picks were measured delivering only ~70%. 0.15 is
+# deliberately loose enough to keep genuine value while removing the egregious cases.
+MAX_EDGE_OVER_MARKET = 0.15
+
+
+def _implied_probability(odds: float) -> float:
+    """The bookmaker's implied probability, before removing vig. Deliberately NOT vig-adjusted:
+    doing so needs every outcome's price for that market, which isn't always ingested, and the
+    un-adjusted figure is the CONSERVATIVE direction here — it overstates the book's implied
+    probability slightly, so the measured edge comes out slightly smaller and the guard errs
+    toward keeping a pick rather than dropping it."""
+    return 1.0 / odds
+
+
+def _expected_value(candidate: _MarketCandidate) -> float:
+    """Profit per 1 unit staked at these odds: p*(odds-1) - (1-p), i.e. p*odds - 1."""
+    return candidate.probability * candidate.odds - 1.0
+
+
+def _pick_best(
+    candidates: list[_MarketCandidate], min_probability: float | None = None
+) -> BestPick | None:
+    """The best VALUE pick, not the most likely statement.
+
+    Previously this returned the single highest-PROBABILITY candidate, which had two real,
+    user-reported consequences:
+
+      - The feed filled with near-identical "UNDER 3.5" picks (13 of 14 MLS cards in one
+        screenshot). Under 3.5 goals is intrinsically an ~80% event, so on raw probability it
+        beats any 1X2 (~50%) or double chance (~70%) candidate almost every time. That ranks
+        by "what is most likely to be true", which is not the same question as "what is worth
+        backing" — an 85% pick at 1.60 can be worse value than a 57% pick at 3.20.
+      - Away/X2 picks were effectively invisible. Measured: on the 15 fixtures where the model
+        genuinely favoured the away side, X2 surfaced 9/9 times in Brasileirão but 0/6 in
+        MLS/CSL, because those leagues' inflated Over/Under probabilities outranked everything.
+
+    Ranking by expected value fixes both, and the edge guard (see MAX_EDGE_OVER_MARKET) removes
+    picks whose probability implausibly exceeds the market's — which matters because EV ranking
+    alone would still reward an overconfident probability. The two work together: EV decides
+    ordering, the guard decides trustworthiness.
+
+    Candidates with no odds can be neither valued nor guarded, so they're ranked by probability
+    as before — the only option for a sport with no odds coverage yet (tennis). Odds-bearing
+    candidates are always preferred when any survive the guard.
+
+    min_probability is applied HERE, before ranking, rather than to the winner afterwards.
+    Ranking globally by EV and only then testing the floor silently discarded whole fixtures:
+    the highest-EV candidate is often a high-odds/low-probability one (a real case from the
+    test suite: corners OVER at 28% priced 3.50 beats corners UNDER at 72% priced 1.30 on EV),
+    so the fixture's best pick would fail a 60% floor even though a perfectly good 72%
+    candidate existed. Filtering first answers the question the user is actually asking —
+    "the best VALUE among picks at least this likely" — instead of "the best value overall,
+    then hide it if it isn't likely enough"."""
+    if min_probability is not None:
+        candidates = [
+            c for c in candidates if c.probability is not None and c.probability >= min_probability
+        ]
+    priced = [c for c in candidates if c.probability is not None and c.odds is not None]
+    unpriced = [c for c in candidates if c.probability is not None and c.odds is None]
+
+    trustworthy = [
+        c for c in priced if c.probability - _implied_probability(c.odds) <= MAX_EDGE_OVER_MARKET
+    ]
+    if trustworthy:
+        return _candidate_to_best_pick(max(trustworthy, key=_expected_value))
+    # Every priced candidate disagreed implausibly with the market. Rather than fall back to
+    # the very picks the guard just rejected, fall back only to unpriced ones — and if there
+    # are none, return None so the caller drops the fixture entirely. "We have no pick we
+    # trust here" is a more honest answer than a confident-looking pick we've just measured
+    # as untrustworthy.
+    if unpriced:
+        return _candidate_to_best_pick(max(unpriced, key=lambda c: c.probability))
+    return None
 
 
 async def _bulk_best_picks(
-    db: AsyncSession, fixture_ids: list, market: str | None = None, line: float | None = None
+    db: AsyncSession,
+    fixture_ids: list,
+    market: str | None = None,
+    line: float | None = None,
+    min_probability: float | None = None,
 ) -> tuple[dict, dict]:
     """Computes each fixture's single best pick, drawn from ACROSS every market (h2h, double
     chance, Over/Under goals, Over/Under corners) by default — per the user's explicit ask
@@ -293,7 +365,7 @@ async def _bulk_best_picks(
             candidates = [
                 c for c in candidates if c.market == market and (line is None or c.line == line)
             ]
-        best = _pick_best(candidates)
+        best = _pick_best(candidates, min_probability=min_probability)
         if best is not None:
             best_picks[fixture_id] = best
 
@@ -346,7 +418,9 @@ async def list_fixtures(
 
     rows = (await db.execute(stmt)).all()
     fixture_ids = [row[0].id for row in rows]
-    best_picks, all_picks = await _bulk_best_picks(db, fixture_ids, market=market, line=line)
+    best_picks, all_picks = await _bulk_best_picks(
+        db, fixture_ids, market=market, line=line, min_probability=min_probability
+    )
     live_states = await _bulk_live_states(db, fixture_ids)
 
     # A POSTPONED fixture never gets a best_pick/all_market_picks, regardless of whatever

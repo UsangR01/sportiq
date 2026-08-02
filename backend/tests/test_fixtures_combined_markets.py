@@ -52,8 +52,16 @@ async def seeded_multi_market_fixtures():
 
         now = datetime.now(UTC)
 
-        # Fixture A: h2h probabilities are all modest (<60%), but corners "under 9.5" is
-        # confidently high (corners_xg sums to a low total) and has real odds.
+        # Fixture A: h2h probabilities are all modest (<60%), but corners "under 9.5" clears
+        # 60% and has real odds, so it should win best_pick.
+        #
+        # The corners_xg values below deliberately sum to a REALISTIC 8.0 (P(under 9.5) ≈ 0.72
+        # against the 1.30 price, i.e. ~0.77 implied). They previously summed to 3.5, which
+        # implies P(under 9.5) ≈ 0.999 — a near-certainty that no real bookmaker would price at
+        # 1.30, and a ~23-point disagreement with the market. Once _pick_best gained its
+        # edge-vs-market guard (MAX_EDGE_OVER_MARKET) that fixture was correctly rejected as
+        # implausible, which is the guard working, not a regression — so the seed was made
+        # realistic rather than the guard loosened to accommodate synthetic data.
         fixture_a = Fixture(
             sport_id=sport.id,
             league_id=league.id,
@@ -85,13 +93,22 @@ async def seeded_multi_market_fixtures():
                 draw_prob=0.30,
                 away_prob=0.30,
                 confidence_tier=ConfidenceTier.MEDIUM,
-                corners_xg_home=2.0,
-                corners_xg_away=1.5,  # low total -> confidently "under"
+                corners_xg_home=4.5,
+                corners_xg_away=3.5,  # total 8.0 -> P(under 9.5) ~= 0.72, a realistic edge
                 created_at=now,
             )
         )
 
-        # Fixture B: every market stays a coin-flip or worse — nothing should clear 60%.
+        # Fixture B: every market stays a coin-flip or worse — nothing clears 60%, so the
+        # fixture should be dropped entirely by a 60% floor.
+        #
+        # 0.45/0.10/0.45 is deliberate, for the same reason as the completed-fixture seed
+        # below: the previous 0.40/0.30/0.30 put double chance 1X at 0.70, well clear of the
+        # floor this fixture exists to fail. It only passed because the old _pick_best always
+        # preferred a PRICED candidate (h2h, all < 0.6) over an unpriced one, so the 0.70 1X
+        # was never considered at all. Now that the floor is applied before ranking, that
+        # unpriced 1X would legitimately surface — correct behaviour, but it made this
+        # fixture stop testing what it claims. These values leave 1X and X2 both at 0.55.
         fixture_b = Fixture(
             sport_id=sport.id,
             league_id=league.id,
@@ -119,9 +136,9 @@ async def seeded_multi_market_fixtures():
             Prediction(
                 fixture_id=fixture_b.id,
                 model_version="test_model_v1",
-                home_prob=0.40,
-                draw_prob=0.30,
-                away_prob=0.30,
+                home_prob=0.45,
+                draw_prob=0.10,
+                away_prob=0.45,
                 confidence_tier=ConfidenceTier.LOW,
                 created_at=now,
             )
@@ -470,3 +487,54 @@ async def test_postponed_fixtures_never_show_a_stale_pick(
     assert row["status"] == "postponed"
     assert row["best_pick"] is None
     assert row["all_market_picks"] == []
+
+
+def test_pick_best_ranks_by_expected_value_not_raw_probability():
+    """The core of the fix: a lower-probability pick at a much better price is better VALUE,
+    and should win. Ranking by raw probability was what filled the feed with near-identical
+    high-probability/low-price UNDER picks."""
+    from app.fixtures.router import _MarketCandidate, _pick_best
+
+    likely_but_poor_value = _MarketCandidate("under", 0.80, 1.10, "goals_total", 3.5)  # EV -0.12
+    less_likely_better_value = _MarketCandidate("away", 0.40, 3.00, "h2h", None)  # EV +0.20
+
+    best = _pick_best([likely_but_poor_value, less_likely_better_value])
+    assert best.selection == "away"
+    assert best.market == "h2h"
+
+
+def test_pick_best_guard_rejects_a_pick_that_implausibly_beats_the_market():
+    """A pick claiming far more probability than the bookmaker's price implies is treated as
+    model error, not edge — the measured real case was ~85% claimed at 1.60 (≈62% implied),
+    which was delivering only ~70%. With no other priced candidate, the fixture falls back to
+    an unpriced one rather than surfacing the rejected pick."""
+    from app.fixtures.router import _MarketCandidate, _pick_best
+
+    implausible = _MarketCandidate("under", 0.85, 1.60, "goals_total", 3.5)  # ~23pt edge
+    unpriced_alternative = _MarketCandidate("1X", 0.70, None, "double_chance", None)
+
+    best = _pick_best([implausible, unpriced_alternative])
+    assert best.market == "double_chance"
+
+
+def test_pick_best_returns_none_when_every_priced_candidate_fails_the_guard():
+    """With nothing trustworthy and no unpriced fallback, "no pick" is the honest answer — the
+    caller then drops the fixture rather than showing a pick we've measured as untrustworthy."""
+    from app.fixtures.router import _MarketCandidate, _pick_best
+
+    assert _pick_best([_MarketCandidate("under", 0.95, 1.30, "goals_total", 3.5)]) is None
+
+
+def test_pick_best_applies_the_probability_floor_before_ranking():
+    """Filtering after ranking silently dropped whole fixtures: the highest-EV candidate is
+    often a high-odds/low-probability one, so a fixture with a perfectly good high-probability
+    pick could still fail the floor. The floor must constrain the choice, not veto it."""
+    from app.fixtures.router import _MarketCandidate, _pick_best
+
+    high_ev_low_prob = _MarketCandidate("over", 0.28, 3.50, "corners_total", 9.5)  # EV -0.02
+    clears_the_floor = _MarketCandidate("under", 0.72, 1.30, "corners_total", 9.5)  # EV -0.06
+
+    assert _pick_best([high_ev_low_prob, clears_the_floor]).selection == "over"
+    assert (
+        _pick_best([high_ev_low_prob, clears_the_floor], min_probability=0.6).selection == "under"
+    )

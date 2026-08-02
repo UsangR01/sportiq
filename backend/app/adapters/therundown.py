@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -15,6 +16,13 @@ from app.core.config import get_settings
 # values, and the fact that only some bookmakers return real prices on this plan.
 BASE_URL = "https://therundown-therundown-v1.p.rapidapi.com"
 RAPIDAPI_HOST = "therundown-therundown-v1.p.rapidapi.com"
+
+MAX_RETRIES = 5
+# Proactive pacing between requests. CLAUDE.md's own live finding: this provider's 429s can
+# escalate into spurious 401s under sustained burst load, so retrying alone isn't enough - the
+# burst has to be spread out in the first place. 2s keeps a full multi-league ingest run
+# comfortably inside the 5-minute schedule interval while staying well off the burst threshold.
+ODDS_REQUEST_DELAY_SECONDS = 2.0
 
 # TheRundown's own sport_id, confirmed via GET /sports. NBA is one sport; each football
 # league is its own sport_id (not "football" as one id) — so this is keyed by league slug
@@ -156,6 +164,36 @@ class TheRundownAdapter(DataSourceAdapter):
             timeout=10.0,
         )
 
+    async def _get_with_retry(self, client: httpx.AsyncClient, path: str, params: dict):
+        """Retry-on-429 with backoff, honouring Retry-After.
+
+        Added after a real, two-day production outage: odds ingestion silently stopped writing
+        anything on 2026-07-31, leaving only 6 of 51 upcoming football fixtures with any odds
+        at all. This adapter had NO retry and NO pacing, while `ingest_odds` runs every 5
+        minutes and fans out (days_ahead + 1) requests per league across ~7 leagues — a burst
+        that reliably trips TheRundown's limit. A single 429 then raised straight out of
+        fetch_odds and killed the whole task, every cycle, indefinitely.
+
+        The knock-on effect was worse than missing prices: with no odds, expected-value ranking
+        and the min_odds filter both degrade to probability-only behaviour, which is precisely
+        the "every pick is UNDER 3.5" symptom that looked like a modelling problem.
+
+        CLAUDE.md already documented that this provider's 429s can escalate into spurious 401s
+        under sustained load, so ODDS_REQUEST_DELAY_SECONDS paces requests proactively rather
+        than relying on retries alone."""
+        response = None
+        for attempt in range(MAX_RETRIES):
+            response = await client.get(path, params=params)
+            if response.status_code == 429 and attempt < MAX_RETRIES - 1:
+                retry_after = response.headers.get("Retry-After")
+                delay = float(retry_after) if retry_after else min(2**attempt, 30)
+                await asyncio.sleep(delay)
+                continue
+            response.raise_for_status()
+            return response
+        response.raise_for_status()
+        return response
+
     async def fetch_odds(self, sport: str, league: str, days_ahead: int) -> list[OddsPayload]:
         rundown_sport_id = _rundown_sport_id_for(sport, league)
         now = datetime.now(UTC)
@@ -164,12 +202,14 @@ class TheRundownAdapter(DataSourceAdapter):
         async with self._client() as client:
             for offset in range(days_ahead + 1):
                 date_str = (now + timedelta(days=offset)).date().isoformat()
-                response = await client.get(
-                    f"/sports/{rundown_sport_id}/events/{date_str}", params={"include": "scores"}
+                response = await self._get_with_retry(
+                    client,
+                    f"/sports/{rundown_sport_id}/events/{date_str}",
+                    {"include": "scores"},
                 )
-                response.raise_for_status()
                 for event in response.json().get("events", []):
                     payloads.extend(_map_event_to_odds_payloads(event))
+                await asyncio.sleep(ODDS_REQUEST_DELAY_SECONDS)
 
         return payloads
 

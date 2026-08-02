@@ -95,7 +95,14 @@ ARTIFACT_DIR = ML_DIR / "artifacts"
 
 # EPL has real TheRundown odds coverage; Brasileirão doesn't (confirmed live, see CLAUDE.md) —
 # only EPL contributes to build_training_examples' moneyline_implied_prob_home/ROI metric.
-LEAGUES = ["epl", "brasileirao"]
+# Pooled across every league with a collected game log. MLS/CSL/Scottish Premiership were
+# added to fix a MEASURED problem: they are served by this same model but were absent from its
+# training data, and their Over/Under-goals probabilities were overconfident as a result.
+# The real cause turned out NOT to be "MLS scores more than EPL" (it does not - both average
+# ~2.93 goals/match); it is that Brasileirao is a genuine low-scoring outlier (2.41), so
+# pooling only EPL+Brasileirao biased the model toward P(under 3.5)~0.79 when MLS/CSL truly
+# sit at ~0.66. Adding them rebalances the pool toward the real distribution.
+LEAGUES = ["epl", "brasileirao", "mls", "csl", "scottish_prem"]
 
 TRAIN_SEASONS = [2021, 2022, 2023]
 VAL_SEASON = 2024
@@ -308,6 +315,17 @@ async def main_async() -> None:
     # why two separate asyncio.run() calls in one process is unsafe on this platform.
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
 
+    # A league's GAME LOG is required (it's the actual training signal); its lineups and
+    # corners are optional, and a league missing them still contributes.
+    #
+    # This is a deliberate consequence of collect_football_data.py's staged collection: a game
+    # log costs ~1 API call per league-season, while lineups and corners cost 1 call PER
+    # FIXTURE (~9,800 for the three leagues added to fix the measured out-of-distribution
+    # calibration problem — past API-Football's 7,500/day ceiling). Requiring all three would
+    # mean the goal-distribution fix, which is the whole point, waits days on data that only
+    # feeds secondary features. A league with no lineups simply gets None key-player features
+    # and contributes nothing to the corners regressors' training target — both already handled
+    # (XGBoost's own missing-value handling; corners_by_fixture_team.get() returning None).
     games = pd.concat(
         [
             pd.read_parquet(DATA_DIR / f"football_game_log_{league}.parquet")
@@ -315,20 +333,19 @@ async def main_async() -> None:
         ],
         ignore_index=True,
     )
-    lineups = pd.concat(
-        [
-            pd.read_parquet(DATA_DIR / f"football_lineups_{league}.parquet")
-            for league in LEAGUES
-        ],
-        ignore_index=True,
-    )
-    corners = pd.concat(
-        [
-            pd.read_parquet(DATA_DIR / f"football_corners_{league}.parquet")
-            for league in LEAGUES
-        ],
-        ignore_index=True,
-    )
+
+    def _load_optional(kind: str, columns: list[str]) -> pd.DataFrame:
+        frames = []
+        for league in LEAGUES:
+            path = DATA_DIR / f"football_{kind}_{league}.parquet"
+            if path.exists():
+                frames.append(pd.read_parquet(path))
+            else:
+                print(f"  no {kind} collected for {league} yet — training without them")
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=columns)
+
+    lineups = _load_optional("lineups", ["FIXTURE_ID", "TEAM_ID", "PLAYER_NAME"])
+    corners = _load_optional("corners", ["FIXTURE_ID", "TEAM_ID", "CORNERS"])
     # Attaches CORNERS_FOR/CORNERS_AGAINST onto `games` for the new corners-rolling features
     # (app/models_ml/football_features.py:_corners_rolling) — `corners` itself stays the raw
     # FIXTURE_ID/TEAM_ID/CORNERS frame build_training_examples still needs separately for the

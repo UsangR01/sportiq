@@ -22,6 +22,7 @@ Usage (from repo root):
     backend/.venv/Scripts/python ml/training/collect_football_data.py
 """
 
+import argparse
 import asyncio
 import sys
 from datetime import datetime
@@ -60,7 +61,29 @@ SEASONS = [2021, 2022, 2023, 2024, 2025]
 LEAGUE_CONFIGS: dict[str, dict] = {
     "epl": {"league_id": LEAGUE_IDS["epl"], "rundown_sport_id": 11},
     "brasileirao": {"league_id": LEAGUE_IDS["brasileirao"], "rundown_sport_id": None},
+    # Added to fix a real, MEASURED out-of-distribution problem, not speculatively: these three
+    # leagues are served by the EPL/Brasileirão-trained model, and their Over/Under-goals
+    # probabilities are measurably overconfident in exactly the way that implies — mean
+    # predicted P(under 3.5) vs actual was +0.02 for Brasileirão (in the training data) but
+    # +0.12 for MLS and +0.08 for CSL (not in it). Collecting their real scoring history is the
+    # root-cause fix; per-league calibration alone would only paper over it.
+    # rundown_sport_id is None where TheRundown genuinely has no coverage (confirmed live).
+    "mls": {"league_id": LEAGUE_IDS["mls"], "rundown_sport_id": 10},
+    "csl": {"league_id": LEAGUE_IDS["csl"], "rundown_sport_id": None},
+    "scottish_prem": {"league_id": LEAGUE_IDS["scottish_prem"], "rundown_sport_id": None},
 }
+
+# Collection is stageable because the per-fixture endpoints genuinely can't all run in one
+# sitting: game logs cost ~1 call per league-season (trivial), but lineups and corners cost 1
+# call PER FIXTURE — roughly 9,600 calls for the three leagues above, well past API-Football's
+# 7,500/day ceiling. Stages let the cheap, highest-value data (the goal distributions that
+# actually drive the calibration problem) land immediately, with the expensive per-fixture
+# stages run separately across days.
+#
+# A league with a game log but no lineups still trains fine: its key-player features come
+# through as None, which the model's own missing-value handling covers — strictly better than
+# having no data for that league at all.
+STAGES = ("gamelog", "corners", "lineups", "odds")
 
 MAX_RETRIES = 5
 
@@ -298,7 +321,7 @@ async def collect_odds_sample(rundown_sport_id: int, game_dates: list[str]) -> p
     return pd.DataFrame(rows, columns=["date", "home_short", "away_short", "home_odds"])
 
 
-def collect_league(league_slug: str) -> None:
+def collect_league(league_slug: str, stages: tuple[str, ...] = STAGES) -> None:
     config = LEAGUE_CONFIGS[league_slug]
     league_id = config["league_id"]
     rundown_sport_id = config["rundown_sport_id"]
@@ -308,7 +331,7 @@ def collect_league(league_slug: str) -> None:
     if games_path.exists():
         print(f"{games_path} already exists, skipping API-Football re-fetch")
         games = pd.read_parquet(games_path)
-    else:
+    elif "gamelog" in stages:
         games, team_codes = asyncio.run(collect_game_log(league_slug, league_id))
         games.to_parquet(games_path, index=False)
         print(f"saved {len(games)} game-log rows to {games_path}")
@@ -316,11 +339,15 @@ def collect_league(league_slug: str) -> None:
             codes_path, index=False
         )
         print(f"saved {len(team_codes)} team codes to {codes_path}")
+    else:
+        # Every later stage needs the fixture ids the game log provides.
+        print(f"{league_slug}: no game log yet and 'gamelog' not in stages — skipping league")
+        return
 
     lineups_path = DATA_DIR / f"football_lineups_{league_slug}.parquet"
     if lineups_path.exists():
         print(f"{lineups_path} already exists, skipping API-Football re-fetch")
-    else:
+    elif "lineups" in stages:
         fixture_ids = sorted(games["FIXTURE_ID"].unique().tolist())
         print(f"collecting lineups for {len(fixture_ids)} {league_slug} fixtures (1 call each)...")
         lineups = asyncio.run(collect_lineups(fixture_ids))
@@ -330,7 +357,7 @@ def collect_league(league_slug: str) -> None:
     corners_path = DATA_DIR / f"football_corners_{league_slug}.parquet"
     if corners_path.exists():
         print(f"{corners_path} already exists, skipping API-Football re-fetch")
-    else:
+    elif "corners" in stages:
         fixture_ids = sorted(games["FIXTURE_ID"].unique().tolist())
         print(
             f"collecting corner-kick stats for {len(fixture_ids)} {league_slug} fixtures "
@@ -342,6 +369,8 @@ def collect_league(league_slug: str) -> None:
 
     if rundown_sport_id is None:
         print(f"{league_slug}: no TheRundown coverage — skipping historical odds collection")
+        return
+    if "odds" not in stages:
         return
 
     odds_path = DATA_DIR / f"football_odds_sample_{league_slug}.parquet"
@@ -359,9 +388,41 @@ def collect_league(league_slug: str) -> None:
 
 
 def main() -> None:
+    """Defaults to every league and every stage (unchanged behaviour). Both can be narrowed,
+    which the per-fixture stages genuinely require given the daily API ceiling:
+
+        # cheap: real goal distributions for the out-of-distribution leagues (~20 calls)
+        python ml/training/collect_football_data.py --leagues mls,csl,scottish_prem \\
+            --stages gamelog
+        # expensive: run per-league, across days
+        python ml/training/collect_football_data.py --leagues mls --stages corners
+    """
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--leagues",
+        default=",".join(LEAGUE_CONFIGS),
+        help=f"comma-separated; one or more of {','.join(LEAGUE_CONFIGS)}",
+    )
+    parser.add_argument(
+        "--stages",
+        default=",".join(STAGES),
+        help=f"comma-separated; one or more of {','.join(STAGES)}",
+    )
+    args = parser.parse_args()
+
+    leagues = [s.strip() for s in args.leagues.split(",") if s.strip()]
+    stages = tuple(s.strip() for s in args.stages.split(",") if s.strip())
+    unknown_leagues = [x for x in leagues if x not in LEAGUE_CONFIGS]
+    unknown_stages = [x for x in stages if x not in STAGES]
+    if unknown_leagues:
+        parser.error(f"unknown league(s): {unknown_leagues}; known: {list(LEAGUE_CONFIGS)}")
+    if unknown_stages:
+        parser.error(f"unknown stage(s): {unknown_stages}; known: {list(STAGES)}")
+
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    for league_slug in LEAGUE_CONFIGS:
-        collect_league(league_slug)
+    print(f"leagues={leagues} stages={list(stages)}")
+    for league_slug in leagues:
+        collect_league(league_slug, stages)
 
 
 if __name__ == "__main__":

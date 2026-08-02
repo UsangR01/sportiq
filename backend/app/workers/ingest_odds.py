@@ -1,5 +1,6 @@
 import logging
 
+import httpx
 from sqlalchemy import select
 
 from app.adapters.base import OddsPayload
@@ -88,6 +89,22 @@ async def _fetch_odds_payloads(sport: Sport, league: League) -> list[OddsPayload
                 "%s has no odds coverage for league=%s — skipping",
                 type(adapter).__name__,
                 league.slug,
+            )
+        except httpx.HTTPError as exc:
+            # A transport/status failure from ONE provider must not abort odds ingestion for
+            # every other league and sport in the same run. This was a real, two-day outage:
+            # TheRundown's rate limit raised straight out of fetch_odds, killing the whole
+            # 5-minutely task every cycle, and odds stopped being written entirely — which in
+            # turn silently disabled expected-value ranking and the min_odds filter downstream.
+            # The adapter now retries/paces internally (see therundown.py), but exhausting
+            # those retries must still degrade to "this league has no fresh odds right now"
+            # rather than taking everything else down with it. Mirrors the same per-league
+            # isolation already added to ingest_fixtures.py/ingest_live_scores.py.
+            logger.warning(
+                "%s odds fetch failed for league=%s (%s) — skipping, other leagues unaffected",
+                type(adapter).__name__,
+                league.slug,
+                exc,
             )
     return payloads
 
