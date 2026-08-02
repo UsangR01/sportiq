@@ -393,6 +393,117 @@ code changes without a restart**, and the symptom is never an error — it looks
 didn't take". Restart both after any worker/adapter change before concluding anything from live
 data.
 
+## Pick ranking, odds reliability, and prediction-quality measurement
+
+A block of work driven by two user observations that turned out to share one root cause: "a
+chunk of the MLS predictions were all under 3.5 ... is that not too confident", and "I never
+see a prediction favouring an away team winning or drawing".
+
+**`_pick_best` now ranks by EXPECTED VALUE, not raw probability** (`app/fixtures/router.py`).
+The old rule returned the highest-probability candidate, which answers "what is most likely to
+be true" rather than "what is worth backing" — very different questions. Under 3.5 goals is
+intrinsically an ~80% event, so it beat every 1X2 (~50%) and double-chance (~70%) candidate
+almost every time. Measured before the fix: 13 of 14 MLS cards showed the same pick, and on the
+15 fixtures where the model genuinely favoured the away side, X2 surfaced 9/9 times in
+Brasileirão but **0/6** in MLS/CSL.
+- **`MAX_EDGE_OVER_MARKET = 0.15`** rejects any pick whose probability exceeds the bookmaker's
+  implied probability by more than 15 points. EV ranking *alone* would still reward an
+  overconfident probability, so the two work together: EV decides ordering, the guard decides
+  trustworthiness. Calibrated against the real case — ~85% claimed at 1.60 (~62% implied) that
+  measured out at ~70%. Deliberately not vig-adjusted (that needs every outcome's price, which
+  isn't always ingested); the un-adjusted figure errs toward *keeping* a pick.
+- **The probability floor is applied BEFORE ranking, not to the winner afterwards.** Ranking
+  globally by EV and then testing the floor silently dropped whole fixtures, because the
+  highest-EV candidate is often a high-odds/low-probability one — a real case from the test
+  suite has corners OVER at 28% priced 3.50 beating corners UNDER at 72% priced 1.30. Filtering
+  first answers what the user actually asked: the best value *among picks at least this likely*.
+- Candidates with no odds can be neither valued nor guarded, so they still rank by probability
+  — the only option for a sport with no odds coverage (tennis).
+- Live result: the best-pick mix went from 41/51 `goals_total/under` to a genuine spread
+  (29 over / 12 under / 7 1X / 2 corners), max displayed probability 96-100% → **90.9%**, and
+  **0 of 150** Over/Under probabilities now exceed 95%.
+
+**A two-day odds outage, found only while verifying the above** — and the reason the EV work
+would otherwise have changed nothing. Odds ingestion had written nothing since 2026-07-31,
+leaving **6 of 51** upcoming football fixtures with any odds at all.
+`TheRundownAdapter.fetch_odds` had **no retry and no pacing**, while `ingest_odds` fans out
+(`days_ahead + 1`) requests per league across ~7 leagues every 5 minutes; a single 429 raised
+straight out of `fetch_odds` and killed the whole task, every cycle, indefinitely. The knock-on
+effect is the important part: **with no odds, EV ranking and the `min_odds` filter both silently
+degrade to probability-only behaviour** — i.e. the exact "every pick is UNDER 3.5" symptom that
+looked like a modelling problem. Fixed with retry-on-429 honouring `Retry-After`,
+`ODDS_REQUEST_DELAY_SECONDS = 2.0` proactive pacing (CLAUDE.md already documented that this
+provider's 429s escalate into spurious 401s under burst load, so retrying alone isn't enough),
+and per-adapter `httpx.HTTPError` isolation in `ingest_odds.py` so one provider's rate limit
+can't take down every other league — the same isolation already applied to
+`ingest_fixtures.py`/`ingest_live_scores.py`.
+
+**Over/Under goals now has held-out evaluation, every training run** (`train_football.py`) —
+the honest root cause of it shipping visibly overconfident. 1X2 has always reported
+accuracy/RPS, but nobody had ever measured whether a stated "85% chance of under 3.5" was
+right; the market shipped unvalidated. Each run now reports, per line, the Brier score plus a
+reliability table of predicted-probability bucket vs. the frequency the event actually
+occurred, logged to MLflow. Per line rather than aggregated (1.5/2.5/3.5 have very different
+base rates, and one number would hide a bad one); buckets under 20 samples are suppressed as
+noise rather than printed as if meaningful.
+
+**The out-of-distribution diagnosis was right, but the mechanism was wrong** — worth recording
+because the initial explanation was stated confidently and was wrong. The theory was "MLS
+scores more than the training data, so the model under-predicts goals". Collecting the real
+history refuted it: **MLS averages 2.930 goals/match, essentially identical to EPL's 2.927**.
+The actual cause is that **Brasileirão is a low-scoring outlier at 2.411** (P(under 3.5) 0.789
+vs EPL's 0.658), so pooling only EPL+Brasileirão biased the model toward P(under 3.5) ≈ 0.79
+when MLS/CSL truly sit at ~0.66. Same conclusion (add the missing leagues), different reason.
+- `LEAGUES` in `train_football.py` is now EPL + Brasileirão + MLS + CSL + Scottish Premiership;
+  `collect_football_data.py` gained matching `LEAGUE_CONFIGS` entries.
+- **Collection is staged (`--leagues` / `--stages`) because it genuinely cannot run in one
+  sitting**: a game log costs ~1 call per league-season (~20 calls total for three leagues,
+  and it's the data that actually fixes the goal distribution), while lineups and corners cost
+  1 call PER FIXTURE — ~9,600 for three leagues, past API-Football's 7,500/day ceiling.
+- Training tolerates a league having a game log but no lineups/corners (`_load_optional`): its
+  key-player features come through as `None`, which XGBoost's own missing-value handling
+  covers. Strictly better than excluding the league entirely.
+- Retrained result, reported straight: Over/Under mean gaps are now **-0.003 / -0.003 / -0.009**
+  for under 1.5/2.5/3.5, against **+0.119 (MLS)** and **+0.083 (CSL)** measured live before.
+  1X2 47.46% vs 45.60% baseline, RPS 0.2179 — marginally below the prior 47.89%/0.2138 but on a
+  materially harder 5-league test set, so not directly comparable. Flat-stake ROI -0.26%
+  (n=48), up from -11.5% but still no demonstrated edge. Registered as
+  `football_xgb_v20260802100216`.
+- **The reliability buckets expose what the mean hides, and it matters more than the
+  calibration fix**: for under 3.5, the 0.5-0.6, 0.6-0.7 and 0.7-0.8 buckets all come out at
+  ~0.675 — simply the base rate. The model is no longer overconfident, but it is also **barely
+  discriminating** between high- and low-scoring fixtures on this market. This is why further
+  isotonic calibration of Over/Under was **deliberately not done**: with the mean gap already
+  ~0, calibration would mostly flatten those buckets toward the base rate, making the numbers
+  more honest while making the picks *less* useful. The real constraint is signal, not
+  calibration — that points at better features or a distribution with a dispersion parameter
+  (Negative Binomial / Dixon-Coles), not at another calibration layer.
+
+**`predictions.feature_completeness`** (Alembic migration `c4f8a2b6e1d3`) records the fraction
+of the model's own feature vector that had a real value at inference time, via a shared
+`app/predictions/service.py:feature_completeness` helper used by all three prediction paths
+(live inference plus both retrodiction workers). A prediction built from a mostly-empty vector
+isn't wrong, but it carries far less information — and the feed rendered both with identical
+authority. The motivating case: 26% of retrodicted ATP fixtures came out at exactly 0.562
+because those players' prior-match history was largely absent. Nullable with **no backfill** —
+older predictions genuinely have no measurement, and inventing one retroactively defeats the
+point. Measuring it immediately surfaced how thin current inputs are:
+
+    EPL 0.12 | Scottish Prem 0.19 | Brasileirão 0.38 | MLS 0.48 | CSL 0.49
+
+EPL and the Scottish Premiership are between seasons, so their teams have no played matches to
+derive form/attack/defence from. `FixtureCard.tsx`'s `LOW_CONFIDENCE_COMPLETENESS = 0.35` is
+set from that measured spread rather than by feel — **0.5 would have flagged every single
+fixture and told the user nothing**; 0.35 separates "no real data yet" from "partial but
+genuine data". Below it the badge dims and reads "limited data", worded as a limitation of the
+DATA rather than a hedge on the number.
+
+**`scripts/purge_tennis_test_pollution.py`** removed 2,729 pre-2021 tennis fixtures left by
+exploratory ingest runs during the tennis build-out (6,277 → 3,548). Conservative by design:
+only fixtures predating the 2021-2025 training window, and Teams (players) are deliberately
+NOT deleted — an orphan player row is harmless, whereas deleting one still referenced by an
+in-window fixture is not. Dry-run by default, `--confirm` to execute.
+
 ## Score display, history backfill, and real live-score ingestion
 
 Added so completed fixtures show a final score and the Home feed can browse past/future days, not just the next 7 days forward — see `mobile/app/(tabs)/index.tsx`'s day-strip and `mobile/components/fixtures/FixtureCard.tsx`'s score badge.
