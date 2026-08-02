@@ -5,12 +5,46 @@ from pydantic import BaseModel
 
 
 class HistoryEntry(BaseModel):
+    """One settled fixture the model made a real call on, with how that call turned out.
+
+    Scored on the 1X2 market only (the model's argmax of home/draw/away) rather than on
+    best_pick's cross-market choice. That is deliberate: best_pick depends on which odds
+    happened to be ingested at the time, so scoring it would make historical accuracy a
+    function of odds coverage rather than of the model. 1X2 is always present for every
+    prediction, which makes this comparable across sports and across time."""
+
     fixture_id: uuid.UUID
+    sport_slug: str
+    league_slug: str
+    home_team: str
+    away_team: str
     model_version: str
+    # The model's own confidence in the outcome it picked (not necessarily the home side).
     predicted_probability: float
     confidence_tier: str
-    result: str
+    predicted_outcome: str  # "home" | "draw" | "away"
+    result: str  # the real settled MatchResult
+    was_correct: bool
     settled_at: datetime
+
+
+class HistorySummary(BaseModel):
+    """Aggregate model performance over settled fixtures — the real "how good is this thing"
+    number, computed from actual results rather than from training-time metrics.
+
+    Distinct from GET /stats/model, which reports what a model scored on its own held-out TEST
+    SET at training time. This is the live equivalent: how the currently-serving predictions
+    have actually fared on real fixtures since. The two can legitimately diverge, and that
+    divergence is exactly what makes this worth surfacing."""
+
+    sport_slug: str
+    settled_fixtures: int
+    correct: int
+    accuracy: float
+    # Fixtures excluded from the numbers above because there was nothing to score: a tennis
+    # retirement or walkover, where bookmakers generally void bets. Counted and reported rather
+    # than silently dropped, so the denominator is never quietly wrong.
+    voided: int
 
 
 class HistoryQuery(BaseModel):
