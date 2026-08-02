@@ -7,7 +7,7 @@ from app.core.database import async_session_factory
 from app.fixtures.models import Fixture, TeamFeatures
 from app.models_ml.runner import ModelRunner
 from app.predictions.models import Prediction
-from app.predictions.service import confidence_tier_for_probability
+from app.predictions.service import confidence_tier_for_probability, feature_completeness
 from app.sports.models import Sport
 from app.workers.celery import celery_app, run_task
 from app.workers.notify_users import notify_new_pick
@@ -74,6 +74,7 @@ async def _run_predictions(fixture_id: uuid.UUID) -> None:
             draw_prob=result.draw_prob,
             away_prob=result.away_prob,
             confidence_tier=confidence_tier_for_probability(probability),
+            feature_completeness=feature_completeness(features),
             xg_home=result.xg_home,
             xg_away=result.xg_away,
             corners_xg_home=result.corners_xg_home,

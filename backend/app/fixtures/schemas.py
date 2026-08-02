@@ -32,6 +32,11 @@ class BestPick(BaseModel):
     odds: float | None = None
     market: str = "h2h"  # "h2h" | "double_chance" | "goals_total" | "corners_total"
     line: float | None = None  # goals_total/corners_total only
+    # Fraction of the model's feature vector that had a real value when this prediction was
+    # made (0.0-1.0); null for predictions made before this was recorded. Lets the client
+    # distinguish a well-informed probability from one the model effectively fell back to the
+    # base rate for -- see Prediction.feature_completeness.
+    feature_completeness: float | None = None
 
 
 class LiveStateResponse(BaseModel):

@@ -14,3 +14,19 @@ def confidence_tier_for_probability(probability: float) -> ConfidenceTier:
     if probability >= MEDIUM_CONFIDENCE_THRESHOLD:
         return ConfidenceTier.MEDIUM
     return ConfidenceTier.LOW
+
+
+def feature_completeness(features: dict) -> float | None:
+    """Fraction of `features` carrying a real value (0.0-1.0), or None for an empty vector.
+
+    Deliberately counts every key the caller assembled rather than a per-sport whitelist: each
+    sport's feature-assembly function already decides which features exist for it, so anything
+    present-but-None here is a genuinely missing input, not an inapplicable one.
+
+    Distinguishes an informed prediction from one the model effectively fell back to the base
+    rate for. The real case that motivated it: 26% of retrodicted ATP fixtures came out at
+    exactly 0.562, because those players' prior-match history was largely absent — indis-
+    tinguishable, in the feed, from a confident 56%. See Prediction.feature_completeness."""
+    if not features:
+        return None
+    return sum(1 for value in features.values() if value is not None) / len(features)

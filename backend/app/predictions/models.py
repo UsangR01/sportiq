@@ -41,6 +41,17 @@ class Prediction(Base):
     xg_away: Mapped[float | None] = mapped_column(Float, nullable=True)
     corners_xg_home: Mapped[float | None] = mapped_column(Float, nullable=True)
     corners_xg_away: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Fraction of this model's feature vector that had a real value (0.0-1.0), recorded at
+    # inference time. NULL for predictions made before this existed.
+    #
+    # A prediction built from mostly-missing features is not wrong, but it IS far less
+    # informative than one built from a full vector - and today the UI renders both with
+    # identical authority. Measured example: 26% of retrodicted ATP fixtures collapsed to the
+    # exact same 0.562 probability, because the players' prior-match history was largely absent
+    # and the model fell back on almost no signal. Surfacing this lets the client distinguish
+    # "confidently 60%" from "60% because we know nothing", instead of implying the two are
+    # equally trustworthy.
+    feature_completeness: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

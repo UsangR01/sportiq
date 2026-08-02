@@ -101,21 +101,53 @@ function PostponedBadge() {
   );
 }
 
+/** Below this fraction of real (non-null) model inputs, a prediction is flagged as
+ * low-information rather than shown with the same authority as a well-informed one.
+ *
+ * Calibrated against the real measured spread across upcoming fixtures, not picked by feel:
+ *
+ *     EPL 0.12 | Scottish Prem 0.19 | Brasileirao 0.38 | MLS 0.48 | CSL 0.49
+ *
+ * EPL and the Scottish Premiership are between seasons, so their teams have no played matches
+ * to derive form/attack/defence from and the model is effectively returning a base rate. The
+ * in-season leagues sit around 0.4-0.5. A 0.5 cutoff would therefore flag literally every
+ * fixture, which tells the user nothing; 0.35 separates "no real data yet" from "partial but
+ * genuine data" — which is the distinction worth surfacing.
+ *
+ * Worth revisiting once the European seasons are underway and the spread shifts upward. */
+const LOW_CONFIDENCE_COMPLETENESS = 0.35;
+
 function PredictionBadge({ fixture }: { fixture: FixtureSummary }) {
   const pick = fixture.best_pick;
   if (!pick) return null;
+
+  const lowInformation =
+    pick.feature_completeness != null && pick.feature_completeness < LOW_CONFIDENCE_COMPLETENESS;
 
   // Every fixture reaching this screen already cleared the Picks feed's own min-probability/
   // min-odds filters server-side (see app/(tabs)/index.tsx) — so this badge is always shown
   // highlighted, never demoted to a plain "Details" line the way it used to be.
   return (
-    <View className={`items-center justify-center rounded-lg bg-blue-600 px-2 py-2 ${BADGE_WIDTH}`}>
-      <Text className="text-center text-xs font-bold text-white" numberOfLines={1}>
-        {pickHeadline(pick)}
-      </Text>
-      <Text className="text-center text-xs text-blue-100" numberOfLines={1}>
-        {Math.round(pick.probability * 100)}%{pick.odds ? ` · ${pick.odds.toFixed(2)}` : ""}
-      </Text>
+    <View className="items-center">
+      <View
+        className={`items-center justify-center rounded-lg px-2 py-2 ${BADGE_WIDTH} ${
+          lowInformation ? "bg-blue-400" : "bg-blue-600"
+        }`}
+      >
+        <Text className="text-center text-xs font-bold text-white" numberOfLines={1}>
+          {pickHeadline(pick)}
+        </Text>
+        <Text className="text-center text-xs text-blue-100" numberOfLines={1}>
+          {Math.round(pick.probability * 100)}%{pick.odds ? ` · ${pick.odds.toFixed(2)}` : ""}
+        </Text>
+      </View>
+      {/* Deliberately worded as a limitation of our DATA, not a hedge on the number: the
+          probability is what the model genuinely says, it just had little to go on. */}
+      {lowInformation && (
+        <Text className="mt-0.5 text-center text-[9px] text-amber-600 dark:text-amber-500">
+          limited data
+        </Text>
+      )}
     </View>
   );
 }

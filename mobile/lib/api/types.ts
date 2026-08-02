@@ -23,6 +23,11 @@ export interface BestPick {
   odds: number | null;
   market: PickMarket;
   line: number | null; // goals_total/corners_total only
+  // Fraction of the model's feature vector that had a real value (0.0-1.0); null for
+  // predictions made before this was recorded. A low value means the model had little real
+  // information to go on, so the probability shown is closer to a base-rate guess than a
+  // considered call — see LOW_CONFIDENCE_COMPLETENESS in components/fixtures/FixtureCard.tsx.
+  feature_completeness: number | null;
 }
 
 export interface LiveStateResponse {

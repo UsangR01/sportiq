@@ -1,5 +1,5 @@
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -39,6 +39,9 @@ class _MarketCandidate:
     odds: float | None
     market: str
     line: float | None
+    # Carried through from the Prediction row so the client can tell a well-informed
+    # probability from one the model effectively fell back to the base rate for.
+    feature_completeness: float | None = None
 
 
 def _build_extra_markets(prediction: Prediction) -> ExtraMarketsResponse:
@@ -203,7 +206,12 @@ def _all_market_candidates(
         if under is not None:
             candidates.append(_MarketCandidate("under", under, under_odds, "corners_total", line))
 
-    return candidates
+    # Stamped once here rather than threaded through every construction above: completeness is
+    # a property of the PREDICTION, identical for every candidate derived from it.
+    return [
+        replace(candidate, feature_completeness=prediction.feature_completeness)
+        for candidate in candidates
+    ]
 
 
 def _candidate_to_best_pick(candidate: _MarketCandidate) -> BestPick:
@@ -213,6 +221,7 @@ def _candidate_to_best_pick(candidate: _MarketCandidate) -> BestPick:
         odds=candidate.odds,
         market=candidate.market,
         line=candidate.line,
+        feature_completeness=candidate.feature_completeness,
     )
 
 
