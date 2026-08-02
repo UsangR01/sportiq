@@ -85,6 +85,11 @@ LEAGUE_CONFIGS: dict[str, dict] = {
 # having no data for that league at all.
 STAGES = ("gamelog", "corners", "lineups", "odds")
 
+LINEUP_COLUMNS = ["FIXTURE_ID", "TEAM_ID", "PLAYER_NAME"]
+# Flush partial lineup progress this often. Small enough that an interrupted run loses only a
+# few hundred calls, large enough not to rewrite the parquet constantly.
+LINEUP_CHECKPOINT_EVERY = 200
+
 MAX_RETRIES = 5
 
 
@@ -202,14 +207,31 @@ async def collect_game_log(league_slug: str, league_id: int) -> tuple[pd.DataFra
     return pd.DataFrame(rows), team_codes
 
 
-async def collect_lineups(fixture_ids: list[int]) -> pd.DataFrame:
+async def collect_lineups(
+    fixture_ids: list[int], checkpoint_path: Path | None = None
+) -> pd.DataFrame:
     """Per-fixture lineup/appearance data (games.minutes > 0) — the football "box score",
     used by ml/training/train_football.py's historical key-player-availability backtest label
     AND (per the user's explicit go-ahead — no leakage concern for a one-off backtest on
     already-known outcomes) by app/workers/backfill_predictions.py's retrodiction path. One
     call per fixture — the real, unavoidable cost of this endpoint (confirmed live: no
-    bulk-by-league-and-date equivalent for lineups the way /injuries has, see CLAUDE.md)."""
-    rows = []
+    bulk-by-league-and-date equivalent for lineups the way /injuries has, see CLAUDE.md).
+
+    Checkpointed, because one call per fixture across three leagues is ~4,900 calls against a
+    7,500/day ceiling — the work genuinely spans days. Without this, exhausting the quota at
+    99% of a league discarded every call made, which is exactly the all-or-nothing failure that
+    cost a ~7-hour tennis rank-points run earlier (see collect_tennis_data.py). Progress is
+    flushed every LINEUP_CHECKPOINT_EVERY fixtures and already-collected fixtures are skipped
+    on resume, so an interrupted run costs at most that many calls."""
+    rows: list[dict] = []
+    done: set = set()
+    if checkpoint_path is not None and checkpoint_path.exists():
+        cached = pd.read_parquet(checkpoint_path)
+        rows = cached.to_dict("records")
+        done = set(cached["FIXTURE_ID"].tolist())
+        fixture_ids = [f for f in fixture_ids if f not in done]
+        print(f"  resuming: {len(done)} fixtures already collected, {len(fixture_ids)} remaining")
+
     async with _football_client() as client:
         for i, fixture_id in enumerate(fixture_ids):
             response = await _get_with_retry(client, "/fixtures/players", {"fixture": fixture_id})
@@ -229,6 +251,8 @@ async def collect_lineups(fixture_ids: list[int]) -> pd.DataFrame:
                         )
             if (i + 1) % 100 == 0:
                 print(f"  collected lineups for {i + 1}/{len(fixture_ids)} fixtures")
+            if checkpoint_path is not None and (i + 1) % LINEUP_CHECKPOINT_EVERY == 0:
+                pd.DataFrame(rows, columns=LINEUP_COLUMNS).to_parquet(checkpoint_path, index=False)
 
     return pd.DataFrame(rows, columns=["FIXTURE_ID", "TEAM_ID", "PLAYER_NAME"])
 
@@ -350,8 +374,11 @@ def collect_league(league_slug: str, stages: tuple[str, ...] = STAGES) -> None:
     elif "lineups" in stages:
         fixture_ids = sorted(games["FIXTURE_ID"].unique().tolist())
         print(f"collecting lineups for {len(fixture_ids)} {league_slug} fixtures (1 call each)...")
-        lineups = asyncio.run(collect_lineups(fixture_ids))
+        checkpoint_path = DATA_DIR / f"football_lineups_{league_slug}.checkpoint.parquet"
+        lineups = asyncio.run(collect_lineups(fixture_ids, checkpoint_path))
         lineups.to_parquet(lineups_path, index=False)
+        # Only once the real file is written — the checkpoint is the resume point until then.
+        checkpoint_path.unlink(missing_ok=True)
         print(f"saved {len(lineups)} lineup-presence rows to {lineups_path}")
 
     corners_path = DATA_DIR / f"football_corners_{league_slug}.parquet"
