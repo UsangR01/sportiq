@@ -27,3 +27,16 @@ ml/mlruns/
 backend/celerybeat-schedule*
 
 feature_engineering.ipynb
+
+# Local agent state — settings.local.json was already ignored, but the lock file and any
+# future local-only files under here shouldn't reach a public repo either.
+.claude/
+
+# Third-party API documentation kept locally for reference (14MB of vendor PDFs). Freely
+# available online, so not worth permanent history in a public repo — same call already made
+# for balldontlie_api_documentation.pdf.
+pdf-documents/
+
+# Editor/office backup artefacts
+*.docx.bak
+~$*.docx
