@@ -1,13 +1,14 @@
-import Slider from "@react-native-community/slider";
 import { useQuery } from "@tanstack/react-query";
-import * as Haptics from "expo-haptics";
-import { useMemo, useRef, useState } from "react";
-import { Platform, RefreshControl, SectionList, Text, View } from "react-native";
+import { useMemo, useState } from "react";
+import { RefreshControl, SectionList, Text, View } from "react-native";
 
-import { DayStrip, type DaySelection } from "@/components/DayStrip";
+import { AppHeader } from "@/components/AppHeader";
+import { DateNavigator, startOfDay } from "@/components/DateNavigator";
+import { FiltersPanel } from "@/components/FiltersPanel";
 import { FixtureCard } from "@/components/fixtures/FixtureCard";
 import { GuestBanner } from "@/components/GuestBanner";
-import { SportFilterChips } from "@/components/SportFilterChips";
+import { SportDropdown } from "@/components/SportDropdown";
+import { StatusDropdown, type StatusFilter } from "@/components/StatusDropdown";
 import { listFixtures } from "@/lib/api/fixtures";
 import { listSports } from "@/lib/api/sports";
 import type { FixtureSummary } from "@/lib/api/types";
@@ -46,6 +47,9 @@ interface LeagueSection {
   country: string | null;
   /** Court surface (Hard/Clay/Grass) — tennis only, shown alongside the tournament name. */
   surface: string | null;
+  /** Every fixture here has only an estimated kickoff, so the day it appears under is a
+   * fallback rather than a scheduled time. */
+  timeUnconfirmed: boolean;
   data: FixtureSummary[];
 }
 
@@ -64,10 +68,14 @@ function groupByLeague(fixtures: FixtureSummary[]): LeagueSection[] {
   const bySlug = new Map<string, LeagueSection>();
   for (const fixture of fixtures) {
     const groupByTournament = fixture.tournament_name != null;
-    // Namespaced so a tournament can never collide with a league slug in the same map.
+    // A fixture whose kickoff is only an estimate gets its own section rather than sitting
+    // among matches with real times. Tennis schedules "after match 3 on Court 2", so the
+    // provider leaves the time null and we fall back to the tournament's own date — which
+    // lands it at midnight on a day nobody promised. Listing that alongside genuine times
+    // presents a guess as fact, and it is why matches appeared under the wrong day at all.
     const key = groupByTournament
-      ? `tournament:${fixture.tournament_name}`
-      : `league:${fixture.league_slug}`;
+      ? `tournament:${fixture.tournament_name}${fixture.kickoff_is_estimated ? ":tbc" : ""}`
+      : `league:${fixture.league_slug}${fixture.kickoff_is_estimated ? ":tbc" : ""}`;
     let section = bySlug.get(key);
     if (!section) {
       section = {
@@ -77,6 +85,7 @@ function groupByLeague(fixtures: FixtureSummary[]): LeagueSection[] {
           ? countryForTournamentLocation(fixture.tournament_location)
           : fixture.league_country,
         surface: groupByTournament ? fixture.tournament_surface : null,
+        timeUnconfirmed: fixture.kickoff_is_estimated,
         data: [],
       };
       bySlug.set(key, section);
@@ -95,7 +104,10 @@ function groupByLeague(fixtures: FixtureSummary[]): LeagueSection[] {
     });
   }
   // A league with any live match sorts to the top; otherwise by its earliest kickoff.
+  // Unconfirmed-time sections always sink below the scheduled ones: their kickoff is a
+  // fallback, so ordering them by it would interleave guesses among real times.
   sections.sort((a, b) => {
+    if (a.timeUnconfirmed !== b.timeUnconfirmed) return a.timeUnconfirmed ? 1 : -1;
     const aLive = a.data.some((f) => f.status === "live");
     const bLive = b.data.some((f) => f.status === "live");
     if (aLive !== bLive) return aLive ? -1 : 1;
@@ -116,36 +128,36 @@ export default function PicksScreen() {
 
   const [minProbability, setMinProbability] = useState(DEFAULT_MIN_PROBABILITY);
 
-  const hasStartedSlidingProb = useRef(false);
-  const hasStartedSlidingOdds = useRef(false);
   // Defaults to "today" — the backend only ever backfills/looks ahead 7 days either way
-  // (see components/DayStrip.tsx), so this always starts inside real, populated data.
-  const [daySelection, setDaySelection] = useState<DaySelection>(() => ({ date: new Date() }));
+  // (see components/DateNavigator.tsx), so this always starts inside real, populated data.
+  const [selectedDate, setSelectedDate] = useState<Date>(() => startOfDay(new Date()));
+  // null means no status filter — every status for the day, which is the default.
+  const [statusFilter, setStatusFilter] = useState<StatusFilter | null>(null);
 
   const sportsQuery = useQuery({ queryKey: ["sports"], queryFn: listSports });
-  const dayKey = daySelection === "live" ? "live" : daySelection.date.toDateString();
   const fixturesQuery = useQuery({
-    queryKey: ["fixtures", "picks", sportFilter, dayKey, minProbability, minOdds],
+    queryKey: [
+      "fixtures",
+      "picks",
+      sportFilter,
+      selectedDate.toDateString(),
+      minProbability,
+      minOdds,
+      statusFilter,
+    ],
     queryFn: () => {
       // market/line are deliberately omitted — the backend's default (combined best pick
       // across every market: h2h, double chance, goals/corners O/U) is always what this
       // screen wants now; per-market filtering was removed as UI clutter nobody needed.
-      const marketParams = { min_probability: minProbability, min_odds: minOdds };
-      if (daySelection === "live") {
-        return listFixtures({
-          sport_slug: sportFilter ?? undefined,
-          status: "live",
-          limit: FIXTURES_PAGE_LIMIT,
-          ...marketParams,
-        });
-      }
-      const { from, to } = dayBounds(daySelection.date);
+      const { from, to } = dayBounds(selectedDate);
       return listFixtures({
         sport_slug: sportFilter ?? undefined,
         date_from: from,
         date_to: to,
         limit: FIXTURES_PAGE_LIMIT,
-        ...marketParams,
+        min_probability: minProbability,
+        min_odds: minOdds,
+        status: statusFilter ?? undefined,
       });
     },
   });
@@ -158,67 +170,33 @@ export default function PicksScreen() {
     setRefreshing(false);
   }
 
-  // @react-native-community/slider's Android SeekBar backing view fires onSlidingComplete
-  // once on mount with no real touch involved (confirmed live in an earlier phase of this
-  // project — it reported minimumValue). Only commit a completion preceded by a real
-  // onSlidingStart, same guard both sliders below need.
-  function onProbSlidingStart() {
-    hasStartedSlidingProb.current = true;
-  }
-  function onProbSlidingComplete(value: number) {
-    if (!hasStartedSlidingProb.current) return;
-    hasStartedSlidingProb.current = false;
-    setMinProbability(Math.round(value * 100) / 100);
-    if (Platform.OS !== "web") Haptics.selectionAsync();
-  }
-
-  function onOddsSlidingStart() {
-    hasStartedSlidingOdds.current = true;
-  }
-  function onOddsSlidingComplete(value: number) {
-    if (!hasStartedSlidingOdds.current) return;
-    hasStartedSlidingOdds.current = false;
-    setMinOdds(Math.round(value * 100) / 100);
-    if (Platform.OS !== "web") Haptics.selectionAsync();
-  }
-
   return (
     <View className="flex-1 bg-white dark:bg-black">
-      <View className="px-4 pt-2">
-        <Text className="text-sm text-gray-500 dark:text-gray-400">
-          Minimum probability:{" "}
-          <Text className="font-semibold text-gray-900 dark:text-gray-100">
-            {Math.round(minProbability * 100)}%
-          </Text>
-        </Text>
-        <Slider
-          minimumValue={MIN_PROBABILITY_FLOOR}
-          maximumValue={0.95}
-          step={0.01}
-          value={minProbability}
-          onSlidingStart={onProbSlidingStart}
-          onSlidingComplete={onProbSlidingComplete}
-          minimumTrackTintColor="#2563eb"
+      <AppHeader />
+      {/* Sport and date share one row: both are "what am I looking at" controls, and the
+          old layout spent two full rows on them before any pick was visible. */}
+      <View className="mb-2 flex-row items-center gap-2 px-4">
+        <SportDropdown
+          sports={sportsQuery.data ?? []}
+          selected={sportFilter}
+          onSelect={setSportFilter}
         />
-        <Text className="text-sm text-gray-500 dark:text-gray-400">
-          Minimum odds: <Text className="font-semibold text-gray-900 dark:text-gray-100">{minOdds.toFixed(2)}</Text>
-        </Text>
-        <Slider
-          minimumValue={1.01}
-          maximumValue={20}
-          step={0.01}
-          value={minOdds}
-          onSlidingStart={onOddsSlidingStart}
-          onSlidingComplete={onOddsSlidingComplete}
-          minimumTrackTintColor="#2563eb"
-        />
+        <DateNavigator selected={selectedDate} onSelect={setSelectedDate} />
       </View>
-      <SportFilterChips
-        sports={sportsQuery.data ?? []}
-        selected={sportFilter}
-        onSelect={setSportFilter}
-      />
-      <DayStrip selected={daySelection} onSelect={setDaySelection} />
+      {/* Status and Filters share the second row: both narrow what's listed, as opposed to
+          the row above which chooses what's being looked at. */}
+      <View className="mb-2 flex-row items-start gap-2 px-4">
+        <StatusDropdown selected={statusFilter} onSelect={setStatusFilter} />
+        <View className="flex-1">
+          <FiltersPanel
+            minProbability={minProbability}
+            minProbabilityFloor={MIN_PROBABILITY_FLOOR}
+            onMinProbabilityChange={setMinProbability}
+            minOdds={minOdds}
+            onMinOddsChange={setMinOdds}
+          />
+        </View>
+      </View>
       {isGuest && <GuestBanner />}
       <SectionList
         sections={sections}
@@ -231,6 +209,14 @@ export default function PicksScreen() {
               <CountryFlag country={section.country} size={24} />
             </View>
             <View className="flex-1">
+              {/* Says outright that these matches have no confirmed time, so the day they
+                  appear under is our fallback rather than a scheduled slot. Better to admit
+                  that than to imply a precision the provider has not given us. */}
+              {section.timeUnconfirmed && (
+                <Text className="text-[10px] font-bold uppercase tracking-wide text-amber-500">
+                  Time to be confirmed
+                </Text>
+              )}
               <Text
                 className="text-sm font-bold text-gray-900 dark:text-gray-100"
                 numberOfLines={1}
