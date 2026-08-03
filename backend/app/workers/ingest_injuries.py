@@ -218,15 +218,29 @@ async def _ingest_injuries() -> None:
         sports = (await db.execute(select(Sport).where(Sport.active.is_(True)))).scalars().all()
 
     for sport in sports:
-        async with async_session_factory() as db:
-            if sport.slug == "nba":
-                if not settings.rotowire_api_key:
-                    logger.warning("ROTOWIRE_API_KEY not set — using BallDontLie fallback")
-                    await _ingest_injuries_balldontlie(db, sport)
-                else:
-                    await _ingest_injuries_rotowire(db, sport)
-            elif sport.slug == "football":
-                await _ingest_injuries_api_football(db, sport)
+        # Per-sport isolation, matching ingest_odds.py and ingest_fixtures.py. Without it one
+        # sport's failure aborts the whole task before the others are reached — and that was
+        # not hypothetical: NBA's injury adapter is still a NotImplementedError stub and NBA
+        # sorts ahead of football, so every scheduled run died before football (whose
+        # API-Football injury path is entirely real, and feeds key-player availability) was
+        # ever touched. Invisible until Celery actually ran on a schedule, since every earlier
+        # "verified live" ingest was a manual per-sport call.
+        try:
+            async with async_session_factory() as db:
+                if sport.slug == "nba":
+                    if not settings.rotowire_api_key:
+                        logger.warning("ROTOWIRE_API_KEY not set — using BallDontLie fallback")
+                        await _ingest_injuries_balldontlie(db, sport)
+                    else:
+                        await _ingest_injuries_rotowire(db, sport)
+                elif sport.slug == "football":
+                    await _ingest_injuries_api_football(db, sport)
+        except NotImplementedError:
+            # An adapter that is still a stub is a known gap, not an incident — log it quietly
+            # rather than as an error so it can't drown out real failures every 30 minutes.
+            logger.info("injury ingest skipped for %s — adapter not implemented", sport.slug)
+        except Exception:
+            logger.exception("injury ingest failed for %s — continuing", sport.slug)
 
 
 @celery_app.task(name="app.workers.ingest_injuries.ingest_injuries")
