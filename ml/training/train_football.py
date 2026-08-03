@@ -83,6 +83,7 @@ from app.models_ml.football_features import (  # noqa: E402
     FEATURE_NAMES,
     assemble_from_game_log,
     merge_corners_into_game_log,
+    merge_xg_into_game_log,
 )
 from app.models_ml.historical_key_players import (  # noqa: E402
     historical_key_player_availability,
@@ -354,6 +355,18 @@ async def main_async() -> None:
     # corners regressors' own TARGET (home_corners/away_corners), an unrelated use of the same
     # data.
     games = merge_corners_into_game_log(games, corners)
+    # Rolling xG (TheStatsAPI — API-Football supplies none at any tier). Unlike corners, these
+    # four features ARE part of FEATURE_NAMES, so they reach Layer 1's goals regressors: that
+    # is the entire point, since rolling xG measured r=+0.129 against actual total goals where
+    # rolling goals managed +0.062 and couldn't be told apart from noise. Coverage is genuinely
+    # partial for now (EPL from 22/23, Brasileirão collecting; MLS/CSL/Scottish Prem none yet),
+    # and the left join leaves those as NaN for XGBoost to treat as missing rather than
+    # excluding the leagues.
+    xg = _load_optional("xg", ["FIXTURE_ID", "TEAM_ID", "XG_FOR"])
+    games = merge_xg_into_game_log(games, xg)
+    if not xg.empty:
+        covered = games["XG_FOR"].notna().sum()
+        print(f"  xG merged: {covered}/{len(games)} game-log rows carry a real xG value")
     team_codes: dict[str, str] = {}
     for league in LEAGUES:
         codes_path = DATA_DIR / f"football_team_codes_{league}.parquet"

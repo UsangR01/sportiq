@@ -16,8 +16,10 @@ from app.models_ml.football_features import (
     CORNERS_FEATURE_NAMES,
     FEATURE_NAMES,
     _corners_rolling_live,
+    _xg_rolling,
     assemble_from_game_log,
     merge_corners_into_game_log,
+    merge_xg_into_game_log,
 )
 from app.sports.models import League, Sport
 
@@ -412,3 +414,134 @@ async def test_corners_rolling_live_none_with_no_completed_fixtures():
         corners_for, corners_against = await _corners_rolling_live(db, uuid.uuid4(), n=5)
     assert corners_for is None
     assert corners_against is None
+
+
+def _two_team_log(rows):
+    """Minimal game-log frame in collect_football_data.py's shape."""
+    return pd.DataFrame(rows)
+
+
+def test_merge_xg_into_game_log_attaches_for_and_against():
+    """xG arrives from TheStatsAPI already resolved to API-Football FIXTURE_ID/TEAM_ID (the
+    collector owns the cross-provider join), so this stays a plain two-key merge."""
+    games = _two_team_log(
+        [
+            {
+                "FIXTURE_ID": 1,
+                "TEAM_ID": "A",
+                "OPPONENT_ID": "B",
+                "HOME_AWAY": "home",
+                "GAME_DATE": date(2024, 1, 1),
+                "GF": 2,
+                "GA": 1,
+                "WDL": "W",
+            },
+            {
+                "FIXTURE_ID": 1,
+                "TEAM_ID": "B",
+                "OPPONENT_ID": "A",
+                "HOME_AWAY": "away",
+                "GAME_DATE": date(2024, 1, 1),
+                "GF": 1,
+                "GA": 2,
+                "WDL": "L",
+            },
+        ]
+    )
+    xg = pd.DataFrame(
+        [
+            {"FIXTURE_ID": 1, "TEAM_ID": "A", "XG_FOR": 2.41},
+            {"FIXTURE_ID": 1, "TEAM_ID": "B", "XG_FOR": 0.88},
+        ]
+    )
+    merged = merge_xg_into_game_log(games, xg)
+
+    team_a = merged[merged["TEAM_ID"] == "A"].iloc[0]
+    assert team_a["XG_FOR"] == pytest.approx(2.41)
+    assert team_a["XG_AGAINST"] == pytest.approx(0.88)
+
+    team_b = merged[merged["TEAM_ID"] == "B"].iloc[0]
+    assert team_b["XG_FOR"] == pytest.approx(0.88)
+    assert team_b["XG_AGAINST"] == pytest.approx(2.41)
+
+
+def test_merge_xg_leaves_nan_for_a_league_with_no_xg_collected():
+    """MLS/CSL/Scottish Prem have no xG collected, and EPL 2021 genuinely has none upstream
+    (measured: 0/5 sampled). Those rows must come through as NaN for XGBoost to treat as
+    missing — never a fabricated 0.0, which would read as 'no chances created'."""
+    games = _two_team_log(
+        [
+            {
+                "FIXTURE_ID": 99,
+                "TEAM_ID": "A",
+                "OPPONENT_ID": "B",
+                "HOME_AWAY": "home",
+                "GAME_DATE": date(2021, 8, 1),
+                "GF": 1,
+                "GA": 0,
+                "WDL": "W",
+            }
+        ]
+    )
+    xg = pd.DataFrame(columns=["FIXTURE_ID", "TEAM_ID", "XG_FOR"])
+    merged = merge_xg_into_game_log(games, xg)
+    assert merged["XG_FOR"].isna().all()
+    assert merged["XG_AGAINST"].isna().all()
+
+
+def test_xg_rolling_is_none_when_never_merged():
+    """Retrodiction (backfill_predictions.py) builds its own game log without the xG merge.
+    That must degrade to None, not raise a KeyError — same contract as _corners_rolling."""
+    games = _two_team_log(
+        [
+            {
+                "FIXTURE_ID": 1,
+                "TEAM_ID": "A",
+                "OPPONENT_ID": "B",
+                "HOME_AWAY": "home",
+                "GAME_DATE": date(2024, 1, 1),
+                "GF": 1,
+                "GA": 0,
+                "WDL": "W",
+            }
+        ]
+    )
+    assert _xg_rolling(games, date(2024, 6, 1)) == (None, None)
+
+
+def test_xg_rolling_excludes_the_match_being_predicted():
+    """The leakage guard: a match on as_of_date must not inform its own prediction. Without
+    the strict < comparison a fixture's own xG would leak into its feature vector."""
+    rows = [
+        {
+            "FIXTURE_ID": i,
+            "TEAM_ID": "A",
+            "OPPONENT_ID": "B",
+            "HOME_AWAY": "home",
+            "GAME_DATE": date(2024, 1, i + 1),
+            "GF": 1,
+            "GA": 0,
+            "WDL": "W",
+            "XG_FOR": 1.0,
+            "XG_AGAINST": 0.5,
+        }
+        for i in range(3)
+    ]
+    # the match being predicted, carrying a wildly different xG that must NOT be counted
+    rows.append(
+        {
+            "FIXTURE_ID": 99,
+            "TEAM_ID": "A",
+            "OPPONENT_ID": "B",
+            "HOME_AWAY": "home",
+            "GAME_DATE": date(2024, 2, 1),
+            "GF": 9,
+            "GA": 0,
+            "WDL": "W",
+            "XG_FOR": 99.0,
+            "XG_AGAINST": 99.0,
+        }
+    )
+    xg_for, xg_against = _xg_rolling(_two_team_log(rows), date(2024, 2, 1))
+    assert xg_for == pytest.approx(1.0)
+    assert xg_against == pytest.approx(0.5)
