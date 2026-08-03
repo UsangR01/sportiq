@@ -15,6 +15,18 @@ class OddsFormat(str, enum.Enum):
     AMERICAN = "american"
 
 
+class ThemePreference(str, enum.Enum):
+    """Light/dark/system appearance choice.
+
+    SYSTEM is a real third state, not the absence of a value: it means "follow the OS", which
+    is meaningfully different from a user who has explicitly chosen light. That's why the
+    column is non-nullable with a SYSTEM default rather than nullable."""
+
+    LIGHT = "light"
+    DARK = "dark"
+    SYSTEM = "system"
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -39,4 +51,13 @@ class UserPreference(Base):
     default_min_odds: Mapped[float] = mapped_column(Float, nullable=True)
     odds_format: Mapped[OddsFormat] = mapped_column(
         Enum(OddsFormat, name="odds_format"), default=OddsFormat.DECIMAL, nullable=False
+    )
+    # Display setting rather than a betting one, but it lives here so it follows the account
+    # across devices. Guests keep theirs on-device only — a guest session is device-bound
+    # anyway, so there is nothing to sync it to.
+    theme_preference: Mapped[ThemePreference] = mapped_column(
+        Enum(ThemePreference, name="theme_preference"),
+        default=ThemePreference.SYSTEM,
+        server_default="SYSTEM",
+        nullable=False,
     )

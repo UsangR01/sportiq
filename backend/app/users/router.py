@@ -24,6 +24,7 @@ async def get_preferences(
         default_sport_id=prefs.default_sport_id,
         default_min_odds=prefs.default_min_odds,
         odds_format=prefs.odds_format.value,
+        theme_preference=prefs.theme_preference.value,
     )
 
 
@@ -47,6 +48,8 @@ async def update_preferences(
         prefs.default_min_odds = body.default_min_odds
     if body.odds_format is not None:
         prefs.odds_format = body.odds_format
+    if body.theme_preference is not None:
+        prefs.theme_preference = body.theme_preference
 
     await db.commit()
     await db.refresh(prefs)
@@ -55,6 +58,7 @@ async def update_preferences(
         default_sport_id=prefs.default_sport_id,
         default_min_odds=prefs.default_min_odds,
         odds_format=prefs.odds_format.value,
+        theme_preference=prefs.theme_preference.value,
     )
 
 

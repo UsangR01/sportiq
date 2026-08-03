@@ -173,12 +173,14 @@ export interface UserPreferencesResponse {
   default_sport_id: string | null;
   default_min_odds: number | null;
   odds_format: string;
+  theme_preference: "light" | "dark" | "system";
 }
 
 export interface UserPreferencesUpdate {
   default_sport_id?: string | null;
   default_min_odds?: number | null;
   odds_format?: string | null;
+  theme_preference?: "light" | "dark" | "system";
 }
 
 export interface GuestSessionResponse {

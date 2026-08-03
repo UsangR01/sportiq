@@ -1,5 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "expo-router";
+
+import { ThemeSelector } from "@/components/ThemeSelector";
 import { useEffect, useState } from "react";
 import { Pressable, Switch, Text, View } from "react-native";
 
@@ -92,6 +94,11 @@ export default function ProfileScreen() {
   if (isGuest) {
     return (
       <View className="flex-1 items-center justify-center bg-white px-8 dark:bg-black">
+        {/* Appearance sits above the auth gate deliberately: it's a device display setting,
+            not an account one, so a guest shouldn't have to register to use dark mode. */}
+        <View className="mb-8 w-full">
+          <ThemeSelector />
+        </View>
         <Text className="mb-2 text-center text-lg font-semibold text-gray-900 dark:text-gray-100">
           Sign in to save picks and get alerts
         </Text>
@@ -126,6 +133,10 @@ export default function ProfileScreen() {
           <Row label="Odds format" value={preferencesQuery.data.odds_format} />
         </View>
       )}
+
+      <View className="mb-6">
+        <ThemeSelector />
+      </View>
 
       <View className="mb-6">
         <ToggleRow
