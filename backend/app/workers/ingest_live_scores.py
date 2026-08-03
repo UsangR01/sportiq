@@ -9,10 +9,12 @@ adapter method at all.
 """
 
 import logging
+from datetime import UTC, datetime
 
 import httpx
 from sqlalchemy import select
 
+from app.adapters.base import FixturePayload
 from app.adapters.factory import AdapterFactory
 from app.core.database import async_session_factory
 from app.fixtures.models import Fixture, FixtureStatus, Team
@@ -54,8 +56,22 @@ async def _ingest_live_scores_for_league(sport: Sport, league: League) -> None:
                 continue
 
             new_status = FixtureStatus(payload.status)
+            # Refresh the kickoff whenever a real one arrives — same gap as ingest_fixtures.py,
+            # and this worker runs every 5 minutes so it corrects a stale time far sooner.
+            if not payload.kickoff_is_estimated and payload.kickoff_utc is not None:
+                fixture.kickoff_utc = payload.kickoff_utc
+                fixture.kickoff_is_estimated = False
+
             if fixture.status != new_status:
                 fixture.status = new_status
+            elif new_status is FixtureStatus.SCHEDULED and _looks_underway(fixture, payload):
+                # Derive "live" ourselves rather than trusting the provider's own label.
+                # BallDontLie reports scheduled for ATP matches that are demonstrably underway
+                # (checked against a public scoreboard showing them Interrupted/Suspended while
+                # the feed still said scheduled), which left the Live tab permanently empty.
+                # A fixture past its kickoff that has a real score on the board is playing,
+                # whatever the feed claims.
+                fixture.status = FixtureStatus.LIVE
 
             await _upsert_live_state(db, fixture.id, payload)
             home_team = (
@@ -115,3 +131,27 @@ async def _ingest_live_scores() -> None:
 def ingest_live_scores() -> None:
     """Celery beat triggers this every 5 minutes, alongside odds ingest (TDD §2.3)."""
     run_task(_ingest_live_scores())
+
+
+def _looks_underway(fixture: Fixture, payload: FixturePayload) -> bool:
+    """Is this fixture demonstrably being played, whatever the provider's status says?
+
+    Two conditions, both required. The kickoff must have passed — never promote a fixture
+    whose start time is still ahead of us, since a stale score from a previous meeting would
+    otherwise mark a future match live. And there must be a real score on the board: a match
+    with 0-0 and no clock hasn't provably started, so it stays scheduled rather than being
+    guessed into LIVE.
+
+    A fixture whose kickoff is only an ESTIMATE is deliberately excluded — a fabricated
+    midnight is always "in the past", so treating it as evidence would promote most of a
+    tournament the moment any score appeared.
+    """
+    if fixture.kickoff_is_estimated or fixture.kickoff_utc is None:
+        return False
+    kickoff = fixture.kickoff_utc
+    if kickoff.tzinfo is None:
+        kickoff = kickoff.replace(tzinfo=UTC)
+    if kickoff > datetime.now(UTC):
+        return False
+    scored = (payload.home_score or 0) > 0 or (payload.away_score or 0) > 0
+    return scored or payload.match_minute is not None

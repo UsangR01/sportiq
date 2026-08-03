@@ -209,7 +209,29 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
                     existing.tournament_surface = payload.tournament_surface
                 if payload.tournament_location is not None:
                     existing.tournament_location = payload.tournament_location
-                existing.kickoff_is_estimated = payload.kickoff_is_estimated
+
+                # Refresh the kickoff time, which used to be written on INSERT only.
+                #
+                # Tennis exposed why that mattered: BallDontLie leaves scheduled_time null
+                # until close to the match, so a fixture ingested days ahead fell back to its
+                # tournament's start date (midnight) and kept that forever — even after the
+                # provider published a real time. Measured live, 26 of 37 ATP fixtures in a
+                # +/-2 day window were stuck on an estimated kickoff and 31 sat at exactly
+                # 00:00, which put matches on the wrong DAY in the feed entirely.
+                #
+                # Only ever move to a REAL time: an estimate must not overwrite a known
+                # kickoff, or a re-ingest that happens to lose the field would drag a correct
+                # time back to midnight. Once a real time is known the fixture stops being
+                # estimated; while it is still estimated the flag follows the payload, so a
+                # fixture cannot silently drop its "Time TBC" label while keeping a made-up
+                # time — which is what would have happened here, and is worse than admitting
+                # the time is unknown.
+                if not payload.kickoff_is_estimated:
+                    existing.kickoff_utc = payload.kickoff_utc
+                    existing.kickoff_is_estimated = False
+                elif existing.kickoff_is_estimated:
+                    existing.kickoff_utc = payload.kickoff_utc
+                    existing.kickoff_is_estimated = True
                 fixture = existing
 
             await _upsert_live_state(db, fixture.id, payload)
