@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -27,6 +28,20 @@ class Settings(BaseSettings):
     cors_origins: str = ""
 
     sentry_dsn_backend: str = ""
+
+    # Where trained model artefacts live. models_registry stores a FILENAME, not a path, so the
+    # same registry row works on a dev laptop and in a Linux container — promotion stays a DB
+    # update rather than a redeploy (TDD §3.1), which absolute paths quietly broke: every
+    # registered model pointed at C:\Users\... and could not have loaded in a container at all.
+    # Empty means "the repo's own ml/artifacts", which is what local dev wants; a deployment
+    # sets MODELS_DIR to wherever the artefacts are mounted or baked in.
+    models_dir: str = ""
+
+    @property
+    def models_path(self) -> Path:
+        if self.models_dir:
+            return Path(self.models_dir)
+        return Path(__file__).resolve().parents[3] / "ml" / "artifacts"
 
     @property
     def cors_origin_list(self) -> list[str]:
