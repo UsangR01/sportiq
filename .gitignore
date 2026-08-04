@@ -58,3 +58,11 @@ ml/export/*.parquet
 
 # Jupyter editor state
 .ipynb_checkpoints/
+
+# Firebase SERVICE ACCOUNT keys — full admin access to the Firebase project. These must never
+# reach a public repo. Upload to Expo via `eas credentials` (FCM V1) and delete the local copy.
+# NOTE: mobile/google-services.json is a different thing and is NOT ignored — it ships inside
+# the APK by design, so it cannot be a secret, and EAS Build needs it present to build.
+**/*-firebase-adminsdk-*.json
+**/serviceAccountKey*.json
+**/firebase-service-account*.json
