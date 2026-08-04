@@ -23,7 +23,8 @@
         "android.permission.USE_BIOMETRIC",
         "android.permission.USE_FINGERPRINT"
       ],
-      "package": "com.sportpiq.app"
+      "package": "com.sportpiq.app",
+      "googleServicesFile": "./google-services.json"
     },
     "web": {
       "bundler": "metro",

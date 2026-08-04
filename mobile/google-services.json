@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "341329187208",
+    "project_id": "sportpiq-10b64",
+    "storage_bucket": "sportpiq-10b64.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:341329187208:android:b961b9d7c77707372eea3d",
+        "android_client_info": {
+          "package_name": "com.sportpiq.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBkM8hpky8y1kdNhqHvfRcjkRNC9gWwOlc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
