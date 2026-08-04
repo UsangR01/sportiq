@@ -12,7 +12,6 @@ Patching the two per-sport helpers rather than the adapters keeps this a test of
 isolation, independent of which providers happen to be stubbed at the time.
 """
 
-
 import pytest
 from sqlalchemy import delete
 
