@@ -1,0 +1,63 @@
+# Staging soak — runs the SAME image as infra/render.yaml in the same three roles, against
+# throwaway Postgres/Redis. The point is to catch what a container exposes and a dev laptop
+# hides: missing runtime deps, a missing env var, a role that never actually starts.
+#
+# Deliberately NOT the deployed database. A soak that writes to real data is not a soak.
+name: sportiq-soak
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: sportiq_user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: sportiq
+    # No published port: nothing outside this network should reach it, and it avoids colliding
+    # with the dev database on 5432 — which would make the soak silently test the wrong data.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sportiq_user -d sportiq"]
+      interval: 3s
+      retries: 20
+
+  redis:
+    image: redis:7
+    command: ["redis-server", "--maxmemory-policy", "noeviction"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 20
+
+  migrate:
+    image: sportiq-api:soak
+    command: ["alembic", "upgrade", "head"]
+    environment: &env
+      DATABASE_URL: postgresql+asyncpg://sportiq_user:password@db:5432/sportiq
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET_KEY: soak-only-not-a-real-secret
+      JWT_ALGORITHM: HS256
+      MODELS_DIR: /app/models
+      CORS_ORIGINS: http://localhost:8081
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  api:
+    image: sportiq-api:soak
+    environment: *env
+    ports: ["127.0.0.1:8010:8000"]   # 8010, so the dev uvicorn on 8000 keeps working
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  worker:
+    image: sportiq-api:soak
+    command: ["celery", "-A", "app.workers.celery", "worker", "--loglevel=info", "--concurrency=2"]
+    environment: *env
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  beat:
+    image: sportiq-api:soak
+    command: ["celery", "-A", "app.workers.celery", "beat", "--loglevel=info"]
+    environment: *env
+    depends_on:
+      migrate: {condition: service_completed_successfully}
