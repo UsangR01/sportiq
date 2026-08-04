@@ -40,3 +40,11 @@ pdf-documents/
 # Editor/office backup artefacts
 *.docx.bak
 ~$*.docx
+
+# Exported training data for the standalone notebook — 8.6MB of derived parquet, regenerable
+# with ml/export_for_notebook.py. Same reasoning as ml/data/ above: the script and the
+# notebook are source and belong in history; the data they produce does not.
+ml/export/*.parquet
+
+# Jupyter editor state
+.ipynb_checkpoints/
