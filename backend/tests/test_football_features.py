@@ -545,3 +545,88 @@ def test_xg_rolling_excludes_the_match_being_predicted():
     xg_for, xg_against = _xg_rolling(_two_team_log(rows), date(2024, 2, 1))
     assert xg_for == pytest.approx(1.0)
     assert xg_against == pytest.approx(0.5)
+
+
+def test_league_baselines_distinguish_leagues():
+    """The whole point: a low-scoring league and a high-scoring one must produce different
+    numbers, so the model can stop applying one blended scoring level to both."""
+    from app.models_ml.league_baselines import compute_league_baselines
+
+    rows = []
+    for i in range(40):
+        d = date(2025, 1, 1) + timedelta(days=i)
+        rows += [
+            {"LEAGUE": "low", "HOME_AWAY": "home", "GAME_DATE": d, "GF": 1, "GA": 0, "WDL": "W"},
+            {"LEAGUE": "low", "HOME_AWAY": "away", "GAME_DATE": d, "GF": 0, "GA": 1, "WDL": "L"},
+            {"LEAGUE": "high", "HOME_AWAY": "home", "GAME_DATE": d, "GF": 3, "GA": 2, "WDL": "W"},
+            {"LEAGUE": "high", "HOME_AWAY": "away", "GAME_DATE": d, "GF": 2, "GA": 3, "WDL": "L"},
+        ]
+    baselines = compute_league_baselines(pd.DataFrame(rows))
+    low = baselines.get("low", date(2026, 1, 1))
+    high = baselines.get("high", date(2026, 1, 1))
+
+    assert low.avg_goals == pytest.approx(1.0)
+    assert high.avg_goals == pytest.approx(5.0)
+
+
+def test_league_baseline_is_expanding_not_full_season():
+    """Leakage guard: the baseline must reflect only matches BEFORE the fixture being scored.
+    A full-season average would leak the very matches being predicted."""
+    from app.models_ml.league_baselines import compute_league_baselines
+
+    rows = []
+    # 40 low-scoring matches, then 40 high-scoring ones in the same league
+    for i in range(40):
+        d = date(2025, 1, 1) + timedelta(days=i)
+        rows += [
+            {"LEAGUE": "l", "HOME_AWAY": "home", "GAME_DATE": d, "GF": 0, "GA": 0, "WDL": "D"},
+            {"LEAGUE": "l", "HOME_AWAY": "away", "GAME_DATE": d, "GF": 0, "GA": 0, "WDL": "D"},
+        ]
+    for i in range(40):
+        d = date(2025, 6, 1) + timedelta(days=i)
+        rows += [
+            {"LEAGUE": "l", "HOME_AWAY": "home", "GAME_DATE": d, "GF": 5, "GA": 5, "WDL": "D"},
+            {"LEAGUE": "l", "HOME_AWAY": "away", "GAME_DATE": d, "GF": 5, "GA": 5, "WDL": "D"},
+        ]
+    baselines = compute_league_baselines(pd.DataFrame(rows))
+
+    early = baselines.get("l", date(2025, 3, 1))
+    late = baselines.get("l", date(2026, 1, 1))
+    assert early.avg_goals == pytest.approx(0.0), "must not see the later high-scoring run"
+    assert late.avg_goals > early.avg_goals
+
+
+def test_league_baseline_is_none_before_any_match():
+    """No prior matches means no baseline — None, not a fabricated neutral value."""
+    from app.models_ml.league_baselines import compute_league_baselines
+
+    rows = [
+        {
+            "LEAGUE": "l",
+            "HOME_AWAY": "home",
+            "GAME_DATE": date(2025, 5, 1),
+            "GF": 1,
+            "GA": 1,
+            "WDL": "D",
+        },
+        {
+            "LEAGUE": "l",
+            "HOME_AWAY": "away",
+            "GAME_DATE": date(2025, 5, 1),
+            "GF": 1,
+            "GA": 1,
+            "WDL": "D",
+        },
+    ]
+    baselines = compute_league_baselines(pd.DataFrame(rows))
+    assert baselines.get("l", date(2025, 1, 1)) is None
+    assert baselines.get("unknown-league", date(2026, 1, 1)) is None
+
+
+def test_league_baseline_needs_no_league_column():
+    """Retrodiction builds its own game log without a LEAGUE column — must degrade, not raise."""
+    from app.models_ml.league_baselines import compute_league_baselines
+
+    rows = [{"HOME_AWAY": "home", "GAME_DATE": date(2025, 5, 1), "GF": 1, "GA": 1, "WDL": "D"}]
+    baselines = compute_league_baselines(pd.DataFrame(rows))
+    assert baselines.get("anything", date(2026, 1, 1)) is None

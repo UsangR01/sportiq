@@ -59,6 +59,8 @@ from datetime import date
 
 import pandas as pd
 
+from app.models_ml.league_baselines import league_baseline_from_db
+
 FEATURE_NAMES = (
     "attack_str_home",
     "attack_str_away",
@@ -95,6 +97,29 @@ FEATURE_NAMES = (
     "xg_for_away",
     "xg_against_away",
 )
+
+# MEASURED NEGATIVE RESULT — league_avg_goals / league_home_win_rate are deliberately NOT in
+# FEATURE_NAMES above, though app/models_ml/league_baselines.py still computes them and
+# assemble_from_game_log still returns them (unused keys are ignored, since the model selects
+# by FEATURE_NAMES).
+#
+# The reasoning for adding them was sound: the model pools five leagues with nothing telling
+# it which one a fixture belongs to, and those leagues genuinely differ (Brasileirao 2.411
+# goals/match vs MLS 2.930). Training with them made things measurably WORSE:
+#
+#   under-3.5 discrimination trend   z=+1.86 (p=0.062)  ->  z=-0.03 (p=0.979)
+#   1X2 accuracy                     0.4775             ->  0.4634
+#   Brier under 3.5                  0.2207             ->  0.2235
+#
+# The reliability buckets went from monotonic to inverted — the "least likely to go under"
+# bucket went under MOST often. Training here is deterministic (no subsampling, no seed, no
+# Optuna), so that is the features' effect, not run-to-run variance.
+#
+# Most likely cause: at 27 features on 5,188 training rows, two slow-moving inputs largely
+# redundant with attack_str/defence_str (which already encode scoring level per team) cost
+# more in variance than they contribute in signal. Kept, disabled and documented so the idea
+# is not retried blind — re-enable only alongside more training data or fewer correlated
+# features.
 
 # Corners-regressor-only additions (see module docstring) — never fed to Layer 1's goals
 # regressors or Layer 2's 1X2 classifier, only to app/models_ml/football.py's
@@ -288,6 +313,8 @@ def assemble_from_game_log(
     key_players_per_combined_home: float | None = None,
     key_players_per_combined_away: float | None = None,
     elo_diff: float | None = None,
+    league_avg_goals: float | None = None,
+    league_home_win_rate: float | None = None,
 ) -> dict:
     """games_df: one row per team per fixture (ml/training/collect_football_data.py's own
     shape — TEAM_ID/OPPONENT_ID/GAME_DATE/GF/GA/WDL/HOME_AWAY), analogous to nba_features.py's
@@ -340,6 +367,8 @@ def assemble_from_game_log(
         "elo_diff": elo_diff,
         "win_streak_home": _win_streak(home_games, as_of_date),
         "win_streak_away": _win_streak(away_games, as_of_date),
+        "league_avg_goals": league_avg_goals,
+        "league_home_win_rate": league_home_win_rate,
         "xg_for_home": xg_for_home,
         "xg_against_home": xg_against_home,
         "xg_for_away": xg_for_away,
@@ -466,6 +495,9 @@ async def assemble_from_live_db(db, fixture, home_features, away_features) -> di
         corners_for_home, corners_against_home = await _corners_rolling_live(db, home_team.id)
     if away_team:
         corners_for_away, corners_against_away = await _corners_rolling_live(db, away_team.id)
+    # Same expanding-window definition training uses, read from our own settled fixtures so
+    # the serving value is the same KIND of number the model was fitted on.
+    league_baseline = await league_baseline_from_db(db, fixture.league_id, fixture.kickoff_utc)
 
     return {
         "attack_str_home": home_features.attack_str if home_features else None,
@@ -512,6 +544,8 @@ async def assemble_from_live_db(db, fixture, home_features, away_features) -> di
         "xg_against_home": home_features.xg_against_5 if home_features else None,
         "xg_for_away": away_features.xg_for_5 if away_features else None,
         "xg_against_away": away_features.xg_against_5 if away_features else None,
+        "league_avg_goals": league_baseline.avg_goals if league_baseline else None,
+        "league_home_win_rate": league_baseline.home_win_rate if league_baseline else None,
         "elo_diff": elo_diff,
         "win_streak_home": home_features.win_streak if home_features else None,
         "win_streak_away": away_features.win_streak if away_features else None,

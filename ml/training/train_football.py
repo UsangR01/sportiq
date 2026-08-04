@@ -78,6 +78,7 @@ from sklearn.metrics import accuracy_score, log_loss  # noqa: E402
 
 from app.models_ml.elo import compute_elo_history  # noqa: E402
 from app.models_ml.football import FootballModel  # noqa: E402
+from app.models_ml.league_baselines import compute_league_baselines  # noqa: E402
 from app.models_ml.football_features import (  # noqa: E402
     CORNERS_FEATURE_NAMES,
     FEATURE_NAMES,
@@ -184,6 +185,9 @@ def build_training_examples(
     }
     played_names_index = index_played_names(lineups)
     elo_history = compute_elo_history(games)
+    # Same "walk the pooled log once" contract as Elo — a running per-league state that no
+    # individual fixture can re-derive without rescanning the whole log.
+    league_baselines = compute_league_baselines(games)
     # {(FIXTURE_ID, TEAM_ID): corner count} — training TARGET only for the new corners-
     # Poisson-regressors (app/models_ml/football.py); never a live feature (see
     # collect_football_data.py:collect_corner_stats's own docstring for why).
@@ -228,6 +232,8 @@ def build_training_examples(
             fixture_id,
         )
 
+        # home_row, not a bare `row` — this loop iterates groupby groups, not itertuples.
+        baseline = league_baselines.get(home_row.get("LEAGUE"), game_date)
         elo_home = elo_history.get((fixture_id, home_id))
         elo_away = elo_history.get((fixture_id, away_id))
         elo_diff = (
@@ -247,6 +253,8 @@ def build_training_examples(
             key_players_per_combined_home=key_per_home,
             key_players_per_combined_away=key_per_away,
             elo_diff=elo_diff,
+            league_avg_goals=(baseline.avg_goals if baseline else None),
+            league_home_win_rate=(baseline.home_win_rate if baseline else None),
         )
         features["label"] = LABEL_BY_CLASS[
             (
@@ -329,9 +337,14 @@ async def main_async() -> None:
     # feeds secondary features. A league with no lineups simply gets None key-player features
     # and contributes nothing to the corners regressors' training target — both already handled
     # (XGBoost's own missing-value handling; corners_by_fixture_team.get() returning None).
+    # LEAGUE is stamped on during the concat: the per-league parquets carry no league column
+    # of their own, so pooling them previously destroyed league identity entirely — which is
+    # precisely why the model could not tell a 2.41-goals-per-match league from a 2.93 one.
     games = pd.concat(
         [
-            pd.read_parquet(DATA_DIR / f"football_game_log_{league}.parquet")
+            pd.read_parquet(DATA_DIR / f"football_game_log_{league}.parquet").assign(
+                LEAGUE=league
+            )
             for league in LEAGUES
         ],
         ignore_index=True,
