@@ -96,6 +96,42 @@ TARGETS = [
     # so expect roughly half the fixtures to have no xG. Collected anyway because 2025 is the
     # season the held-out measurement runs on, which is exactly where coverage matters most.
     ("scottish_prem", "comp_6387", "25/26", 2025),
+    # The four remaining MVP-scope European leagues. All four measured 5/6 or 2/2 sampled
+    # matches carrying xG in EVERY season 22/23-25/26 — the best coverage of any league here,
+    # better than EPL's (which has nothing before 22/23).
+    #
+    # Two competition-id traps were hit resolving these, both worth knowing before adding a
+    # fifth: a substring match on "bundesliga" returns "2. Bundesliga" (the SECOND division,
+    # 308 fixtures/season and no xG), and "laliga" likewise matches "LaLiga 2". Country does
+    # not disambiguate either — both siblings are in the same country. The ids below are the
+    # top flights, confirmed by ranked matching (exact name wins, then shortest).
+    #
+    # Bundesliga and Ligue 1 both sample 5/6 rather than 6/6, and the miss is the SAME fixture
+    # every season: the one played after the regular season ends (Bundesliga's relegation
+    # playoff, which is why it lists 308 fixtures rather than the 306 an 18-team league plays).
+    # A real, bounded gap of ~2 fixtures/season, not a coverage problem.
+    #
+    # Ligue 1's start season is 2022 and NOT later, despite a first probe returning 0/2 for
+    # 23/24, 24/25 and 25/26: that was a sampling artifact from taking two consecutive matches
+    # off the head of page 1. Sampling six spread across each season returned 5/6 every time.
+    # Nearly 1,000 real fixtures would have been discarded on the narrower sample — when a
+    # league's coverage appears to VANISH in later seasons, suspect the sample before the data.
+    ("bundesliga", "comp_4643", "22/23", 2022),
+    ("bundesliga", "comp_4643", "23/24", 2023),
+    ("bundesliga", "comp_4643", "24/25", 2024),
+    ("bundesliga", "comp_4643", "25/26", 2025),
+    ("seriea", "comp_5840", "22/23", 2022),
+    ("seriea", "comp_5840", "23/24", 2023),
+    ("seriea", "comp_5840", "24/25", 2024),
+    ("seriea", "comp_5840", "25/26", 2025),
+    ("laliga", "comp_8814", "22/23", 2022),
+    ("laliga", "comp_8814", "23/24", 2023),
+    ("laliga", "comp_8814", "24/25", 2024),
+    ("laliga", "comp_8814", "25/26", 2025),
+    ("ligue1", "comp_0256", "22/23", 2022),
+    ("ligue1", "comp_0256", "23/24", 2023),
+    ("ligue1", "comp_0256", "24/25", 2024),
+    ("ligue1", "comp_0256", "25/26", 2025),
 ]
 
 
@@ -226,6 +262,25 @@ def collect_raw(leagues: list[str]) -> dict:
 
 
 async def _team_names(league_slug: str) -> dict[str, str]:
+    """external team id -> name, for resolve()'s ambiguity tiebreak.
+
+    The DB is only one source and is empty for any league whose fixtures have never been
+    ingested — which is the normal state for a league added ahead of its season opening. That
+    is not a rare case: measured across the pooled leagues, 15-23% of fixtures share a
+    (date, home goals, away goals) key with another fixture, and with no names to rank on,
+    every one of those is dropped by the too_weak guard. So the collected parquet
+    (collect_football_data.py:_fetch_teams, same call that already fetched team codes) is
+    merged in, with the DB winning where both have a name — the DB reflects whatever ingestion
+    actually created, which is the identity the rest of the system uses.
+    """
+    names: dict[str, str] = {}
+    parquet = DATA_DIR / f"football_team_names_{league_slug}.parquet"
+    if parquet.exists():
+        frame = pd.read_parquet(parquet)
+        names.update(
+            {str(t): str(n) for t, n in zip(frame["team_id"], frame["name"], strict=False)}
+        )
+
     async with async_session_factory() as db:
         rows = (
             await db.execute(
@@ -234,7 +289,11 @@ async def _team_names(league_slug: str) -> dict[str, str]:
                 .where(League.slug == league_slug)
             )
         ).all()
-    return {str(external_id): name for external_id, name in rows}
+    names.update({str(external_id): name for external_id, name in rows})
+    if not names:
+        print(f"{league_slug}: WARNING no team names from DB or parquet — ambiguous fixtures "
+              f"will be dropped rather than resolved by name")
+    return names
 
 
 def resolve(league: str, raw: dict, names: dict[str, str]) -> pd.DataFrame | None:

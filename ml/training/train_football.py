@@ -107,7 +107,24 @@ ARTIFACT_DIR = ML_DIR / "artifacts"
 # ~2.93 goals/match); it is that Brasileirao is a genuine low-scoring outlier (2.41), so
 # pooling only EPL+Brasileirao biased the model toward P(under 3.5)~0.79 when MLS/CSL truly
 # sit at ~0.66. Adding them rebalances the pool toward the real distribution.
-LEAGUES = ["epl", "brasileirao", "mls", "csl", "scottish_prem"]
+#
+# The four European leagues below join for a different reason: not to correct a measured
+# distribution problem, but because they are seeded, ingest fixtures and odds today, and their
+# seasons open mid-to-late August 2026 — at which point this model starts serving leagues it
+# has never seen. They are safe to pool precisely because they are NOT outliers (~2.5-3.2
+# goals/match against EPL's 2.93), which matters given league-identity features were built,
+# measured, and regressed: pooling means one shared prior, so what joins it has to fit it.
+LEAGUES = [
+    "epl",
+    "brasileirao",
+    "mls",
+    "csl",
+    "scottish_prem",
+    "bundesliga",
+    "seriea",
+    "laliga",
+    "ligue1",
+]
 
 # 5-fold out-of-fold Layer 1 predictions for Layer 2 training (see oof_xg). Deterministic
 # fold order; 5 is the standard choice and keeps each fold at ~1,000 training fixtures.

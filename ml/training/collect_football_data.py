@@ -71,6 +71,23 @@ LEAGUE_CONFIGS: dict[str, dict] = {
     "mls": {"league_id": LEAGUE_IDS["mls"], "rundown_sport_id": 10},
     "csl": {"league_id": LEAGUE_IDS["csl"], "rundown_sport_id": None},
     "scottish_prem": {"league_id": LEAGUE_IDS["scottish_prem"], "rundown_sport_id": None},
+    # The four remaining MVP-scope European leagues. Unlike the three above, these are NOT
+    # being added to fix a measured out-of-distribution problem — they sit at roughly 2.5-3.2
+    # goals/match against EPL's 2.93, so they are not scoring outliers the way Brasileirão
+    # (2.41) was. They are added because they are seeded, ingest fixtures and odds today, and
+    # are about to be served predictions by a model that has never seen them: their seasons
+    # open mid-to-late August 2026, La Liga first.
+    #
+    # This cannot be solved by telling the model which league a fixture is from — league
+    # identity features were built, measured, and REGRESSED (O/U trend z fell to -0.03), so
+    # pooling means one shared prior and the leagues joining it need to fit that prior. These
+    # do; that is the reason they are a safe addition and Brasileirão needed its own argument.
+    #
+    # All four have real TheRundown coverage, unlike most recent additions.
+    "bundesliga": {"league_id": LEAGUE_IDS["bundesliga"], "rundown_sport_id": 13},
+    "seriea": {"league_id": LEAGUE_IDS["seriea"], "rundown_sport_id": 15},
+    "laliga": {"league_id": LEAGUE_IDS["laliga"], "rundown_sport_id": 14},
+    "ligue1": {"league_id": LEAGUE_IDS["ligue1"], "rundown_sport_id": 12},
 }
 
 # Collection is stageable because the per-fixture endpoints genuinely can't all run in one
@@ -83,6 +100,14 @@ LEAGUE_CONFIGS: dict[str, dict] = {
 # A league with a game log but no lineups still trains fine: its key-player features come
 # through as None, which the model's own missing-value handling covers — strictly better than
 # having no data for that league at all.
+#
+# "lineups" is now DEAD WEIGHT for the 1X2/goals model and should not be run for a newly-added
+# league: the four key-player features it feeds were pruned from FEATURE_NAMES (they measured
+# at ~0.000 importance and the pruned vector beat the full one), so train_football.py still
+# loads lineups but the model never sees them. At 1 call per fixture this is the single most
+# expensive stage, so skipping it is what makes adding a league affordable — roughly 5,600
+# calls saved across the four European leagues. Left in place rather than deleted because
+# removing the key-player pipeline end to end is its own tracked change.
 STAGES = ("gamelog", "corners", "lineups", "odds")
 
 LINEUP_COLUMNS = ["FIXTURE_ID", "TEAM_ID", "PLAYER_NAME"]
@@ -119,33 +144,57 @@ def _football_client() -> httpx.AsyncClient:
     )
 
 
-async def _fetch_team_codes(client: httpx.AsyncClient, league_id: int, season: int) -> dict[str, str]:
-    """team external id (str) -> API-Football's own 3-letter `code` field — used as a
-    best-effort join key against TheRundown's teams_normalized.abbreviation for the odds
-    sample below. Not verified to match TheRundown's convention exactly for every club (the
-    codebase's existing CLAUDE.md note about abbreviation consistency only ever confirmed
-    BallDontLie vs TheRundown for NBA) — a best-effort match, not a guaranteed one; unmatched
-    fixtures simply get no real odds/moneyline feature, same graceful-miss behavior as every
-    other cross-provider join in this codebase."""
+async def _fetch_teams(
+    client: httpx.AsyncClient, league_id: int, season: int
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Returns (codes, names), both keyed by team external id (str), from ONE /teams call.
+
+    `code` is API-Football's own 3-letter field — a best-effort join key against TheRundown's
+    teams_normalized.abbreviation for the odds sample below. Not verified to match TheRundown's
+    convention exactly for every club (the codebase's existing CLAUDE.md note about
+    abbreviation consistency only ever confirmed BallDontLie vs TheRundown for NBA) — unmatched
+    fixtures simply get no real odds/moneyline feature, the same graceful-miss behavior as
+    every other cross-provider join here.
+
+    `name` is captured because collect_thestatsapi_xg.py's resolve step needs it as the
+    tiebreak when several fixtures share a (date, home goals, away goals) key — measured at
+    15-23% of fixtures per league, so it is not a rare edge case. That step previously read
+    names from the DB alone, which silently yields NOTHING for a league whose fixtures have
+    never been ingested (all four European leagues added here have zero Team rows: their
+    seasons have not started). With no names the similarity score is 0.0, every ambiguous
+    fixture trips the too_weak guard, and roughly a fifth of real xG is dropped. Same call,
+    same quota — the response already carried this field.
+    """
     response = await client.get("/teams", params={"league": league_id, "season": season})
     response.raise_for_status()
-    return {
-        str(row["team"]["id"]): row["team"]["code"]
-        for row in response.json().get("response", [])
-        if row["team"].get("code")
-    }
+    codes: dict[str, str] = {}
+    names: dict[str, str] = {}
+    for row in response.json().get("response", []):
+        team = row["team"]
+        team_id = str(team["id"])
+        if team.get("code"):
+            codes[team_id] = team["code"]
+        if team.get("name"):
+            names[team_id] = team["name"]
+    return codes, names
 
 
-async def collect_game_log(league_slug: str, league_id: int) -> tuple[pd.DataFrame, dict[str, str]]:
+async def collect_game_log(
+    league_slug: str, league_id: int
+) -> tuple[pd.DataFrame, dict[str, str], dict[str, str]]:
     """One row per team per completed fixture — the football analogue of
     collect_nba_data.py's leaguegamelog pull, built from API-Football's /fixtures rather than
-    nba_api (football has no equivalent free/offline bulk endpoint). Also returns a
-    team_id -> code mapping (see _fetch_team_codes) for the odds-matching step below."""
+    nba_api (football has no equivalent free/offline bulk endpoint). Also returns team_id ->
+    code and team_id -> name mappings (see _fetch_teams) for the odds-matching step below and
+    for xG resolution respectively."""
     rows = []
     team_codes: dict[str, str] = {}
+    team_names: dict[str, str] = {}
     async with _football_client() as client:
         for season in SEASONS:
-            team_codes.update(await _fetch_team_codes(client, league_id, season))
+            season_codes, season_names = await _fetch_teams(client, league_id, season)
+            team_codes.update(season_codes)
+            team_names.update(season_names)
             print(f"fetching {league_slug} {season}-{season + 1} fixtures...")
             response = await _get_with_retry(
                 client,
@@ -204,7 +253,7 @@ async def collect_game_log(league_slug: str, league_id: int) -> tuple[pd.DataFra
                 )
             await asyncio.sleep(0.3)  # polite pacing, mirrors collect_nba_data.py
 
-    return pd.DataFrame(rows), team_codes
+    return pd.DataFrame(rows), team_codes, team_names
 
 
 async def collect_lineups(
@@ -352,17 +401,25 @@ def collect_league(league_slug: str, stages: tuple[str, ...] = STAGES) -> None:
 
     games_path = DATA_DIR / f"football_game_log_{league_slug}.parquet"
     codes_path = DATA_DIR / f"football_team_codes_{league_slug}.parquet"
-    if games_path.exists():
+    names_path = DATA_DIR / f"football_team_names_{league_slug}.parquet"
+    if games_path.exists() and names_path.exists():
         print(f"{games_path} already exists, skipping API-Football re-fetch")
         games = pd.read_parquet(games_path)
     elif "gamelog" in stages:
-        games, team_codes = asyncio.run(collect_game_log(league_slug, league_id))
+        # A game log collected before team names were captured re-runs here deliberately: the
+        # names are what stop ~20% of real xG being dropped as ambiguous (see _fetch_teams),
+        # and re-fetching is only ~1 call per league-season.
+        games, team_codes, team_names = asyncio.run(collect_game_log(league_slug, league_id))
         games.to_parquet(games_path, index=False)
         print(f"saved {len(games)} game-log rows to {games_path}")
         pd.DataFrame([{"team_id": k, "code": v} for k, v in team_codes.items()]).to_parquet(
             codes_path, index=False
         )
         print(f"saved {len(team_codes)} team codes to {codes_path}")
+        pd.DataFrame([{"team_id": k, "name": v} for k, v in team_names.items()]).to_parquet(
+            names_path, index=False
+        )
+        print(f"saved {len(team_names)} team names to {names_path}")
     else:
         # Every later stage needs the fixture ids the game log provides.
         print(f"{league_slug}: no game log yet and 'gamelog' not in stages — skipping league")
