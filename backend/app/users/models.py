@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, String, func
+from sqlalchemy import DateTime, Enum, Float, ForeignKey, Index, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -61,3 +61,38 @@ class UserPreference(Base):
         server_default="SYSTEM",
         nullable=False,
     )
+
+
+class WatchlistItem(Base):
+    """A fixture a user saved to follow (PRD PICK-07).
+
+    Not in the TDD §2.1 schema listing — §5.4's T-60-minute kickoff reminder requires it, and
+    app/workers/notify_users.py:notify_kickoff_reminder has been a NotImplementedError stub
+    purely because there was nowhere to read "who wants telling about this fixture" from.
+
+    Authenticated users only, deliberately. A guest session is device-bound state in Redis with
+    a 24h TTL and no PII; a watchlist is durable and drives a push notification, which needs a
+    push token that only an account carries. Guests get the existing soft auth prompt instead.
+    """
+
+    __tablename__ = "watchlist_items"
+    __table_args__ = (
+        # Saving the same fixture twice is a no-op, not a second row — the endpoint is
+        # idempotent so a double tap on a flaky connection cannot produce two reminders.
+        UniqueConstraint("user_id", "fixture_id", name="uq_watchlist_user_fixture"),
+        # The reminder worker's own query shape: every watcher of one fixture.
+        Index("ix_watchlist_fixture", "fixture_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    fixture_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("fixtures.id", ondelete="CASCADE"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Set once the T-60 reminder actually goes out, so a re-run of the scheduler cannot notify
+    # the same user twice about the same fixture — the same idempotency guard style as
+    # _maybe_settle_outcome. NULL means "not yet reminded".
+    reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

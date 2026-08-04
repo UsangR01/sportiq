@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel
@@ -28,3 +29,27 @@ class UserPreferencesUpdate(BaseModel):
 class PushTokenUpdate(BaseModel):
     # None clears the token (device disabled push notifications) — see PUT /user/push-token.
     expo_push_token: str | None
+
+
+class WatchlistAdd(BaseModel):
+    fixture_id: uuid.UUID
+
+
+class WatchlistItemResponse(BaseModel):
+    """The saved row plus enough fixture detail to render a list without a second call.
+
+    Deliberately NOT the full FixtureSummary: that carries best_pick/all_market_picks, which
+    are computed per request across every market and would make listing a watchlist as
+    expensive as loading the feed. A client wanting live odds for a saved fixture already has
+    GET /fixtures/{id}.
+    """
+
+    fixture_id: uuid.UUID
+    sport_slug: str
+    league_slug: str
+    home_team: str
+    away_team: str
+    kickoff_utc: datetime
+    kickoff_is_estimated: bool = False
+    status: str
+    created_at: datetime
