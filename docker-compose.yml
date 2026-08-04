@@ -1,3 +1,10 @@
+# Ports are published on the explicit IPv4 loopback rather than the bare "5432:5432" form.
+# Bare form publishes on 0.0.0.0, which exposes the database to the local network AND leaves
+# the host's own "localhost" resolving to IPv6 ::1 with nothing listening there — on Windows
+# that is the default resolution order, so every host->container connection is refused. That
+# cost a long diagnosis once: 61 pytest errors, API 500s and failed exports, with no error
+# anywhere naming DNS. Binding 127.0.0.1 explicitly is both the narrower exposure and the
+# unambiguous address. See backend/.env.example, which pins the same address.
 services:
   postgres:
     image: postgres:16
@@ -6,14 +13,14 @@ services:
       POSTGRES_PASSWORD: password
       POSTGRES_DB: sportiq
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - sportiq_postgres_data:/var/lib/postgresql/data
 
   redis:
     image: redis:7
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
 
 volumes:
   sportiq_postgres_data:
