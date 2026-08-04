@@ -1,10 +1,10 @@
-# Render Blueprint — SportIQ backend (TDD §7).
+# Render Blueprint — SportPIQ backend (TDD §7).
 #
 # Three services off ONE image (backend/Dockerfile), plus managed Postgres and Redis:
 #
-#   sportiq-api     FastAPI under gunicorn/uvicorn workers
-#   sportiq-worker  Celery worker — runs the ingest/inference tasks
-#   sportiq-beat    Celery beat — DISPATCHES them on a schedule
+#   sportpiq-api     FastAPI under gunicorn/uvicorn workers
+#   sportpiq-worker  Celery worker — runs the ingest/inference tasks
+#   sportpiq-beat    Celery beat — DISPATCHES them on a schedule
 #
 # Worker and beat are separate services on purpose. Beat only schedules; the worker only
 # executes. Ship the worker alone and everything looks healthy while nothing whatsoever runs —
@@ -23,7 +23,12 @@
 # run_task() helper was written to be safe under either way.
 
 databases:
-  - name: sportiq-db
+  # databaseName/user deliberately keep the old spelling, and this is not a missed rename: they
+  # match backend/app/core/config.py's defaults and the local docker-compose, so renaming them
+  # would fork dev from production for two strings no user or store ever sees. The Docker volume
+  # is named after them locally, and renaming that recreates it EMPTY — losing every ingested
+  # fixture, prediction and Elo rating. Not worth it for cosmetics.
+  - name: sportpiq-db
     databaseName: sportiq
     user: sportiq_user
     plan: basic-256mb
@@ -32,7 +37,7 @@ databases:
 services:
   # ---------------------------------------------------------------- Redis (broker + cache)
   - type: keyvalue
-    name: sportiq-redis
+    name: sportpiq-redis
     plan: starter
     ipAllowList: []          # private network only; nothing outside Render should reach this
     maxmemoryPolicy: noeviction  # Celery is a BROKER here, not just a cache: evicting keys
@@ -40,7 +45,7 @@ services:
 
   # ---------------------------------------------------------------- FastAPI
   - type: web
-    name: sportiq-api
+    name: sportpiq-api
     runtime: docker
     plan: starter
     dockerfilePath: ./backend/Dockerfile
@@ -52,12 +57,12 @@ services:
     envVars: &shared_env
       - key: DATABASE_URL
         fromDatabase:
-          name: sportiq-db
+          name: sportpiq-db
           property: connectionString
       - key: REDIS_URL
         fromService:
           type: keyvalue
-          name: sportiq-redis
+          name: sportpiq-redis
           property: connectionString
       - key: JWT_SECRET_KEY
         generateValue: true   # PyJWT rejects an empty HMAC key outright rather than merely
@@ -88,7 +93,7 @@ services:
 
   # ---------------------------------------------------------------- Celery worker
   - type: worker
-    name: sportiq-worker
+    name: sportpiq-worker
     runtime: docker
     plan: starter
     dockerfilePath: ./backend/Dockerfile
@@ -98,7 +103,7 @@ services:
 
   # ---------------------------------------------------------------- Celery beat
   - type: worker
-    name: sportiq-beat
+    name: sportpiq-beat
     runtime: docker
     plan: starter
     dockerfilePath: ./backend/Dockerfile

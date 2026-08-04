@@ -245,7 +245,7 @@ export default function PicksScreen() {
             <Text className="mt-8 text-center text-gray-400">Loading picks…</Text>
           ) : fixturesQuery.isError ? (
             <Text className="mt-8 text-center text-red-500">
-              Couldn&apos;t reach the SportIQ API. Pull to retry.
+              Couldn&apos;t reach the SportPIQ API. Pull to retry.
             </Text>
           ) : (
             <Text className="mt-8 text-center text-gray-400">

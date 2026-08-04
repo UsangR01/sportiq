@@ -3,7 +3,7 @@
 # hides: missing runtime deps, a missing env var, a role that never actually starts.
 #
 # Deliberately NOT the deployed database. A soak that writes to real data is not a soak.
-name: sportiq-soak
+name: sportpiq-soak
 
 services:
   db:
@@ -28,7 +28,7 @@ services:
       retries: 20
 
   migrate:
-    image: sportiq-api:soak
+    image: sportpiq-api:soak
     command: ["alembic", "upgrade", "head"]
     environment: &env
       DATABASE_URL: postgresql+asyncpg://sportiq_user:password@db:5432/sportiq
@@ -42,21 +42,21 @@ services:
       redis: {condition: service_healthy}
 
   api:
-    image: sportiq-api:soak
+    image: sportpiq-api:soak
     environment: *env
     ports: ["127.0.0.1:8010:8000"]   # 8010, so the dev uvicorn on 8000 keeps working
     depends_on:
       migrate: {condition: service_completed_successfully}
 
   worker:
-    image: sportiq-api:soak
+    image: sportpiq-api:soak
     command: ["celery", "-A", "app.workers.celery", "worker", "--loglevel=info", "--concurrency=2"]
     environment: *env
     depends_on:
       migrate: {condition: service_completed_successfully}
 
   beat:
-    image: sportiq-api:soak
+    image: sportpiq-api:soak
     command: ["celery", "-A", "app.workers.celery", "beat", "--loglevel=info"]
     environment: *env
     depends_on:
