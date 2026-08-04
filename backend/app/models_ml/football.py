@@ -34,17 +34,16 @@ class FootballModel(BaseModel):
     # — everything goal-rate-shaped (attack/defence/win-rate) is deliberately left out of
     # Layer 2's own input since xG already captures that signal; feeding it twice would just
     # be redundant, correlated input to the classifier.
+    # Kept in step with football_features.FEATURE_NAMES' measured prune — the key-player
+    # and moneyline features were dropped there (identical 1X2 accuracy, better Over/Under
+    # discrimination), so feeding them to Layer 2 would reintroduce exactly the correlated
+    # inputs the prune removed.
     LAYER2_CONTEXT_FEATURES = (
         "form_pts_home",
         "form_pts_away",
         "h2h_win_rate_home",
         "h2h_avg_goals_scored_home",
         "h2h_avg_goals_allowed_home",
-        "key_players_available_home",
-        "key_players_available_away",
-        "key_players_per_combined_home",
-        "key_players_per_combined_away",
-        "moneyline_implied_prob_home",
         "elo_diff",
         "win_streak_home",
         "win_streak_away",

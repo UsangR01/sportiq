@@ -62,24 +62,30 @@ import pandas as pd
 from app.models_ml.league_baselines import league_baseline_from_db
 
 FEATURE_NAMES = (
+    # PRUNED, measured. The seven features below were dropped after a like-for-like run on all
+    # 8,718 examples: 1X2 accuracy was IDENTICAL (0.4656 either way) while Over/Under
+    # discrimination improved materially — trend z +2.82 -> +3.32, p 0.0047 -> 0.0009.
+    # Two independent harnesses agreed on the direction. Same lesson as the league-baseline
+    # experiment: on ~5,200 training rows, correlated features cost more in variance than they
+    # contribute in signal.
+    #   moneyline_implied_prob_home  0.7% populated, measured importance 0.000 — dead weight
+    #   key_players_available_*      also costs real per-fixture API quota to maintain
+    #   key_players_per_combined_*
+    #   home_win_rate_home           largely restated by form_pts / elo_diff
+    #   away_win_rate_away
+    # assemble_from_game_log and assemble_from_live_db still RETURN all of them, so nothing
+    # downstream breaks and re-enabling is a one-line change; they are simply not selected.
     "attack_str_home",
     "attack_str_away",
     "defence_str_home",
     "defence_str_away",
     "form_pts_home",
     "form_pts_away",
-    "home_win_rate_home",
-    "away_win_rate_away",
     "rest_days_home",
     "rest_days_away",
     "h2h_win_rate_home",
     "h2h_avg_goals_scored_home",
     "h2h_avg_goals_allowed_home",
-    "key_players_available_home",
-    "key_players_available_away",
-    "key_players_per_combined_home",
-    "key_players_per_combined_away",
-    "moneyline_implied_prob_home",
     "elo_diff",
     "win_streak_home",
     "win_streak_away",
