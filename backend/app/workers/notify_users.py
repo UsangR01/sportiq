@@ -129,7 +129,7 @@ async def _notify_new_pick(fixture_id: uuid.UUID, prediction_id: uuid.UUID) -> N
 @celery_app.task(name="app.workers.notify_users.notify_new_pick")
 def notify_new_pick(fixture_id: str, prediction_id: str) -> None:
     """Queued by run_predictions when a new HIGH-confidence prediction is generated (TDD
-    §5.4). Deep link on tap: sportiq://fixture/{fixture_id}, handled by Expo Router."""
+    §5.4). Deep link on tap: sportpiq://fixture/{fixture_id}, handled by Expo Router."""
     run_task(_notify_new_pick(uuid.UUID(fixture_id), uuid.UUID(prediction_id)))
 
 
@@ -186,7 +186,7 @@ async def _notify_kickoff_reminder(fixture_id: uuid.UUID) -> None:
                 user,
                 title="Starting soon",
                 body=f"{matchup} kicks off in about an hour.",
-                data={"fixture_id": str(fixture_id), "url": f"sportiq://fixture/{fixture_id}"},
+                data={"fixture_id": str(fixture_id), "url": f"sportpiq://fixture/{fixture_id}"},
             )
             item.reminded_at = datetime.now(UTC)
         await db.commit()

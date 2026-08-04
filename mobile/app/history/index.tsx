@@ -23,7 +23,7 @@ export default function HistoryScreen() {
         </Text>
       )}
       {historyQuery.isError && !isNotImplemented && (
-        <Text className="text-center text-red-500">Couldn&apos;t reach the SportIQ API.</Text>
+        <Text className="text-center text-red-500">Couldn&apos;t reach the SportPIQ API.</Text>
       )}
     </View>
   );

@@ -18,7 +18,7 @@
       "distribution": "internal",
       "channel": "preview",
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://sportiq-api.onrender.com"
+        "EXPO_PUBLIC_API_URL": "https://sportpiq-api.onrender.com"
       },
       "android": {
         "buildType": "apk"
@@ -28,7 +28,7 @@
       "channel": "production",
       "autoIncrement": true,
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://sportiq-api.onrender.com"
+        "EXPO_PUBLIC_API_URL": "https://sportpiq-api.onrender.com"
       }
     }
   },
