@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import uuid
+from datetime import UTC, datetime
 
 import requests
 from exponent_server_sdk import (
@@ -14,11 +15,11 @@ from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.database import async_session_factory
-from app.fixtures.models import Fixture
+from app.fixtures.models import Fixture, FixtureStatus, Team
 from app.odds.models import Odds
 from app.picks.service import best_available_odds, best_outcome
 from app.predictions.models import ConfidenceTier, Prediction
-from app.users.models import User, UserPreference
+from app.users.models import User, UserPreference, WatchlistItem
 from app.workers.celery import celery_app, run_task
 
 logger = logging.getLogger(__name__)
@@ -132,9 +133,72 @@ def notify_new_pick(fixture_id: str, prediction_id: str) -> None:
     run_task(_notify_new_pick(uuid.UUID(fixture_id), uuid.UUID(prediction_id)))
 
 
+async def _notify_kickoff_reminder(fixture_id: uuid.UUID) -> None:
+    async with async_session_factory() as db:
+        fixture = (
+            await db.execute(select(Fixture).where(Fixture.id == fixture_id))
+        ).scalar_one_or_none()
+        if fixture is None:
+            return
+        # A postponed or already-finished fixture has nothing to remind anyone about. Worth
+        # checking at send time rather than trusting the schedule: this task is queued with an
+        # eta up to an hour out, and postponements are real — four Brasileirão fixtures were
+        # postponed on one matchday during testing.
+        if fixture.status is not FixtureStatus.SCHEDULED:
+            logger.info(
+                "Skipping kickoff reminder for %s — status is %s", fixture_id, fixture.status
+            )
+            return
+        # An estimated kickoff is a DATE, not a time (see balldontlie_tennis.py) — "starts in
+        # an hour" off a midnight placeholder would simply be wrong, so those are skipped
+        # rather than sent with a fabricated precision.
+        if fixture.kickoff_is_estimated:
+            logger.info(
+                "Skipping kickoff reminder for %s — kickoff is only an estimate", fixture_id
+            )
+            return
+
+        home = (
+            await db.execute(select(Team).where(Team.id == fixture.home_team_id))
+        ).scalar_one_or_none()
+        away = (
+            await db.execute(select(Team).where(Team.id == fixture.away_team_id))
+        ).scalar_one_or_none()
+        matchup = f"{home.name if home else '?'} vs {away.name if away else '?'}"
+
+        rows = (
+            await db.execute(
+                select(WatchlistItem, User)
+                .join(User, User.id == WatchlistItem.user_id)
+                .where(
+                    WatchlistItem.fixture_id == fixture_id,
+                    # reminded_at is the idempotency guard: Celery retries and an accidental
+                    # re-queue must not notify the same person twice about one fixture.
+                    WatchlistItem.reminded_at.is_(None),
+                    User.expo_push_token.isnot(None),
+                )
+            )
+        ).all()
+
+        for item, user in rows:
+            await _send_push(
+                db,
+                user,
+                title="Starting soon",
+                body=f"{matchup} kicks off in about an hour.",
+                data={"fixture_id": str(fixture_id), "url": f"sportiq://fixture/{fixture_id}"},
+            )
+            item.reminded_at = datetime.now(UTC)
+        await db.commit()
+        logger.info("Kickoff reminder for %s sent to %d watcher(s)", fixture_id, len(rows))
+
+
 @celery_app.task(name="app.workers.notify_users.notify_kickoff_reminder")
 def notify_kickoff_reminder(fixture_id: str) -> None:
-    """T-60 min kickoff reminder for fixtures in a user's watchlist, scheduled via Celery's
-    eta parameter (TDD §5.4). Not implemented — no watchlist table exists in the TDD §2.1
-    schema (PICK-07 "save to watchlist" is a Could-Have, Phase 2 requirement)."""
-    raise NotImplementedError("No watchlist table exists yet — see PICK-07 (Phase 2)")
+    """T-60 min kickoff reminder for everyone who saved this fixture (TDD §5.4, PRD PICK-07).
+
+    Real now that watchlist_items exists — it was a NotImplementedError only because there was
+    nowhere to read the recipients from. Queued with Celery's eta by
+    ingest_fixtures.py:_queue_kickoff_reminders.
+    """
+    run_task(_notify_kickoff_reminder(uuid.UUID(fixture_id)))

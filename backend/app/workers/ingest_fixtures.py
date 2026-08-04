@@ -1,8 +1,9 @@
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.base import FixturePayload, TeamStats
 from app.adapters.factory import AdapterFactory
@@ -14,6 +15,7 @@ from app.models_ml.elo import INITIAL_ELO, apply_match_result
 from app.models_ml.key_player_availability import get_key_player_availability
 from app.predictions.models import Prediction
 from app.sports.models import League, Sport
+from app.users.models import WatchlistItem
 from app.workers.celery import celery_app, run_task
 
 logger = logging.getLogger(__name__)
@@ -346,6 +348,8 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
             if has_prediction is None:
                 run_predictions.delay(str(fixture.id))
 
+        await _queue_kickoff_reminders(db, upcoming)
+
     # Retrodicted predictions for newly-backfilled completed fixtures (TDD has no equivalent
     # step — added so the Home feed can show "what the model would have called" alongside a
     # real final score). Football and tennis for now — see app/workers/backfill_predictions.py
@@ -401,3 +405,55 @@ async def _ingest_fixtures() -> None:
 def ingest_fixtures() -> None:
     """Celery beat triggers this daily at 02:00 UTC (TDD §2.3)."""
     run_task(_ingest_fixtures())
+
+
+# How long before kickoff the reminder fires (TDD §5.4).
+KICKOFF_REMINDER_MINUTES = 60
+
+
+async def _queue_kickoff_reminders(db: AsyncSession, upcoming: list[Fixture]) -> None:
+    """Schedule the T-60 push for any watched fixture that has not been reminded yet.
+
+    Queued with Celery's `eta` rather than polled, so one task sleeps until its own kickoff
+    instead of a scheduler waking every few minutes to ask whether anything is due.
+
+    Only fixtures somebody actually saved are queued: a task per fixture regardless would be
+    thousands of no-ops a day, since the overwhelming majority of fixtures are on nobody's
+    watchlist. reminded_at is the idempotency guard at SEND time; this is the cheaper guard at
+    QUEUE time, so a daily re-run does not stack duplicate etas for the same fixture.
+    """
+    if not upcoming:
+        return
+    from app.workers.notify_users import notify_kickoff_reminder
+
+    now = datetime.now(UTC)
+    by_id = {f.id: f for f in upcoming}
+    watched = (
+        (
+            await db.execute(
+                select(WatchlistItem.fixture_id)
+                .where(
+                    WatchlistItem.fixture_id.in_(by_id.keys()),
+                    WatchlistItem.reminded_at.is_(None),
+                )
+                .distinct()
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    for fixture_id in watched:
+        fixture = by_id[fixture_id]
+        # An estimated kickoff is a date, not a time — "starts in an hour" off a midnight
+        # placeholder would be wrong, so it is skipped here as well as at send time.
+        if fixture.kickoff_is_estimated or fixture.kickoff_utc is None:
+            continue
+        kickoff = fixture.kickoff_utc
+        if kickoff.tzinfo is None:
+            kickoff = kickoff.replace(tzinfo=UTC)
+        eta = kickoff - timedelta(minutes=KICKOFF_REMINDER_MINUTES)
+        # Already inside the window (a fixture saved 20 minutes before kickoff): send now
+        # rather than scheduling an eta in the past, which Celery would run immediately anyway
+        # but less legibly.
+        notify_kickoff_reminder.apply_async(args=[str(fixture_id)], eta=eta if eta > now else None)
