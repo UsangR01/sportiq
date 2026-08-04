@@ -11,6 +11,11 @@ redis>=5.0
 
 # Task queue
 celery[redis]>=5.4
+# Provides watchmedo, used by scripts/dev_worker.py to restart the Celery worker on code
+# changes. Celery has no --reload of its own (removed in 4.x), so without this a worker keeps
+# serving the code it launched with — which silently produced wrong data four separate times
+# in one day, each time looking like a broken fix rather than a stale process.
+watchdog>=4.0
 
 # Config, auth, validation
 pydantic[email]>=2.9

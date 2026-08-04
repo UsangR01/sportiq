@@ -1,11 +1,16 @@
 import asyncio
+import logging
 from collections.abc import Coroutine
+from datetime import UTC, datetime
 from typing import Any
 
 from celery import Celery
 from celery.schedules import crontab
+from celery.signals import worker_ready
 
 from app.core.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
@@ -95,3 +100,46 @@ celery_app.conf.beat_schedule = {
         "schedule": 1800.0,
     },
 }
+
+
+# --- stale-worker detection -------------------------------------------------------------
+# A Celery worker serves whatever it imported at launch and has no --reload of its own, so it
+# can silently fall behind the files on disk. scripts/dev_worker.py prevents that in
+# development by restarting on change, but nothing protects a worker started by hand, and in
+# production the risk is a deploy that restarts the web service without restarting the worker.
+#
+# The worker cannot answer HTTP, so it publishes what it loaded to Redis at startup instead —
+# giving scripts/check_stale.py a single place to compare every process against disk.
+WORKER_VERSION_KEY = "sportiq:worker:code_version"
+
+
+@worker_ready.connect
+def _publish_code_version(sender=None, **_kwargs) -> None:
+    """Record this worker's loaded code version, best-effort.
+
+    Never allowed to stop a worker starting: a diagnostic that can take the queue down is
+    worse than the staleness it reports."""
+    import json
+
+    from redis import Redis
+
+    from app.core.code_version import loaded_code_version
+
+    version = loaded_code_version()
+    payload = {
+        **version.as_dict(),
+        "hostname": getattr(getattr(sender, "hostname", None), "__str__", lambda: "?")(),
+        "started_at": datetime.now(UTC).isoformat(),
+    }
+    try:
+        client = Redis.from_url(get_settings().redis_url)
+        client.set(WORKER_VERSION_KEY, json.dumps(payload))
+        client.close()
+    except Exception:  # noqa: BLE001 - diagnostics must never break startup
+        logger.warning("could not publish worker code version to Redis", exc_info=True)
+    logger.info(
+        "celery worker code version: fingerprint=%s git=%s dirty=%s",
+        version.fingerprint,
+        version.git_sha,
+        version.git_dirty,
+    )
