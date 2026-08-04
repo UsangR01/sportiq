@@ -6,6 +6,15 @@ export interface DropdownOption {
   label: string;
 }
 
+/** Shared width for the sport and status triggers, which sit directly above one another.
+ *
+ * Both would otherwise size to their own label — "Football" against "Status" — leaving two
+ * stacked controls of visibly different widths and a ragged left edge. A fixed width keeps
+ * the column straight whatever is selected, since both labels change with the selection
+ * ("All"/"Tennis", "Status"/"Upcoming"). Wide enough for every label in use; the longest
+ * ("NBA Basketball") truncates to one line rather than widening the control. */
+export const FILTER_TRIGGER_WIDTH = "w-[132px]";
+
 interface Props {
   /** Trigger text — the active option's label, or a placeholder when nothing is selected. */
   triggerLabel: string;

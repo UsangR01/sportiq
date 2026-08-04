@@ -1,4 +1,8 @@
-import { DropdownMenu, type DropdownOption } from "@/components/DropdownMenu";
+import {
+  DropdownMenu,
+  FILTER_TRIGGER_WIDTH,
+  type DropdownOption,
+} from "@/components/DropdownMenu";
 import type { SportResponse } from "@/lib/api/types";
 
 /** Sentinel for the "All" row. Sports are keyed by slug and null means no filter, but the
@@ -34,6 +38,7 @@ export function SportDropdown({ sports, selected, onSelect }: Props) {
       selected={selected ?? ALL}
       onSelect={(value) => onSelect(value === ALL ? null : value)}
       accessibilityLabel={`Sport: ${current ? current.name : "All"}`}
+      triggerClassName={FILTER_TRIGGER_WIDTH}
     />
   );
 }

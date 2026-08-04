@@ -37,7 +37,10 @@ export function FiltersPanel({
   }
 
   return (
-    <View className="mx-4 overflow-hidden rounded-2xl bg-gray-100 dark:bg-gray-800">
+    // No horizontal margin of its own: this sits inside the row that already applies px-4,
+    // and its own mx-4 was insetting it so it no longer lined up with the date navigator
+    // directly above.
+    <View className="overflow-hidden rounded-2xl bg-gray-100 dark:bg-gray-800">
       <Pressable
         onPress={() => setOpen((o) => !o)}
         accessibilityRole="button"

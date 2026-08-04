@@ -38,15 +38,15 @@ function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
       : null;
 
   return (
-    <View className="items-center">
-      <Text className="text-lg font-bold text-gray-900 dark:text-gray-100">
-        {live_state.home_score} – {live_state.away_score}
-      </Text>
+    // No score here — each team's score is rendered on its OWN row by TeamRow, so which side
+    // scored what reads straight off the alignment. This block is purely the verdict, plus
+    // the two qualifiers that describe the score rather than the pick.
+    <View className="h-full items-center">
       {status === "live" && live_state.match_minute != null && (
-        <Text className="text-xs text-red-500">{live_state.match_minute}&apos;</Text>
+        <Text className="mb-0.5 text-xs text-red-500">{live_state.match_minute}&apos;</Text>
       )}
       {isRetired && (
-        <Text className="text-[10px] font-semibold uppercase text-amber-600 dark:text-amber-500">
+        <Text className="mb-0.5 text-[10px] font-semibold uppercase text-amber-600 dark:text-amber-500">
           {live_state.result_type === "walkover" ? "Walkover" : "Retired"}
         </Text>
       )}
@@ -59,7 +59,7 @@ function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
           omitted (never fabricated) when the pick was probability-only with no real price. */}
       {isCompleted && best_pick && (
         <View
-          className={`mt-1 items-center justify-center rounded px-1 py-1 ${BADGE_WIDTH} ${
+          className={`flex-1 items-center justify-center rounded px-1 py-1 ${BADGE_WIDTH} ${
             isRetired || wasCorrect === null
               ? "bg-gray-500"
               : wasCorrect
@@ -89,7 +89,7 @@ function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
 function PostponedBadge() {
   return (
     <View
-      className={`items-center justify-center rounded-lg bg-gray-200 px-2 py-2 dark:bg-gray-700 ${BADGE_WIDTH}`}
+      className={`h-full items-center justify-center rounded-lg bg-gray-200 px-2 py-2 dark:bg-gray-700 ${BADGE_WIDTH}`}
     >
       <Text
         className="text-center text-xs font-bold text-gray-600 dark:text-gray-300"
@@ -128,9 +128,9 @@ function PredictionBadge({ fixture }: { fixture: FixtureSummary }) {
   // min-odds filters server-side (see app/(tabs)/index.tsx) — so this badge is always shown
   // highlighted, never demoted to a plain "Details" line the way it used to be.
   return (
-    <View className="items-center">
+    <View className="h-full items-center">
       <View
-        className={`items-center justify-center rounded-lg px-2 py-2 ${BADGE_WIDTH} ${
+        className={`flex-1 items-center justify-center rounded-lg px-2 py-2 ${BADGE_WIDTH} ${
           lowInformation ? "bg-blue-400" : "bg-blue-600"
         }`}
       >
@@ -152,11 +152,38 @@ function PredictionBadge({ fixture }: { fixture: FixtureSummary }) {
   );
 }
 
+/** One team line: name on the left, that team's own score right-aligned.
+ *
+ * The score column is a fixed width so both rows align regardless of digit count, and so the
+ * numbers form a clean vertical pair rather than drifting with the team name length. */
+function TeamRow({ name, score }: { name: string; score?: number | null }) {
+  return (
+    <View className="flex-row items-center justify-between">
+      <Text
+        className="flex-1 text-base font-semibold text-gray-900 dark:text-gray-100"
+        numberOfLines={1}
+      >
+        {name}
+      </Text>
+      {score != null && (
+        <Text className="w-6 text-right text-base font-bold text-gray-900 dark:text-gray-100">
+          {score}
+        </Text>
+      )}
+    </View>
+  );
+}
+
 export function FixtureCard({ fixture }: { fixture: FixtureSummary }) {
   const kickoff = new Date(fixture.kickoff_utc);
   const isLive = fixture.status === "live";
   const isCompleted = fixture.status === "completed";
   const isPostponed = fixture.status === "postponed";
+  // Only show scores once there is something real to show — a scheduled fixture has none.
+  const score =
+    (isLive || isCompleted) && fixture.live_state
+      ? { home: fixture.live_state.home_score, away: fixture.live_state.away_score }
+      : null;
 
   return (
     <Link href={`/fixture/${fixture.id}`} asChild>
@@ -188,21 +215,28 @@ export function FixtureCard({ fixture }: { fixture: FixtureSummary }) {
                 </Text>
               )}
             </View>
-            <Text className="text-base font-semibold text-gray-900 dark:text-gray-100">
-              {fixture.home_team}
-            </Text>
-            <Text className="text-base font-semibold text-gray-900 dark:text-gray-100">
-              {fixture.away_team}
-            </Text>
+            {/* Each score sits on its OWN team's row, home above away, rather than as a
+                combined "1 – 1" elsewhere on the card — so which side scored what is read
+                straight off the alignment instead of inferred from left-to-right order.
+                The badge is a sibling of THIS block rather than of the whole card, and
+                stretches to it: that is what makes its top and bottom edges line up with the
+                two team rows instead of floating centred against a taller container. */}
+            <View className="flex-row items-stretch">
+              <View className="flex-1">
+                <TeamRow name={fixture.home_team} score={score?.home} />
+                <TeamRow name={fixture.away_team} score={score?.away} />
+              </View>
+              <View className="ml-3 justify-center">
+                {isPostponed ? (
+                  <PostponedBadge />
+                ) : isLive || isCompleted ? (
+                  <ScoreBadge fixture={fixture} />
+                ) : (
+                  <PredictionBadge fixture={fixture} />
+                )}
+              </View>
+            </View>
           </View>
-
-          {isPostponed ? (
-            <PostponedBadge />
-          ) : isLive || isCompleted ? (
-            <ScoreBadge fixture={fixture} />
-          ) : (
-            <PredictionBadge fixture={fixture} />
-          )}
         </View>
       </Pressable>
     </Link>

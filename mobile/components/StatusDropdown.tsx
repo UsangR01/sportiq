@@ -1,4 +1,8 @@
-import { DropdownMenu, type DropdownOption } from "@/components/DropdownMenu";
+import {
+  DropdownMenu,
+  FILTER_TRIGGER_WIDTH,
+  type DropdownOption,
+} from "@/components/DropdownMenu";
 
 
 /** The three states worth filtering to. POSTPONED is deliberately absent: nobody browses for
@@ -39,6 +43,7 @@ export function StatusDropdown({ selected, onSelect }: Props) {
         onSelect(value === selected ? null : (value as StatusFilter))
       }
       accessibilityLabel={`Status: ${active ? active.label : "all"}`}
+      triggerClassName={FILTER_TRIGGER_WIDTH}
     />
   );
 }
