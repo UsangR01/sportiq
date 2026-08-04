@@ -155,7 +155,10 @@ async def _register_model(artefact_path: Path, rps: float, accuracy: float) -> N
             ModelRegistry(
                 sport_id=sport.id,
                 version=version,
-                artefact_path=str(artefact_path),
+                # Filename only, never a full path: the row must resolve on a dev laptop
+                # AND in a Linux container, since promotion is a DB update rather than a
+                # redeploy (TDD 3.1). app/models_ml/base.py resolves it against MODELS_DIR.
+                artefact_path=artefact_path.name,
                 rps_score=rps,
                 accuracy=accuracy,
                 roi_simulation=None,  # no historical odds collected — see module docstring
