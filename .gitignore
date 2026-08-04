@@ -19,8 +19,18 @@ __pycache__/
 
 # ML: generated/regeneratable — real source is ml/training/*.py, ml/notebooks/, ml/evaluation/
 ml/data/
-ml/artifacts/
 ml/mlruns/
+
+# ml/artifacts holds every training run ever (27MB, mostly superseded), EXCEPT deployed/, which
+# holds only what models_registry marks active (~2.6MB) and must ship inside the image — a
+# container built from a clean clone would otherwise resolve a perfectly portable filename to
+# nothing. Staged by backend/scripts/stage_artefacts.py.
+#
+# Note the contents are excluded (ml/artifacts/*), not the directory (ml/artifacts/). Git does
+# not descend into an excluded DIRECTORY, so a later negation inside one never matches and the
+# exception silently does nothing.
+ml/artifacts/*
+!ml/artifacts/deployed/
 
 # Celery beat's local persisted schedule (shelve DB tracking each periodic task's last-run
 # time) — dev-machine-local state, not something to share/commit.

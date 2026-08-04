@@ -1,0 +1,110 @@
+# Render Blueprint — SportIQ backend (TDD §7).
+#
+# Three services off ONE image (backend/Dockerfile), plus managed Postgres and Redis:
+#
+#   sportiq-api     FastAPI under gunicorn/uvicorn workers
+#   sportiq-worker  Celery worker — runs the ingest/inference tasks
+#   sportiq-beat    Celery beat — DISPATCHES them on a schedule
+#
+# Worker and beat are separate services on purpose. Beat only schedules; the worker only
+# executes. Ship the worker alone and everything looks healthy while nothing whatsoever runs —
+# fixtures stop refreshing, scores freeze, predictions are never generated. This project has
+# already lost hours to that exact failure locally, where four workers were running and no beat
+# at all. Two services, or the schedule is decorative.
+#
+# Deploying (first time):
+#   1. backend/  PYTHONPATH=. python scripts/stage_artefacts.py --confirm   (and commit)
+#   2. Render dashboard -> New -> Blueprint -> point at this file
+#   3. Fill the sync:false secrets below in the dashboard (they are deliberately not in git)
+#   4. Confirm all three services deployed, not just the web one
+#
+# Windows note: --pool=solo is a LOCAL dev workaround (Windows has no prefork). Render is Linux,
+# so the worker below uses the default prefork pool, which is what app/workers/celery.py's
+# run_task() helper was written to be safe under either way.
+
+databases:
+  - name: sportiq-db
+    databaseName: sportiq
+    user: sportiq_user
+    plan: basic-256mb
+    postgresMajorVersion: "16"
+
+services:
+  # ---------------------------------------------------------------- Redis (broker + cache)
+  - type: keyvalue
+    name: sportiq-redis
+    plan: starter
+    ipAllowList: []          # private network only; nothing outside Render should reach this
+    maxmemoryPolicy: noeviction  # Celery is a BROKER here, not just a cache: evicting keys
+                                 # under pressure silently drops queued tasks
+
+  # ---------------------------------------------------------------- FastAPI
+  - type: web
+    name: sportiq-api
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .          # repo root — the image needs ml/artifacts/deployed/
+    healthCheckPath: /health
+    # Migrations run here rather than in a release command so they happen exactly once, before
+    # the API serves traffic, and never race the worker/beat coming up against an older schema.
+    preDeployCommand: alembic upgrade head
+    envVars: &shared_env
+      - key: DATABASE_URL
+        fromDatabase:
+          name: sportiq-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: sportiq-redis
+          property: connectionString
+      - key: JWT_SECRET_KEY
+        generateValue: true   # PyJWT rejects an empty HMAC key outright rather than merely
+                              # being insecure about it — CI hit this exact failure once
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: MODELS_DIR
+        value: /app/models
+      # Real credentials live only in keys.docx and the Render dashboard. sync:false means
+      # "prompt me, never store it in git" — this file is committed to a PUBLIC repo.
+      - key: THERUNDOWN_API_KEY
+        sync: false
+      - key: API_FOOTBALL_KEY
+        sync: false
+      - key: BALLDONTLIE_API_KEY
+        sync: false
+      - key: EXPO_ACCESS_TOKEN
+        sync: false
+      - key: SENTRY_DSN_BACKEND
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false           # the deployed mobile/web origin, not a localhost default
+      # Deliberately absent: ROTOWIRE_API_KEY and HIGHLIGHTLY_API_KEY (never provisioned; their
+      # adapters are stubs that degrade gracefully), ACCESS_TOKEN_EXPIRE_MINUTES and
+      # REFRESH_TOKEN_EXPIRE_DAYS (code defaults are correct). THESTATSAPI_KEY is not here
+      # either: it is read from keys.docx by an offline training script, and nothing in the
+      # deployed image reads it — listing it would imply a setting that does not exist.
+
+  # ---------------------------------------------------------------- Celery worker
+  - type: worker
+    name: sportiq-worker
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
+    dockerCommand: celery -A app.workers.celery worker --loglevel=info --concurrency=2
+    envVars: *shared_env
+
+  # ---------------------------------------------------------------- Celery beat
+  - type: worker
+    name: sportiq-beat
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
+    # Exactly ONE beat instance, ever. Two schedulers against one broker double-dispatch every
+    # periodic task, which for this project means double the external API spend against
+    # quotas that are already the binding constraint.
+    dockerCommand: celery -A app.workers.celery beat --loglevel=info
+    envVars: *shared_env

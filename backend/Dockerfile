@@ -1,3 +1,6 @@
+# Built from the REPO ROOT, not backend/ — the image needs ml/artifacts/deployed/ and a build
+# context cannot reach outside itself. infra/render.yaml sets dockerContext accordingly.
+#     docker build -f backend/Dockerfile -t sportiq-api .
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -6,9 +9,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+# Dependencies first, so a code-only change does not reinstall them.
+COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY backend/ .
 
-CMD ["gunicorn", "-w", "2", "-k", "uvicorn.workers.UvicornWorker", "app.main:app", "--bind", "0.0.0.0:8000"]
+# The artefacts models_registry currently marks active (~2.6MB), staged by
+# backend/scripts/stage_artefacts.py. app/models_ml/base.py resolves a registry row's filename
+# against MODELS_DIR, so these two lines are the whole of what makes a registry row loadable in
+# a container — without them a portable filename resolves to a file that is not there.
+COPY ml/artifacts/deployed/ /app/models/
+ENV MODELS_DIR=/app/models
+
+# One image, three roles (web / worker / beat); render.yaml overrides the command per service.
+# Beat is easy to leave out, and this project has already lost hours to exactly that — four
+# workers running and no beat, so nothing executed on the schedule at all.
+CMD ["gunicorn", "-w", "2", "-k", "uvicorn.workers.UvicornWorker", "app.main:app", \
+     "--bind", "0.0.0.0:8000"]
