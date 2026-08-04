@@ -61,6 +61,20 @@ async def _ingest_live_scores_for_league(sport: Sport, league: League) -> None:
             if not payload.kickoff_is_estimated and payload.kickoff_utc is not None:
                 fixture.kickoff_utc = payload.kickoff_utc
                 fixture.kickoff_is_estimated = False
+            elif (
+                fixture.kickoff_is_estimated
+                and payload.kickoff_utc is not None
+                and payload.kickoff_utc != fixture.kickoff_utc
+            ):
+                # A REVISED estimate is still real information. Only accepting a confirmed time
+                # froze fixtures on whatever day was first guessed: matches the provider had
+                # since moved to today sat in the feed under yesterday, some of them already
+                # underway, because the correction arrived as another estimate and was dropped.
+                # ingest_fixtures.py already applies this rule; without it here the daily run
+                # was the only thing that could fix a date, and it cannot fix one that moves
+                # after it runs. Downgrading a CONFIRMED time to an estimate stays forbidden —
+                # that is the first branch's job, and it is why this is an elif.
+                fixture.kickoff_utc = payload.kickoff_utc
 
             if fixture.status != new_status:
                 fixture.status = new_status

@@ -164,6 +164,35 @@ def _match_date(match: dict) -> date:
     return date.fromisoformat(str(match["tournament"]["start_date"])[:10])
 
 
+def _is_same_edition(match: dict, tournament: dict) -> bool:
+    """Whether this match belongs to the CURRENT running of `tournament`, not a past year's.
+
+    `/matches?tournament_ids[]=X` returns every match ever played under that id, across every
+    edition — a tournament id identifies the event, not the year's running of it. Measured
+    live: the National Bank Open id returns 1,452 matches spanning 19 editions back to 2007, of
+    which only 70 are the current one; the Washington id returns 1,164 for 49 current. Left
+    unfiltered a routine +/-2 day poll ingests 2,616 fixtures instead of 119, which is how
+    several thousand fixtures dating to 2007 ended up in the database. An earlier note recorded
+    those as leftover test data and confirmed the tournament-window logic was sound — that
+    check was on TOURNAMENT scoping, which is correct; the per-match scoping underneath it was
+    never checked, and is where the leak is.
+
+    The discriminator is the edition's own start_date, which each match carries on its embedded
+    tournament object. Filtering on the MATCH date instead would look simpler but breaks:
+    96% of matches carry no scheduled_time at all and fall back to the tournament start, so
+    once the poll window moved past a tournament's opening day, every remaining match in it —
+    including ones being played right now — would be filtered out.
+    """
+    embedded = match.get("tournament") or {}
+    theirs = str(embedded.get("start_date") or "")[:10]
+    ours = str(tournament.get("start_date") or "")[:10]
+    if not theirs or not ours:
+        # No basis to judge — keep it. Over-ingesting one match is recoverable; silently
+        # dropping a real upcoming fixture is not.
+        return True
+    return theirs == ours
+
+
 def _match_kickoff_is_estimated(match: dict) -> bool:
     """Whether this match's kickoff had to be INFERRED rather than read from the provider.
 
@@ -571,6 +600,8 @@ class BallDontLieTennisAdapter(DataSourceAdapter):
                 )
                 for match in matches:
                     match.setdefault("tournament", tournament)
+                    if not _is_same_edition(match, tournament):
+                        continue
                     payloads.append(_map_match_to_fixture_payload(match, tour))
         return payloads
 
