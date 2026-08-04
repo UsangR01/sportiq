@@ -8,7 +8,8 @@
     "scheme": "sportiq",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.sportiq.app"
     },
     "android": {
       "adaptiveIcon": {
@@ -22,7 +23,7 @@
         "android.permission.USE_BIOMETRIC",
         "android.permission.USE_FINGERPRINT"
       ],
-      "package": "com.anonymous.sportiq"
+      "package": "com.sportiq.app"
     },
     "web": {
       "bundler": "metro",
