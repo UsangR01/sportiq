@@ -6,22 +6,32 @@ build requires.
 
 The remaining steps need **your Expo credentials**, so they cannot be run unattended.
 
-## 1. Create the project (one-off, interactive)
+## 1. Create the project — DONE
 
-```bash
-cd mobile
-npx eas-cli login          # your Expo account
-npx eas-cli init           # writes extra.eas.projectId into app.json — COMMIT that change
+```
+Project:    @usangr01/sportiq
+projectId:  b7215410-13a9-4825-8602-c601e27bdace
+Dashboard:  https://expo.dev/accounts/usangr01/projects/sportiq
 ```
 
-`eas init` is the only way to obtain a real `projectId`. It is account-owned, so it cannot be
-written by hand or guessed.
+`app.json` now carries `extra.eas.projectId` and `owner: usangr01`, both written by `eas init`.
 
-## 2. Why this gates push notifications
+**Run every `eas` command from `mobile/`, not the repo root.** `app.json` lives here, and from
+the root the CLI reports only "Run this command inside a project directory."
 
-`getExpoPushTokenAsync` needs a real `projectId`. Until step 1 runs, no push token can be
-minted at all — which is why push has never been end-to-end verified on a device, despite the
-backend side (`PUT /user/push-token`, `notify_users._send_push`) being real and tested.
+The project was created under the personal account rather than `usangr01s-team` (Expo
+auto-creates that organisation alongside a personal account). Projects can be transferred from
+the dashboard if it should live under the org instead.
+
+## 2. Push notifications are now unblocked
+
+`getExpoPushTokenAsync` needs a real `projectId`, and `lib/notifications.ts:109` reads exactly
+the key `eas init` wrote. Until this existed no push token could be minted at all, which is why
+push had never been verified end to end despite the backend side (`PUT /user/push-token`,
+`notify_users._send_push`) being real and tested.
+
+Still unverified **on a device** — that needs a development build (next section), because Expo
+Go on Android cannot receive remote push at all.
 
 There is a second, separate reason on Android: **Expo Go dropped remote push in SDK 53**.
 `lib/notifications.ts` detects this (`isExpoGoOnAndroid`) and no-ops rather than crashing. A
