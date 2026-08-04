@@ -21,6 +21,7 @@ from app.adapters.balldontlie_tennis import (
     _get_with_retry,
     _home_away_players,
     _is_completed_set,
+    _is_same_edition,
     _latest_rank_points,
     _map_match_to_fixture_payload,
     _map_status,
@@ -434,3 +435,32 @@ def test_match_kickoff_is_estimated(scheduled_time, expected_estimated):
     match = make_match(scheduled_time=scheduled_time)
     assert _match_kickoff_is_estimated(match) is expected_estimated
     assert _map_match_to_fixture_payload(match, "atp").kickoff_is_estimated is expected_estimated
+
+
+def test_is_same_edition_rejects_a_past_years_running_of_the_same_tournament():
+    """A tournament id identifies the EVENT, not one year's running of it.
+
+    /matches?tournament_ids[]=X returns every match ever played under that id. Measured live,
+    the National Bank Open id returned 1,452 matches across 19 editions back to 2007 for a
+    routine +/-2 day poll, of which 70 were current — so ingestion wrote thousands of fixtures
+    dating to 2007 and the feed showed decade-old matches among today's. Each match carries its
+    own edition's start_date on its embedded tournament object, which is the discriminator.
+    """
+    current = {"id": 264, "name": "National Bank Open", "start_date": "2026-08-02"}
+    this_year = make_match()
+    this_year["tournament"] = dict(current)
+    last_year = make_match()
+    last_year["tournament"] = {**current, "start_date": "2025-07-27"}
+
+    assert _is_same_edition(this_year, current) is True
+    assert _is_same_edition(last_year, current) is False
+
+
+def test_is_same_edition_keeps_a_match_it_cannot_judge():
+    """With no start_date on either side there is no basis to reject. Over-ingesting one match
+    is recoverable; silently dropping a real upcoming fixture is not, so the ambiguous case
+    keeps the match rather than guessing."""
+    assert _is_same_edition(make_match(), {"id": 264}) is True
+    match_without_dates = make_match()
+    match_without_dates["tournament"] = {"id": 264}
+    assert _is_same_edition(match_without_dates, {"id": 264, "start_date": "2026-08-02"}) is True
