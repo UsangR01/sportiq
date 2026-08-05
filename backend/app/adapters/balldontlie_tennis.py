@@ -366,6 +366,14 @@ def _map_match_to_fixture_payload(match: dict, tour: str) -> FixturePayload:
         season=str(match.get("season") or match["tournament"]["season"]),
         home_team_name=home_player.get("full_name"),
         away_team_name=away_player.get("full_name"),
+        # short_name carries the FULL name, not an abbreviation. It is the cross-provider key
+        # ingest_odds.py matches TheRundown's odds events on, and TheRundown abbreviates a
+        # player as "F. Cobolli" while this provider stores "Flavio Cobolli" — an initial
+        # cannot be recovered from a first name, so an abbreviation would never match. Left
+        # empty (as it was) the matcher bails out immediately and tennis can never get odds at
+        # all. Same convention football already uses, where short_name is the club's own name.
+        home_team_short_name=home_player.get("full_name"),
+        away_team_short_name=away_player.get("full_name"),
         status=status,
         home_score=home_sets if status == "completed" else None,
         away_score=away_sets if status == "completed" else None,

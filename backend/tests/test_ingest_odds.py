@@ -87,7 +87,7 @@ async def test_resolves_by_matching_fixture_external_id(seeded_fixture):
         updated_at=datetime.now(UTC),
     )
     async with async_session_factory() as db:
-        resolved = await _resolve_fixture(db, sport.id, league.id, payload)
+        resolved, _ = await _resolve_fixture(db, sport.id, league.id, payload)
         assert resolved is not None
         assert resolved.id == fixture.id
         await db.commit()
@@ -113,5 +113,5 @@ async def test_no_match_falls_through_to_none_for_unmatched_provider_id(seeded_f
         updated_at=datetime.now(UTC),
     )
     async with async_session_factory() as db:
-        resolved = await _resolve_fixture(db, sport.id, league.id, payload)
+        resolved, _ = await _resolve_fixture(db, sport.id, league.id, payload)
     assert resolved is None

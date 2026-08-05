@@ -42,6 +42,13 @@ _RUNDOWN_SPORT_IDS: dict[str, int] = {
     # missing Brazil entry) — _rundown_sport_id_for raises ValueError for these, caught
     # per-adapter in ingest_odds.py so it never blocks the OTHER real odds source
     # (API-Football, which does have real coverage for all three — see api_football.py).
+    #
+    # Tennis. Confirmed live: 25 real ATP events on a single day, with up to ELEVEN affiliates
+    # returning unmasked prices (Pinnacle, FanDuel, Bodog among them) — materially better than
+    # football's 3-of-15. This is the only odds source tennis has ever had; before it, every
+    # ATP pick was probability-only with no EV ranking possible.
+    "atp": 38,
+    "wta": 39,
 }
 
 # TheRundown returns a masked 0.0001 sentinel for markets a bookmaker hasn't priced (or that
@@ -49,6 +56,16 @@ _RUNDOWN_SPORT_IDS: dict[str, int] = {
 # (Bovada, Bodog, BetMGM) return real values on the current subscription; DraftKings,
 # FanDuel, Pinnacle, etc. are masked. Treated as "no line from this book", not an error.
 _MASKED_ODDS_SENTINEL = 0.0001
+
+
+def _cross_provider_key(team: dict, key_on_full_name: bool = False) -> str | None:
+    """The string used to match a TheRundown event onto a Fixture we already have.
+
+    key_on_full_name is set for tennis only (see _map_event_to_odds_payloads). Everything else
+    keeps using the abbreviation, which is what every existing team-sport match relies on."""
+    if key_on_full_name:
+        return team.get("name") or team.get("abbreviation") or None
+    return team.get("abbreviation") or team.get("name") or None
 
 
 def _rundown_sport_id_for(sport_slug: str, league_slug: str) -> int:
@@ -71,7 +88,9 @@ def _american_to_decimal(american: float | None) -> float | None:
     return round(1 + 100 / abs(american), 4)
 
 
-def _map_event_to_odds_payloads(event: dict) -> list[OddsPayload]:
+def _map_event_to_odds_payloads(
+    event: dict, *, key_on_full_name: bool = False
+) -> list[OddsPayload]:
     """Pure, network/DB-free mapping — kept separate so it's directly unit-testable against a
     recorded sample response. Maps the moneyline ("h2h") market and, since this feature was
     added, the "total" (Over/Under goals) market too — confirmed live (see CLAUDE.md) that
@@ -81,8 +100,14 @@ def _map_event_to_odds_payloads(event: dict) -> list[OddsPayload]:
     (its line blocks only ever have moneyline/spread/total keys) — those two markets can only
     ever come from API-Football, for the leagues it covers odds for."""
     normalized_by_side = {t.get("is_home"): t for t in event.get("teams_normalized", [])}
-    home_abbr = normalized_by_side.get(True, {}).get("abbreviation")
-    away_abbr = normalized_by_side.get(False, {}).get("abbreviation")
+    # Which field is the cross-provider key depends on the sport, and getting this wrong
+    # breaks matching silently. For team sports it is the abbreviation: TheRundown says
+    # name="Detroit" / abbreviation="DET" and BallDontLie stores "DET", so keying on the name
+    # would match nothing. For tennis a "team" is one person: TheRundown abbreviates
+    # "F. Cobolli" while BallDontLie stores "Flavio Cobolli", and an initial cannot be
+    # recovered from a first name, so only the full name can match there.
+    home_abbr = _cross_provider_key(normalized_by_side.get(True, {}), key_on_full_name)
+    away_abbr = _cross_provider_key(normalized_by_side.get(False, {}), key_on_full_name)
     kickoff_utc = datetime.fromisoformat(event["event_date"].replace("Z", "+00:00"))
 
     payloads: list[OddsPayload] = []
@@ -227,7 +252,9 @@ class TheRundownAdapter(DataSourceAdapter):
                     {"include": "scores"},
                 )
                 for event in response.json().get("events", []):
-                    payloads.extend(_map_event_to_odds_payloads(event))
+                    payloads.extend(
+                        _map_event_to_odds_payloads(event, key_on_full_name=sport == "tennis")
+                    )
                 await asyncio.sleep(ODDS_REQUEST_DELAY_SECONDS)
 
         return payloads
