@@ -1,0 +1,24 @@
+diff --git a/node_modules/react-native-css-interop/dist/runtime/native/render-component.js b/node_modules/react-native-css-interop/dist/runtime/native/render-component.js
+index eba25ec..5a4181f 100644
+--- a/node_modules/react-native-css-interop/dist/runtime/native/render-component.js
++++ b/node_modules/react-native-css-interop/dist/runtime/native/render-component.js
+@@ -121,6 +121,19 @@ function printUpgradeWarning(warning, originalProps) {
+     console.log(`CssInterop upgrade warning.\n\n${warning}.\n\nThis warning was caused by a component with the props:\n${stringify(originalProps)}\n\nIf adding or removing sibling components caused this warning you should add a unique "key" prop to your components. https://react.dev/learn/rendering-lists#keeping-list-items-in-order-with-key\n`);
+ }
+ function stringify(object) {
++    // PATCHED: Object.entries() below INVOKES getters. React Navigation's context default
++    // defines getKey/setKey getters that throw by design when read outside a navigator, so
++    // serialising props that carry one turns this DEV-ONLY warning into a fatal
++    // "Couldn't find a navigation context" render error. Switching theme crashed the app on a
++    // real device. A diagnostic must never be able to break the thing it is describing.
++    try {
++        return stringifyUnsafe(object);
++    }
++    catch (error) {
++        return `[props omitted: serialising them threw: ${error && error.message}]`;
++    }
++}
++function stringifyUnsafe(object) {
+     const seen = new WeakSet();
+     return JSON.stringify(object, function replace(_, value) {
+         if (!(value !== null && typeof value === "object")) {
