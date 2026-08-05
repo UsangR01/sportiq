@@ -40,3 +40,42 @@ def test_best_outcome_skips_missing_draw_for_two_outcome_sports():
         home_prob=0.4, draw_prob=None, away_prob=0.6, home_odds=2.1, draw_odds=None, away_odds=1.7
     )
     assert outcome.selection == "away"
+
+
+def test_best_available_odds_ignores_a_book_with_the_sides_reversed():
+    """Real ATP case: 14 books priced Cameron Norrie at ~1.42 and Ignacio Buse at ~2.90, while
+    Polymarket alone had 3.13/1.45 — the same match with the sides swapped.
+
+    Because best odds are the MAXIMUM across books, that one inverted row won outright and the
+    card showed the favourite at the underdog's price. Taking the max is what makes an outlier
+    dangerous rather than harmless: it is actively selected for, not diluted."""
+    rows = [{"home_odds": 1.42, "away_odds": 2.90, "draw_odds": None} for _ in range(14)]
+    rows.append({"home_odds": 3.13, "away_odds": 1.45, "draw_odds": None})
+
+    best = best_available_odds(rows)
+
+    assert best["home"] == 1.42
+    assert best["away"] == 2.90
+
+
+def test_best_available_odds_keeps_ordinary_disagreement_between_books():
+    """Books genuinely differ, and finding the keenest price is the entire point — so the
+    outlier guard must not flatten normal spread into a consensus."""
+    rows = [
+        {"home_odds": 1.80, "away_odds": 2.05, "draw_odds": None},
+        {"home_odds": 1.95, "away_odds": 1.95, "draw_odds": None},
+        {"home_odds": 2.10, "away_odds": 1.80, "draw_odds": None},
+    ]
+
+    assert best_available_odds(rows)["home"] == 2.10
+
+
+def test_best_available_odds_trusts_everything_when_there_is_no_consensus():
+    """With only one or two books there is nothing to disagree with, so nothing is dropped —
+    guessing which of two prices is wrong would be worse than showing the better one."""
+    rows = [
+        {"home_odds": 1.40, "away_odds": 2.90, "draw_odds": None},
+        {"home_odds": 3.13, "away_odds": 1.45, "draw_odds": None},
+    ]
+
+    assert best_available_odds(rows)["home"] == 3.13
