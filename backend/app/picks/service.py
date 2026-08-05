@@ -51,41 +51,53 @@ def best_outcome(
     )
 
 
-# How far a single book's implied probability may sit from the consensus before its row is
-# ignored. Wide enough to keep genuine price disagreement (books differ by a few points, and
-# that spread is exactly what "best available" is for), narrow enough to reject a row whose
-# sides are the wrong way round.
-MAX_IMPLIED_DEVIATION_FROM_CONSENSUS = 0.25
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    return ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2
 
 
 def _consensus_outliers(odds_rows: list[dict]) -> set[int]:
-    """Indices of rows whose home/away prices disagree with the consensus badly enough to be
-    a data error rather than a keener price.
+    """Indices of rows whose two sides are the wrong way round relative to the field.
 
-    Motivating case, from real ATP data: 14 books priced Cameron Norrie at ~1.42 and Ignacio
-    Buse at ~2.90, while Polymarket alone had 3.13/1.45 — the same match with the sides
-    reversed. Because best odds are the MAXIMUM across books, that single inverted row won
-    every time and the card showed the favourite at the underdog's price. Taking the max is
-    what makes this dangerous: an outlier is not diluted, it is actively selected for.
+    Real case, found by comparing the app against a public odds page: Polymarket consistently
+    lists ATP matches with the sides reversed. For Cameron Norrie it showed 3.13/1.45 where 14
+    other books had 1.42/2.90; for Khachanov 2.22/1.79 against a consensus of 1.70/2.15.
+    Because best odds are the MAXIMUM across books, one reversed row wins outright and the card
+    shows the favourite at the underdog's price. Taking the max is what makes an outlier
+    dangerous rather than harmless: it is actively selected for, not diluted.
 
-    Deliberately keyed on disagreement with the median rather than an absolute bound. An
-    inverted price is usually perfectly plausible on its own (3.13 is an ordinary number) and
-    only reveals itself against the field, so a fixed ceiling like the training-time
-    PLAUSIBLE_MAX_DECIMAL_ODDS would not catch it.
+    The test asks whether a row's HOME price looks more like the consensus AWAY price than the
+    consensus HOME price — i.e. whether it is inverted — rather than whether it is merely far
+    from the median. A distance threshold was tried first and is not sufficient: on a near-even
+    match (Khachanov 1.70 vs Atmane 2.15) an inverted row sits only 0.14 away in implied terms,
+    inside any threshold loose enough to preserve genuine price disagreement. Asking the
+    question directly has no such blind spot, and needs no tuning.
+
+    Genuine keen prices are unaffected: a book pricing the favourite shorter still resembles
+    the consensus home side far more than the away side.
     """
     priced = [
-        (i, row["home_odds"])
+        (i, row["home_odds"], row["away_odds"])
         for i, row in enumerate(odds_rows)
         if row.get("home_odds") and row.get("away_odds")
     ]
     if len(priced) < 3:
-        # Too few books to establish a consensus; trust them all rather than guess.
+        # Too few books to establish a consensus; trust them all rather than guess which is
+        # wrong — showing the better of two prices beats discarding a real one.
         return set()
-    implied = sorted(1.0 / odds for _, odds in priced)
-    mid = len(implied) // 2
-    median = implied[mid] if len(implied) % 2 else (implied[mid - 1] + implied[mid]) / 2
+
+    consensus_home = _median([1.0 / home for _, home, _ in priced])
+    consensus_away = _median([1.0 / away for _, _, away in priced])
+    if abs(consensus_home - consensus_away) < 0.02:
+        # A genuine coin-flip: "inverted" is not meaningfully different from "not inverted",
+        # so there is nothing to detect and nothing worth dropping.
+        return set()
+
     return {
-        i for i, odds in priced if abs(1.0 / odds - median) > MAX_IMPLIED_DEVIATION_FROM_CONSENSUS
+        i
+        for i, home, _ in priced
+        if abs(1.0 / home - consensus_away) < abs(1.0 / home - consensus_home)
     }
 
 
