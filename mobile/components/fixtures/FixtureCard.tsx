@@ -59,7 +59,7 @@ function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
           omitted (never fabricated) when the pick was probability-only with no real price. */}
       {isCompleted && best_pick && (
         <View
-          className={`flex-1 items-center justify-center rounded px-1 py-1 ${BADGE_WIDTH} ${
+          className={`min-h-[52px] items-center justify-center rounded px-1 py-1 ${BADGE_WIDTH} ${
             isRetired || wasCorrect === null
               ? "bg-gray-500"
               : wasCorrect
@@ -89,7 +89,7 @@ function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
 function PostponedBadge() {
   return (
     <View
-      className={`items-center justify-center rounded-lg bg-gray-200 px-2 py-2 dark:bg-gray-700 ${BADGE_WIDTH}`}
+      className={`min-h-[52px] items-center justify-center rounded-lg bg-gray-200 px-2 py-2 dark:bg-gray-700 ${BADGE_WIDTH}`}
     >
       <Text
         className="text-center text-xs font-bold text-gray-600 dark:text-gray-300"
@@ -130,7 +130,7 @@ function PredictionBadge({ fixture }: { fixture: FixtureSummary }) {
   return (
     <View className="items-center">
       <View
-        className={`flex-1 items-center justify-center rounded-lg px-2 py-2 ${BADGE_WIDTH} ${
+        className={`min-h-[52px] items-center justify-center rounded-lg px-2 py-2 ${BADGE_WIDTH} ${
           lowInformation ? "bg-blue-400" : "bg-blue-600"
         }`}
       >
@@ -222,11 +222,18 @@ export function FixtureCard({ fixture }: { fixture: FixtureSummary }) {
                 stretches to it: that is what makes its top and bottom edges line up with the
                 two team rows instead of floating centred against a taller container.
 
-                items-stretch here is what sizes the badge — the badges must NOT also set
-                h-full. height:100% against an auto-height parent, with flex-1 inside it, grows
-                without bound on Yoga: on a real device one card filled the entire screen and
-                only a single fixture was reachable. It collapsed harmlessly on web, which is
-                why the browser pass missed it entirely. */}
+                The badge sizes itself from its own content plus a min-height, and deliberately
+                uses NEITHER h-full NOR flex-1. Both were tried on a real device and both
+                failed, in opposite directions, for the same underlying reason — asking for a
+                percentage or a flex share of a parent whose own height is auto:
+
+                  h-full  -> unbounded: one card filled the entire screen, and only a single
+                             fixture was reachable.
+                  flex-1  -> zero: the badge collapsed to an invisible sliver with none of its
+                             text rendered.
+
+                Neither reproduced on web, where the same styles resolve against a normal
+                block layout — which is why every browser pass missed both. */}
             <View className="flex-row items-stretch">
               <View className="flex-1">
                 <TeamRow name={fixture.home_team} score={score?.home} />
