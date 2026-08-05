@@ -14,8 +14,10 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, select
 
 from app.core.database import async_session_factory
-from app.fixtures.models import Fixture, FixtureStatus, Team
+from app.fixtures.models import Fixture, FixtureLiveState, FixtureStatus, Team, TeamFeatures
+from app.history.models import Outcome
 from app.main import app
+from app.predictions.models import Prediction
 from app.sports.models import League, Sport
 from app.users.models import WatchlistItem
 
@@ -34,6 +36,46 @@ async def _register(client: AsyncClient) -> str:
     )
     assert response.status_code == 201
     return response.json()["access_token"]
+
+
+@pytest.fixture(autouse=True)
+async def _clean_up_seeded_sports():
+    """Delete every Sport this module seeded, after each test.
+
+    These tests run against the DEV database, like the rest of the suite, so anything they
+    leave behind shows up in the running app. Without this the sport dropdown filled with
+    "Watchlist Test Sport" entries — 24 of them, one per seeded fixture across several runs.
+
+    Keyed on the wl-sport- slug prefix rather than ids captured during the test, so a test that
+    fails part-way through still cleans up.
+
+    team_features is in the list because a seeded fixture does not stay inert: the running
+    ingest worker picked these up and computed feature vectors for them, and 30 such rows had
+    to be removed by hand. Only fixture -> watchlist_items cascades; every other child needs
+    deleting explicitly, and a missing one fails the whole delete on a FK violation.
+    """
+    yield
+    async with async_session_factory() as db:
+        sport_ids = (
+            (await db.execute(select(Sport.id).where(Sport.slug.like("wl-sport-%"))))
+            .scalars()
+            .all()
+        )
+        if not sport_ids:
+            return
+        fixture_ids = (
+            (await db.execute(select(Fixture.id).where(Fixture.sport_id.in_(sport_ids))))
+            .scalars()
+            .all()
+        )
+        if fixture_ids:
+            for model in (TeamFeatures, Prediction, Outcome, FixtureLiveState, WatchlistItem):
+                await db.execute(delete(model).where(model.fixture_id.in_(fixture_ids)))
+        await db.execute(delete(Fixture).where(Fixture.sport_id.in_(sport_ids)))
+        await db.execute(delete(Team).where(Team.sport_id.in_(sport_ids)))
+        await db.execute(delete(League).where(League.sport_id.in_(sport_ids)))
+        await db.execute(delete(Sport).where(Sport.id.in_(sport_ids)))
+        await db.commit()
 
 
 async def _seed_fixture(kickoff: datetime | None = None) -> uuid.UUID:

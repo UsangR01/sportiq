@@ -41,7 +41,7 @@ function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
     // No score here — each team's score is rendered on its OWN row by TeamRow, so which side
     // scored what reads straight off the alignment. This block is purely the verdict, plus
     // the two qualifiers that describe the score rather than the pick.
-    <View className="h-full items-center">
+    <View className="items-center">
       {status === "live" && live_state.match_minute != null && (
         <Text className="mb-0.5 text-xs text-red-500">{live_state.match_minute}&apos;</Text>
       )}
@@ -89,7 +89,7 @@ function ScoreBadge({ fixture }: { fixture: FixtureSummary }) {
 function PostponedBadge() {
   return (
     <View
-      className={`h-full items-center justify-center rounded-lg bg-gray-200 px-2 py-2 dark:bg-gray-700 ${BADGE_WIDTH}`}
+      className={`items-center justify-center rounded-lg bg-gray-200 px-2 py-2 dark:bg-gray-700 ${BADGE_WIDTH}`}
     >
       <Text
         className="text-center text-xs font-bold text-gray-600 dark:text-gray-300"
@@ -128,7 +128,7 @@ function PredictionBadge({ fixture }: { fixture: FixtureSummary }) {
   // min-odds filters server-side (see app/(tabs)/index.tsx) — so this badge is always shown
   // highlighted, never demoted to a plain "Details" line the way it used to be.
   return (
-    <View className="h-full items-center">
+    <View className="items-center">
       <View
         className={`flex-1 items-center justify-center rounded-lg px-2 py-2 ${BADGE_WIDTH} ${
           lowInformation ? "bg-blue-400" : "bg-blue-600"
@@ -220,7 +220,13 @@ export function FixtureCard({ fixture }: { fixture: FixtureSummary }) {
                 straight off the alignment instead of inferred from left-to-right order.
                 The badge is a sibling of THIS block rather than of the whole card, and
                 stretches to it: that is what makes its top and bottom edges line up with the
-                two team rows instead of floating centred against a taller container. */}
+                two team rows instead of floating centred against a taller container.
+
+                items-stretch here is what sizes the badge — the badges must NOT also set
+                h-full. height:100% against an auto-height parent, with flex-1 inside it, grows
+                without bound on Yoga: on a real device one card filled the entire screen and
+                only a single fixture was reachable. It collapsed harmlessly on web, which is
+                why the browser pass missed it entirely. */}
             <View className="flex-row items-stretch">
               <View className="flex-1">
                 <TeamRow name={fixture.home_team} score={score?.home} />
