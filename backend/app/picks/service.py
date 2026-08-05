@@ -51,12 +51,55 @@ def best_outcome(
     )
 
 
+# How far a single book's implied probability may sit from the consensus before its row is
+# ignored. Wide enough to keep genuine price disagreement (books differ by a few points, and
+# that spread is exactly what "best available" is for), narrow enough to reject a row whose
+# sides are the wrong way round.
+MAX_IMPLIED_DEVIATION_FROM_CONSENSUS = 0.25
+
+
+def _consensus_outliers(odds_rows: list[dict]) -> set[int]:
+    """Indices of rows whose home/away prices disagree with the consensus badly enough to be
+    a data error rather than a keener price.
+
+    Motivating case, from real ATP data: 14 books priced Cameron Norrie at ~1.42 and Ignacio
+    Buse at ~2.90, while Polymarket alone had 3.13/1.45 — the same match with the sides
+    reversed. Because best odds are the MAXIMUM across books, that single inverted row won
+    every time and the card showed the favourite at the underdog's price. Taking the max is
+    what makes this dangerous: an outlier is not diluted, it is actively selected for.
+
+    Deliberately keyed on disagreement with the median rather than an absolute bound. An
+    inverted price is usually perfectly plausible on its own (3.13 is an ordinary number) and
+    only reveals itself against the field, so a fixed ceiling like the training-time
+    PLAUSIBLE_MAX_DECIMAL_ODDS would not catch it.
+    """
+    priced = [
+        (i, row["home_odds"])
+        for i, row in enumerate(odds_rows)
+        if row.get("home_odds") and row.get("away_odds")
+    ]
+    if len(priced) < 3:
+        # Too few books to establish a consensus; trust them all rather than guess.
+        return set()
+    implied = sorted(1.0 / odds for _, odds in priced)
+    mid = len(implied) // 2
+    median = implied[mid] if len(implied) % 2 else (implied[mid - 1] + implied[mid]) / 2
+    return {
+        i for i, odds in priced if abs(1.0 / odds - median) > MAX_IMPLIED_DEVIATION_FROM_CONSENSUS
+    }
+
+
 def best_available_odds(odds_rows: list[dict]) -> dict[str, float | None]:
     """Best (highest) odds per side across all tracked bookmakers for one fixture. Used for
     both h2h (home/draw/away columns) and double_chance (which reuses the same home_odds/
-    away_odds columns for its own two outcomes — see app/odds/models.py:Odds)."""
+    away_odds columns for its own two outcomes — see app/odds/models.py:Odds).
+
+    Rows that contradict the consensus are excluded first — see _consensus_outliers."""
+    outliers = _consensus_outliers(odds_rows)
     best = {"home": None, "draw": None, "away": None}
-    for row in odds_rows:
+    for i, row in enumerate(odds_rows):
+        if i in outliers:
+            continue
         for side in ("home", "draw", "away"):
             value = row.get(f"{side}_odds")
             if value is not None and (best[side] is None or value > best[side]):
