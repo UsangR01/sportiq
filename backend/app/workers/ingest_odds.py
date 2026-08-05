@@ -1,4 +1,5 @@
 import logging
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 
 import httpx
@@ -8,7 +9,7 @@ from app.adapters.base import OddsPayload
 from app.adapters.factory import AdapterFactory
 from app.core.database import async_session_factory
 from app.core.redis import get_redis
-from app.fixtures.models import Fixture, FixtureStatus
+from app.fixtures.models import Fixture, FixtureStatus, Team
 from app.fixtures.service import find_fixture_by_abbreviations_and_time
 from app.odds.models import Odds
 from app.sports.models import League, Sport
@@ -23,7 +24,9 @@ ODDS_CACHE_TTL_SECONDS = 10 * 60
 ODDS_LOOKAHEAD_DAYS = 3
 
 
-async def _resolve_fixture(db, sport_id, league_id, payload: OddsPayload) -> Fixture | None:
+async def _resolve_fixture(
+    db, sport_id, league_id, payload: OddsPayload
+) -> tuple[Fixture | None, OddsPayload]:
     """Three fast paths in order, then a last-resort fuzzy fallback:
     1. This odds-provider event was already matched to a fixture on a previous run
        (odds_provider_external_id).
@@ -43,7 +46,7 @@ async def _resolve_fixture(db, sport_id, league_id, payload: OddsPayload) -> Fix
         )
     ).scalar_one_or_none()
     if fixture is not None:
-        return fixture
+        return fixture, payload
 
     fixture = (
         await db.execute(
@@ -55,10 +58,10 @@ async def _resolve_fixture(db, sport_id, league_id, payload: OddsPayload) -> Fix
     if fixture is not None:
         if fixture.odds_provider_external_id is None:
             fixture.odds_provider_external_id = payload.fixture_external_id
-        return fixture
+        return fixture, payload
 
     if payload.kickoff_utc is None:
-        return None
+        return None, payload
 
     fixture = await find_fixture_by_abbreviations_and_time(
         db,
@@ -68,9 +71,65 @@ async def _resolve_fixture(db, sport_id, league_id, payload: OddsPayload) -> Fix
         payload.kickoff_utc,
         league_id=league_id,
     )
+    if fixture is None:
+        # Try the SAME pairing with the sides swapped.
+        #
+        # Which competitor is "home" is not a fact about a tennis match — there is no home
+        # court. Our side is an arbitrary but stable tiebreak (lower external player id, see
+        # balldontlie_tennis.py:_home_away_players) and TheRundown picks its own. Measured on a
+        # single real ATP day they disagreed for 8 of 22 matches, and because this matcher
+        # requires home->home the odds for all 8 were silently dropped — no price, no error.
+        fixture = await find_fixture_by_abbreviations_and_time(
+            db,
+            sport_id,
+            payload.away_team_short_name,
+            payload.home_team_short_name,
+            payload.kickoff_utc,
+            league_id=league_id,
+        )
+
     if fixture is not None and fixture.odds_provider_external_id is None:
         fixture.odds_provider_external_id = payload.fixture_external_id
-    return fixture
+    return fixture, payload
+
+
+async def _orient_payload(db, fixture: Fixture, payload: OddsPayload) -> OddsPayload:
+    """Return `payload` with its sides swapped if the provider's home is our away.
+
+    Decided by comparing NAMES every time, deliberately not by which lookup path matched.
+    An earlier version flipped only inside the swapped-name fallback, which was wrong in a way
+    that is easy to miss and expensive to get wrong: the first bookmaker's payload sets
+    odds_provider_external_id, so every LATER payload for the same event resolves by that id
+    instead — skipping the fallback, keeping the provider's orientation, and overwriting the
+    corrected prices. The visible result was Alexander Zverev, a heavy favourite the market had
+    at ~1.17, showing at 8.00.
+
+    Attaching the favourite's price to the underdog is worse than having no odds at all, so
+    this errs toward leaving the payload untouched whenever the names cannot be compared.
+    """
+    if not payload.home_team_short_name or not payload.away_team_short_name:
+        return payload
+    home_team = (
+        await db.execute(select(Team).where(Team.id == fixture.home_team_id))
+    ).scalar_one_or_none()
+    if home_team is None:
+        return payload
+
+    ours = (home_team.short_name or home_team.name or "").strip().casefold()
+    theirs_home = payload.home_team_short_name.strip().casefold()
+    theirs_away = payload.away_team_short_name.strip().casefold()
+    if not ours or theirs_home == theirs_away:
+        return payload
+    # Only flip on a positive match for the AWAY side; an unrecognised name changes nothing.
+    if ours == theirs_home or ours != theirs_away:
+        return payload
+    return replace(
+        payload,
+        home_odds=payload.away_odds,
+        away_odds=payload.home_odds,
+        over_odds=payload.under_odds,
+        under_odds=payload.over_odds,
+    )
 
 
 async def _dates_with_fixtures(sport: Sport, league: League) -> list[date]:
@@ -157,9 +216,10 @@ async def _ingest_odds_for_league(sport: Sport, league: League) -> None:
         for payload in payloads:
             # Events for a game we haven't ingested fixtures for yet (or can't match) are
             # skipped rather than guessed — matches ingest_fixtures.py's dedupe philosophy.
-            fixture = await _resolve_fixture(db, sport.id, league.id, payload)
+            fixture, payload = await _resolve_fixture(db, sport.id, league.id, payload)
             if fixture is None:
                 continue
+            payload = await _orient_payload(db, fixture, payload)
 
             db.add(
                 Odds(
