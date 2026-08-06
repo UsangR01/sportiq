@@ -3,6 +3,41 @@
 Companion to `SportIQ_Tennis_Games_Viability.ipynb`, which contains the evidence behind every
 number here.
 
+> ## ⛔ SUPERSEDED — 2026-08-07: DO NOT BUILD. The gate was run and it failed.
+>
+> The GOAT tier arrived before this plan's step 4, so the serve statistics it was waiting on
+> were collected and tested immediately — 17,434 matches, 0% nulls, the full 2021-2025 window.
+> **Serve features are 2.5× stronger than anything the model had, and it still does not work.**
+>
+> ```
+> best single feature   SERVE_RATING (avg of both)  r = +0.126   (1.6% of variance)
+>   for scale          current rank_gap r = +0.051 · football's O/U failure r = +0.030
+>
+> full model, 29 features (serve + surface + rank), XGBoost Poisson, temporal 80/20:
+>   R²        +0.031          MAE 6.284 vs 6.352 baseline  =  +0.068 games
+>   corr(pred, actual) +0.206
+>
+> as an Over/Under classifier at the REAL market lines:
+>   21.5   edge -0.0004      22.5   edge +0.0040      23.5   edge -0.0274
+> ```
+>
+> The classifier row is the one that decides it: against the actual lines the model performs
+> **at or below "always over"**. The cause is visible in the spread — predictions range
+> 20.7-43.0 (sd 2.12) while real matches range 12-61 (sd 7.87), so **0.1% of predictions fall
+> below the 21.5 line against 39% of real matches**. It is compressed toward the mean, which is
+> precisely the football Over/Under failure mode restated in a different sport.
+>
+> This was a fair test, not a strawman: best-of-three learners, every free feature from steps
+> 1-3 plus surface and rank, leakage-controlled by `shift(1)` before every rolling window.
+> A better model is not the missing piece.
+>
+> **The gate worked exactly as designed** — roughly a week of build avoided, and the tier was
+> already paid for on its own merits (it also unlocked real moneyline odds, which shipped).
+> What would change this verdict is genuinely new information — point-level or in-play data —
+> not more modelling of these inputs.
+>
+> Everything below is the original plan, kept for the reasoning and the sequencing pattern.
+
 **Recommendation: build it — but in an order that lets us stop cheaply if it does not work.**
 
 ---
@@ -120,13 +155,27 @@ and it took real work to reach.
 | Surface | embedded in match | **ALL-STAR** ✅ | free |
 | Rolling averages | derived | — | free |
 | Odds | TheRundown ATP | **Pro** ✅ | already paid |
-| Serve stats (hold %, aces, break points) | `/match_stats` | **GOAT** ❌ | upgrade required |
+| Serve stats (hold %, aces, break points) | `/match_stats` | **GOAT** ✅ | now active — collected |
 
-`/match_stats`, `/player_career_stats`, `/head_to_head` and `/odds` all return **401** on the
-current plan — verified live, not assumed.
+~~`/match_stats`, `/player_career_stats`, `/head_to_head` and `/odds` all return **401** on the
+current plan~~ — **superseded 2026-08-07**: GOAT is active for **ATP**, and all four are live
+(verified). Rate limit rose 60→600/min. **WTA is NOT included** — every endpoint except
+`/rankings` still 401s on that tour; it needs its own subscription.
 
-**Steps 1–3 cost nothing.** Buy GOAT only if the free features clear the gate but fall short of
-useful — at that point you know the market works and you are buying accuracy, not hope.
+Collected in full: **138,219 stat rows over 64,266 matches, 2007-2026**, of which **17,434
+matches sit in the 2021-2025 window with 0% nulls** on every serve field. Cheaper than
+expected — `/match_stats` paginates by season rather than costing one call per fixture, so the
+whole history took minutes, not a staged multi-day run.
+
+> Two live API traps found while collecting, both confirmed with deliberately wrong inputs:
+> `/match_stats?season=...` is **silently ignored** in every form (`season=1899` returns the
+> same rows as no filter), and so is `/matches?match_ids[]=...`. `/matches?season=` does filter
+> correctly. Never trust a filter on this API without testing it against a nonsense value.
+
+**Steps 1–3 cost nothing.** ~~Buy GOAT only if the free features clear the gate~~ — moot: GOAT
+arrived first, so the gate was run *with* serve features and **failed** (see the banner at the
+top). The sequencing principle still held, just in the cheaper direction — the measurement ran
+before the build, not after.
 
 ---
 
@@ -135,6 +184,14 @@ useful — at that point you know the market works and you are buying accuracy, 
 **First-set games.** sd 1.97 on a mean of 10.0, bounded 6–13 by the rules of a set, no feature
 above |r| = 0.02, and P(over 9.5) = 0.542. Least signal, most noise, and no odds for it in our
 feed.
+
+> **Checked again once GOAT landed, and the conclusion is unchanged.** `/match_stats` does
+> return real per-set rows (`set_number` 1/2/3 alongside the 0 aggregate), which briefly looked
+> like it removed the "no features exist" objection. It does not: measured across the full
+> 138,219-row collection, **all 9,702 per-set rows fall in 2026 and there are exactly zero for
+> 2021-2025**. There is no historical per-set data to train on. An early sample suggested
+> otherwise because it was drawn from the head of the unfiltered stream, which is current-season
+> data — the same head-of-page sampling trap that nearly discarded Ligue 1's xG.
 
 **Live / in-play.** Not a market question but an architecture one: ingest polls every 5 minutes
 while in-play prices move in seconds. A stale in-play price is *misleading*, not merely old —
