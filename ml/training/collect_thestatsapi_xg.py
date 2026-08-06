@@ -20,8 +20,9 @@ Two stages, deliberately separable:
 The join lives here rather than in football_features.py so merge_xg_into_game_log stays as
 trivial as merge_corners_into_game_log.
 
-Rate limit observed on this key: x-ratelimit-limit 12/min, hence REQUEST_DELAY_SECONDS —
-the same proactive pacing collect_football_data.py already applies to odds.
+Pacing is read from the response's own x-ratelimit-limit rather than hardcoded, because the
+plan on this key has already changed once (12/min -> 120/min) and a stale constant silently
+costs hours.
 
     python ml/training/collect_thestatsapi_xg.py --leagues epl brasileirao
 """
@@ -59,7 +60,35 @@ RAW_CACHE = DATA_DIR / "thestatsapi_xg_raw.json"
 BASE_URL = "https://api.thestatsapi.com/api/football"
 KEYS_DOCX = Path(__file__).resolve().parent.parent.parent / "keys.docx"
 
+# Pacing adapts to whatever the plan actually allows, read from x-ratelimit-limit on the
+# first real response. It was hardcoded at 5.2s for a 12/min plan; when that plan was raised to
+# 120/min the constant would have silently kept the run 10x slower than necessary — hours of
+# wall-clock spent obeying a limit that no longer existed. The floor keeps a safety margin
+# under whatever is advertised.
 REQUEST_DELAY_SECONDS = 5.2
+MIN_REQUEST_DELAY_SECONDS = 0.55
+
+
+def _pace_from_headers(headers) -> None:
+    """Relax REQUEST_DELAY_SECONDS to match the plan's advertised per-minute limit."""
+    global REQUEST_DELAY_SECONDS
+    try:
+        per_minute = int(headers.get("x-ratelimit-limit", 0))
+    except (TypeError, ValueError):
+        return
+    if per_minute <= 0:
+        return
+    # 85% of the advertised rate: bursts and retries still have room, and a 429 storm on this
+    # API escalates rather than degrades gracefully.
+    target = max(MIN_REQUEST_DELAY_SECONDS, 60.0 / (per_minute * 0.85))
+    if abs(target - REQUEST_DELAY_SECONDS) > 0.05:
+        print(
+            f"  pacing: {per_minute}/min advertised -> {target:.2f}s between requests",
+            flush=True,
+        )
+        REQUEST_DELAY_SECONDS = target
+
+
 CHECKPOINT_EVERY = 20
 NAME_MATCH_FLOOR = 0.55
 AMBIGUITY_MARGIN = 0.15
@@ -195,6 +224,7 @@ def fetch(client: httpx.Client, path: str, **params):
                 return 429, None
             time.sleep(float(response.headers.get("Retry-After", 20)))
             continue
+        _pace_from_headers(response.headers)
         time.sleep(REQUEST_DELAY_SECONDS)
         if response.status_code != 200:
             return response.status_code, None
