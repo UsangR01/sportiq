@@ -73,19 +73,35 @@ def run_task(coro: Coroutine[Any, Any, None]) -> None:
 celery_app.conf.beat_schedule = {
     "ingest-odds-every-6-hours": {
         "task": "app.workers.ingest_odds.ingest_odds",
-        # Every 6 hours, NOT every 5 minutes. The 5-minute cadence was inherited from
+        # Every 3 hours, NOT every 5 minutes. The 5-minute cadence was inherited from
         # ingest_live_scores, but odds are quota-metered per request in a way live scores are
-        # not: 7 leagues x 8 dates x 288 runs/day is ~16,000 requests/day against TheRundown's
-        # 1,000-request MONTHLY allowance, which it duly exhausted in ~90 minutes and then 429'd
-        # for weeks. Combined with _dates_with_fixtures (only real fixture dates) and a
-        # 3-day lookahead, this brings a run down to roughly the number of match days actually
-        # scheduled.
+        # not: 7 leagues x 8 dates x 288 runs/day is ~16,000 requests/day, which against the
+        # old 1,000-request MONTHLY allowance was exhausted in ~90 minutes and then 429'd for
+        # weeks. Combined with _dates_with_fixtures (only real fixture dates) and a 3-day
+        # lookahead, a run costs roughly the number of match days actually scheduled.
         #
-        # Honest caveat: at PEAK season (most leagues playing, several match days each) even
-        # this may exceed a 1,000/month free allowance. If odds coverage matters more than the
-        # subscription cost, the fix is a plan upgrade, not a further cadence cut - dropping
-        # below daily would make prices too stale to rank on.
+        # STAYS AT 6h even though TheRundown Pro raised the allowance 1,000 -> 5,000/month.
+        # Tightening to 3h was tried and reverted: measured cost today is only 7 requests/run
+        # (34% of quota at 3h), but that reflects an off-season day where most league-days have
+        # no fixtures. The worst case this schedule must survive is every league playing on
+        # every lookahead day:
+        #     every 6h = 112 req/day =  3,360/month ( 67%)   <- fits
+        #     every 4h = 168 req/day =  5,040/month (101%)   <- over
+        #     every 3h = 224 req/day =  6,720/month (134%)   <- over
+        # Sizing a quota-metered job off an off-season measurement is what caused the original
+        # outage, so the worst case governs. test_ingest_odds_quota.py enforces this.
+        #
+        # Tennis freshness is handled separately and does NOT consume this quota at all -- see
+        # ingest-tennis-odds-hourly below.
         "schedule": 21600.0,
+    },
+    "ingest-tennis-odds-hourly": {
+        "task": "app.workers.ingest_odds.ingest_tennis_odds",
+        # Tennis only, BallDontLie only. Exempt from the 6-hourly cadence above because it
+        # spends none of TheRundown's monthly allowance — GOAT is 600 req/MINUTE and a refresh
+        # costs a couple of calls. Books price a tennis match close to its start, so the
+        # 6-hour job left freshly-priced matches showing no odds on the card.
+        "schedule": 3600.0,
     },
     "ingest-live-scores-every-5-minutes": {
         "task": "app.workers.ingest_live_scores.ingest_live_scores",

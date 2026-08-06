@@ -14,6 +14,8 @@ ingestion one. Hence tests on the request budget itself, not just on parsing.
 
 from datetime import date, timedelta
 
+import pytest
+
 from app.adapters.therundown import TheRundownAdapter
 
 
@@ -109,3 +111,100 @@ def test_lookahead_and_cadence_stay_within_a_sane_request_budget():
         "TheRundown's BASIC plan allows 1,000 per MONTH"
     )
     assert timedelta(seconds=float(schedule)) >= timedelta(hours=1)
+
+
+def test_tennis_refresh_is_hourly():
+    """The tennis job's exemption from the 6-hourly cadence is only valid while it stays on a
+    provider with no monthly cap. The cadence itself is asserted here; the provider list is
+    asserted behaviourally in the test below."""
+    from app.workers.celery import celery_app
+
+    assert float(celery_app.conf.beat_schedule["ingest-tennis-odds-hourly"]["schedule"]) == 3600.0
+
+
+@pytest.mark.asyncio
+async def test_tennis_refresh_never_reaches_therundown():
+    """Asserts the ADAPTERS ACTUALLY PASSED, not the source text.
+
+    If TheRundown were ever added here, the hourly cadence would silently become
+    7 leagues x 4 days x 24 runs/day -- far past the 5,000/month allowance, reproducing the
+    original outage. So this inspects what _ingest_odds_for_league is really handed.
+    """
+    from unittest.mock import patch
+
+    from app.adapters.balldontlie_tennis import BallDontLieTennisAdapter
+    from app.adapters.therundown import TheRundownAdapter
+    from app.workers import ingest_odds as module
+
+    seen = []
+
+    async def capture(sport, league, adapters=None):
+        seen.append(adapters)
+
+    with (
+        patch.object(module, "_ingest_odds_for_league", side_effect=capture),
+        patch.object(module, "async_session_factory") as factory,
+    ):
+        factory.return_value.__aenter__.return_value = _tennis_session()
+        await module._ingest_tennis_odds()
+
+    assert seen, "no league was processed"
+    for adapters in seen:
+        types = [type(a) for a in adapters]
+        assert types == [BallDontLieTennisAdapter], types
+        assert TheRundownAdapter not in types
+
+
+@pytest.mark.asyncio
+async def test_tennis_refresh_survives_one_tour_failing():
+    """WTA still 401s on every GOAT endpoint (the subscription is ATP-only), and that must not
+    stop ATP's prices from landing - the same per-league isolation ingest_fixtures applies."""
+    from unittest.mock import patch
+
+    from app.workers import ingest_odds as module
+
+    calls = []
+
+    async def flaky(sport, league, adapters=None):
+        calls.append(league.slug)
+        if league.slug == "wta":
+            raise RuntimeError("401 Unauthorized")
+
+    with (
+        patch.object(module, "_ingest_odds_for_league", side_effect=flaky),
+        patch.object(module, "async_session_factory") as factory,
+    ):
+        factory.return_value.__aenter__.return_value = _tennis_session()
+        await module._ingest_tennis_odds()
+
+    assert "atp" in calls and "wta" in calls, calls
+
+
+def _tennis_session():
+    """Minimal async session stub returning one tennis Sport and two League rows."""
+    from unittest.mock import AsyncMock
+
+    class _Sport:
+        id = "s"
+        slug = "tennis"
+        active = True
+
+    class _League:
+        def __init__(self, slug):
+            self.slug = slug
+            self.id = slug
+            self.sport_id = "s"
+            self.active = True
+
+    session = AsyncMock()
+
+    def execute_result(*_a, **_k):
+        result = AsyncMock()
+        result.scalar_one_or_none = lambda: _Sport()
+        scalars = AsyncMock()
+        scalars.all = lambda: [_League("atp"), _League("wta")]
+        result.scalars = lambda: scalars
+        return result
+
+    session.execute = AsyncMock(side_effect=execute_result)
+    return session

@@ -160,19 +160,27 @@ async def _dates_with_fixtures(sport: Sport, league: League) -> list[date]:
     return sorted({kickoff.date() for kickoff in rows})
 
 
-async def _fetch_odds_payloads(sport: Sport, league: League) -> list[OddsPayload]:
+async def _fetch_odds_payloads(
+    sport: Sport, league: League, adapters: list | None = None
+) -> list[OddsPayload]:
     """Queries every odds adapter registered for this sport (see
     AdapterFactory.get_odds_adapters) and merges their results — football queries both
     TheRundown and API-Football since real coverage is complementary, split by league, not
     redundant (see CLAUDE.md). A league one adapter has no mapping for raises ValueError from
     that adapter alone (e.g. TheRundown for Brasileirão) — caught per-adapter so it can't
-    block a DIFFERENT adapter's real data for the same league."""
+    block a DIFFERENT adapter's real data for the same league.
+
+    `adapters` restricts the run to a specific subset, which exists so a quota-free provider
+    can be refreshed more often than a quota-metered one — see _ingest_tennis_odds. Default
+    (None) queries every adapter registered for the sport."""
     dates = await _dates_with_fixtures(sport, league)
     if not dates:
         return []
 
     payloads: list[OddsPayload] = []
-    for adapter in AdapterFactory.get_odds_adapters(sport.slug):
+    for adapter in (
+        adapters if adapters is not None else AdapterFactory.get_odds_adapters(sport.slug)
+    ):
         try:
             payloads.extend(
                 await adapter.fetch_odds(
@@ -207,11 +215,13 @@ async def _fetch_odds_payloads(sport: Sport, league: League) -> list[OddsPayload
     return payloads
 
 
-async def _ingest_odds_for_league(sport: Sport, league: League) -> None:
+async def _ingest_odds_for_league(
+    sport: Sport, league: League, adapters: list | None = None
+) -> None:
     redis = get_redis()
 
     async with async_session_factory() as db:
-        payloads = await _fetch_odds_payloads(sport, league)
+        payloads = await _fetch_odds_payloads(sport, league, adapters)
 
         for payload in payloads:
             # Events for a game we haven't ingested fixtures for yet (or can't match) are
@@ -264,7 +274,58 @@ async def _ingest_odds() -> None:
             await _ingest_odds_for_league(sport, league)
 
 
+async def _ingest_tennis_odds() -> None:
+    """Refresh tennis odds from BallDontLie ONLY, which costs nothing against the odds quota.
+
+    The main odds job is pinned to 6 hours by TheRundown's monthly allowance (see
+    celery.py). That cadence is wrong for tennis specifically: books price a match close to
+    its start and new fixtures appear daily, so a six-hour gap routinely left genuinely
+    priced matches showing no odds at all on the card — the symptom that prompted this.
+
+    BallDontLie is not subject to that constraint. It is the tennis fixtures provider too, so
+    its GOAT allowance is 600 requests/MINUTE rather than 5,000/month, and one refresh costs a
+    couple of calls. Hourly here is therefore free in the only sense that matters.
+
+    TheRundown is deliberately NOT included: it still supplies tennis prices (and more books),
+    but on the shared 6-hourly run where its quota is accounted for. This job only adds
+    freshness it costs nothing to add.
+    """
+    from app.adapters.balldontlie_tennis import BallDontLieTennisAdapter
+
+    adapters = [BallDontLieTennisAdapter()]
+    async with async_session_factory() as db:
+        sport = (
+            await db.execute(select(Sport).where(Sport.slug == "tennis", Sport.active.is_(True)))
+        ).scalar_one_or_none()
+        if sport is None:
+            return
+        leagues = (
+            (
+                await db.execute(
+                    select(League).where(League.sport_id == sport.id, League.active.is_(True))
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    for league in leagues:
+        try:
+            await _ingest_odds_for_league(sport, league, adapters)
+        except Exception:
+            # WTA still 401s on every GOAT endpoint (ATP-only subscription), and one tour
+            # failing must never stop the other — the same per-league isolation ingest_fixtures
+            # already applies for exactly this reason.
+            logger.exception("Tennis odds refresh failed for league=%s", league.slug)
+
+
+@celery_app.task(name="app.workers.ingest_odds.ingest_tennis_odds")
+def ingest_tennis_odds() -> None:
+    """Hourly, quota-free tennis odds refresh — see _ingest_tennis_odds."""
+    run_task(_ingest_tennis_odds())
+
+
 @celery_app.task(name="app.workers.ingest_odds.ingest_odds")
 def ingest_odds() -> None:
-    """Celery beat triggers this every 5 minutes for all active sports (TDD §2.3)."""
+    """Celery beat triggers this every 6 hours for all active sports (TDD §2.3)."""
     run_task(_ingest_odds())
