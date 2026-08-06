@@ -464,3 +464,24 @@ def test_is_same_edition_keeps_a_match_it_cannot_judge():
     match_without_dates = make_match()
     match_without_dates["tournament"] = {"id": 264}
     assert _is_same_edition(match_without_dates, {"id": 264, "start_date": "2026-08-02"}) is True
+
+
+def test_surface_filter_ignores_whitespace_and_case():
+    """The provider returns both "Grass" and "Grass     " as real values — 190 of 2,295 grass
+    matches carry the padded form, measured across 17,273 completed ATP matches.
+
+    An exact comparison splits one surface into two, so a player's grass record quietly omits
+    those matches. The features still populate; they just draw on a smaller sample than they
+    claim to, which is the kind of fault that never surfaces as an error."""
+    matches = [
+        {"tournament": {"surface": "Grass"}},
+        {"tournament": {"surface": "Grass     "}},
+        {"tournament": {"surface": "grass"}},
+        {"tournament": {"surface": "Clay"}},
+        {"tournament": {"surface": None}},
+    ]
+
+    assert len(_filter_by_surface(matches, "Grass")) == 3
+    assert len(_filter_by_surface(matches, "  grass ")) == 3
+    assert len(_filter_by_surface(matches, "Clay")) == 1
+    assert _filter_by_surface(matches, None) == []
