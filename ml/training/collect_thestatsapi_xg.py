@@ -184,6 +184,15 @@ def fetch(client: httpx.Client, path: str, **params):
             time.sleep(10)
             continue
         if response.status_code == 429:
+            # A monthly cap and a per-minute burst limit both arrive as 429 with the same
+            # Retry-After, and retrying is futile for the first. Distinguish them: a monthly
+            # cap will not clear no matter how long this loop waits, and pretending otherwise
+            # burns twenty minutes before the caller reports a misleading "season not found".
+            body = response.text or ""
+            if "USAGE_LIMIT_EXCEEDED" in body or "Monthly usage limit" in body:
+                print(f"    QUOTA EXHAUSTED (monthly) on {path} — stopping, retries cannot help",
+                      flush=True)
+                return 429, None
             time.sleep(float(response.headers.get("Retry-After", 20)))
             continue
         time.sleep(REQUEST_DELAY_SECONDS)
@@ -220,7 +229,15 @@ def collect_raw(leagues: list[str]) -> dict:
             None,
         )
         if not season_id:
-            print(f"{league} {label}: season not found", flush=True)
+            # Say WHICH it is. These were reported identically before, and a rate-limited run
+            # was nearly recorded as "Ligue 1 has no xG" — a permanent-sounding conclusion
+            # drawn from a temporary failure.
+            reason = (
+                "request failed (quota/rate limit) — NOT a missing season"
+                if status != 200
+                else "season genuinely absent from this competition"
+            )
+            print(f"{league} {label}: no season id — {reason}", flush=True)
             continue
 
         matches, page = [], 1
