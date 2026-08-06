@@ -24,6 +24,7 @@ from app.adapters.balldontlie_tennis import (
     _is_same_edition,
     _latest_rank_points,
     _map_match_to_fixture_payload,
+    _map_odds_row_to_payload,
     _map_status,
     _match_kickoff_is_estimated,
     _match_result_type,
@@ -31,6 +32,7 @@ from app.adapters.balldontlie_tennis import (
     _sets_won,
     _strip_tour_prefix,
     _tournament_overlaps_window,
+    _upcoming_match_ids,
     _win_rate,
 )
 
@@ -485,3 +487,146 @@ def test_surface_filter_ignores_whitespace_and_case():
     assert len(_filter_by_surface(matches, "  grass ")) == 3
     assert len(_filter_by_surface(matches, "Clay")) == 1
     assert _filter_by_surface(matches, None) == []
+
+
+# --- /odds mapping (GOAT tier) -------------------------------------------------------------
+# Shaped per a real DraftKings row confirmed live once the GOAT plan was activated:
+# {"id":..., "match_id":4593192, "vendor":"draftkings", "player1":{...}, "player2":{...},
+#  "player1_odds":-158, "player2_odds":124, "updated_at":"2026-08-04T23:05:36.102Z"}
+
+
+def make_odds_row(*, p1_id: int, p2_id: int, p1_odds, p2_odds, vendor="draftkings") -> dict:
+    return {
+        "id": 269355464,
+        "match_id": 4593192,
+        "vendor": vendor,
+        "player1": {"id": p1_id, "full_name": "Player One"},
+        "player2": {"id": p2_id, "full_name": "Player Two"},
+        "player1_odds": p1_odds,
+        "player2_odds": p2_odds,
+        "updated_at": "2026-08-04T23:05:36.102Z",
+    }
+
+
+def test_odds_are_oriented_by_player_id_not_by_player1_player2_position():
+    """The single most important property of this mapping.
+
+    home is the LOWER player id (_home_away_players), and the provider orders its own
+    player1/player2 slots independently — for completed matches it demonstrably puts the
+    WINNER in player1. Reading player1_odds as "home odds" positionally would show users an
+    inverted price: a 1.17 favourite quoted at 8.00.
+
+    Both rows below describe the SAME market with the SAME prices; only the slot order
+    differs. The mapped payload must be identical.
+    """
+    # id 10 is home (lower). Its price is -400 -> heavy favourite -> 1.25 decimal.
+    favourite_in_slot_1 = make_odds_row(p1_id=10, p2_id=99, p1_odds=-400, p2_odds=300)
+    favourite_in_slot_2 = make_odds_row(p1_id=99, p2_id=10, p1_odds=300, p2_odds=-400)
+
+    a = _map_odds_row_to_payload(favourite_in_slot_1, "atp")
+    b = _map_odds_row_to_payload(favourite_in_slot_2, "atp")
+
+    assert a.home_odds == b.home_odds == 1.25
+    assert a.away_odds == b.away_odds == 4.0
+    # The favourite must be home in both, never flipped by slot order.
+    assert a.home_odds < a.away_odds
+
+
+def test_odds_payload_uses_the_tour_prefixed_fixture_id_for_a_direct_join():
+    """match_id is BallDontLie's own, and BallDontLie is also the fixtures provider — so this
+    must carry OUR tour-prefixed form to match Fixture.external_id directly in
+    ingest_odds._resolve_fixture. An unprefixed id would silently miss every fixture and fall
+    through to the fuzzy name join this feed exists to avoid."""
+    payload = _map_odds_row_to_payload(
+        make_odds_row(p1_id=10, p2_id=99, p1_odds=-158, p2_odds=124), "atp"
+    )
+    assert payload.fixture_external_id == "atp:4593192"
+    assert (
+        _map_odds_row_to_payload(
+            make_odds_row(p1_id=10, p2_id=99, p1_odds=-158, p2_odds=124), "wta"
+        ).fixture_external_id
+        == "wta:4593192"
+    )
+
+
+def test_odds_are_converted_from_american_to_decimal():
+    payload = _map_odds_row_to_payload(
+        make_odds_row(p1_id=10, p2_id=99, p1_odds=-158, p2_odds=124), "atp"
+    )
+    assert payload.home_odds == 1.6329  # -158 -> 1 + 100/158
+    assert payload.away_odds == 2.24  # +124 -> 1 + 124/100
+    assert payload.market == "h2h"
+    assert payload.draw_odds is None  # tennis has no draw
+    assert payload.bookmaker == "draftkings"
+
+
+def test_odds_row_missing_a_price_is_dropped_not_half_populated():
+    """A row with only one side priced is not a real market. Emitting it would let a
+    None-valued side reach the EV/pick math as if it were a real absence of odds."""
+    assert (
+        _map_odds_row_to_payload(
+            make_odds_row(p1_id=10, p2_id=99, p1_odds=-158, p2_odds=None), "atp"
+        )
+        is None
+    )
+    assert (
+        _map_odds_row_to_payload(make_odds_row(p1_id=10, p2_id=99, p1_odds=0, p2_odds=124), "atp")
+        is None
+    )
+    incomplete = make_odds_row(p1_id=10, p2_id=99, p1_odds=-158, p2_odds=124)
+    incomplete["match_id"] = None
+    assert _map_odds_row_to_payload(incomplete, "atp") is None
+
+
+def test_odds_updated_at_falls_back_rather_than_failing_the_row():
+    """A real price with an unreadable timestamp is still a real price; this column only drives
+    staleness display."""
+    row = make_odds_row(p1_id=10, p2_id=99, p1_odds=-158, p2_odds=124)
+    row["updated_at"] = "not-a-timestamp"
+    payload = _map_odds_row_to_payload(row, "atp")
+    assert payload is not None and payload.updated_at.tzinfo is not None
+
+
+@pytest.mark.asyncio
+async def test_upcoming_match_ids_excludes_finished_and_live_matches():
+    """The guard against ingesting in-play prices as if they were pre-match markets.
+
+    Measured on a real /odds?season=2026 response: 70 of 94 rows were for `finished` matches,
+    2 `in_progress`, 22 `scheduled` — and all 24 implausible quotes (1.001/74.0, 1.005/51.0)
+    sat on matches already decided. A finished match's last traded price effectively announces
+    the winner, so admitting it would both display nonsense and hand moneyline_implied_prob a
+    feature that has seen the outcome.
+    """
+    tournament = {"id": 900, "start_date": "2026-08-01", "end_date": "2026-08-20"}
+
+    def match(mid, status):
+        return {
+            "id": mid,
+            "match_status": status,
+            "tournament": tournament,
+            "scheduled_time": "2026-08-10T12:00:00Z",
+        }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/tournaments"):
+            return httpx.Response(200, json={"data": [tournament], "meta": {}})
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    match(1, "scheduled"),
+                    match(2, "finished"),
+                    match(3, "in_progress"),
+                    match(4, "retired"),
+                    match(5, "scheduled"),
+                ],
+                "meta": {},
+            },
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://x/atp/v1"
+    ) as client:
+        ids = await _upcoming_match_ids(client, date(2026, 8, 5), date(2026, 8, 12))
+
+    assert ids == {"1", "5"}

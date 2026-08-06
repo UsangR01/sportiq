@@ -25,11 +25,17 @@ def test_unknown_sport_defaults_to_therundown_only():
     assert [type(a) for a in adapters] == [TheRundownAdapter]
 
 
-def test_tennis_gets_only_therundown_default_odds():
-    # No explicit _ODDS_ADAPTERS["tennis"] entry — odds are an explicit fast-follow, not v1
-    # scope (see CLAUDE.md). Falls back to the same default every unregistered sport gets.
+def test_tennis_gets_both_therundown_and_balldontlie_odds():
+    """Tennis pairs two odds providers for a per-MARKET reason, not football's per-league one.
+
+    BallDontLie (GOAT tier) carries moneyline only — no totals market at all — so TheRundown
+    remains the sole source of game-totals lines. BallDontLie in turn is the tennis fixtures
+    provider, so its match_id joins Fixture.external_id directly instead of going through the
+    team-name fuzzy match that has already produced missed and inverted tennis prices. Order
+    matters only for merge precedence, not correctness.
+    """
     adapters = AdapterFactory.get_odds_adapters("tennis")
-    assert [type(a) for a in adapters] == [TheRundownAdapter]
+    assert [type(a) for a in adapters] == [TheRundownAdapter, BallDontLieTennisAdapter]
 
 
 def test_tennis_stats_adapter_is_balldontlie_tennis():

@@ -18,9 +18,7 @@ _STATS_ADAPTERS: dict[str, type[DataSourceAdapter]] = {
 }
 
 # No "tennis" entry in _INJURY_ADAPTERS (no tennis injury feed at MVP — same as every
-# non-NBA/football sport today) or _ODDS_ADAPTERS (odds are an explicit fast-follow; defaults
-# to [TheRundownAdapter] below, which raises a per-adapter-isolated ValueError in
-# ingest_odds.py until real tennis coverage is confirmed and mapped).
+# non-NBA/football sport today). Tennis DOES now have an _ODDS_ADAPTERS entry — see below.
 
 # Sport-specific, optional injury adapters. Absent entries mean "no injury feed for this sport".
 _INJURY_ADAPTERS: dict[str, type[DataSourceAdapter]] = {
@@ -34,8 +32,16 @@ _INJURY_ADAPTERS: dict[str, type[DataSourceAdapter]] = {
 # doesn't cover at all) but none of the 5 European leagues (which only TheRundown covers).
 # Both are queried for football; a league only one of them covers just gets an empty list
 # from the other, not an error (see app/workers/ingest_odds.py).
+#
+# Tennis pairs the two for a different reason than football does — not per-league coverage but
+# per-MARKET. BallDontLie (GOAT tier) carries moneyline only, with no totals market at all,
+# while TheRundown is the only source of game-totals lines. They also differ in join quality:
+# BallDontLie is the tennis fixtures provider too, so its match_id matches Fixture.external_id
+# directly, whereas TheRundown's prices need the team-name fuzzy join that has already
+# produced both missed and inverted tennis prices. Both are queried; ingest merges them.
 _ODDS_ADAPTERS: dict[str, list[type[DataSourceAdapter]]] = {
     "football": [TheRundownAdapter, APIFootballAdapter],
+    "tennis": [TheRundownAdapter, BallDontLieTennisAdapter],
 }
 
 

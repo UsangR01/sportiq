@@ -540,6 +540,104 @@ async def _fetch_all_pages(client: httpx.AsyncClient, path: str, params: dict) -
     return results
 
 
+async def _upcoming_match_ids(
+    client: httpx.AsyncClient, window_start: date, window_end: date
+) -> set[str]:
+    """Ids of matches in the window that have NOT started, as strings.
+
+    Only `scheduled` counts. A live match's price is already reacting to the score, and a
+    finished match's last price effectively states the winner — neither is a pre-match market.
+    See fetch_odds for the measurement that made this necessary.
+    """
+    tournaments = await _fetch_all_pages(client, "/tournaments", {"per_page": 100})
+    upcoming: set[str] = set()
+    for tournament in tournaments:
+        if not _tournament_overlaps_window(tournament, window_start, window_end):
+            continue
+        matches = await _fetch_all_pages(
+            client, "/matches", {"tournament_ids[]": tournament["id"], "per_page": 100}
+        )
+        for match in matches:
+            match.setdefault("tournament", tournament)
+            if not _is_same_edition(match, tournament):
+                continue
+            if _map_status(match.get("match_status")) == "scheduled":
+                upcoming.add(str(match["id"]))
+    return upcoming
+
+
+def _american_to_decimal(american: float | None) -> float | None:
+    """BallDontLie quotes American odds (confirmed live: -158 / +124 on a real DraftKings row);
+    the TDD requires decimal at ingest.
+
+    Deliberately NOT imported from therundown.py despite the identical formula: that version
+    also filters TheRundown's 0.0001 masked-affiliate sentinel, which is a quirk of that
+    provider's subscription model and has no meaning here. Sharing it would either carry a
+    misleading filter into this feed or invite someone to remove the filter and silently break
+    TheRundown's.
+    """
+    if american is None or american == 0:
+        return None
+    if american > 0:
+        return round(1 + american / 100, 4)
+    return round(1 + 100 / abs(american), 4)
+
+
+def _map_odds_row_to_payload(row: dict, tour: str) -> OddsPayload | None:
+    """Pure, network-free mapping — unit-testable against a recorded real response.
+
+    THE ORIENTATION IS THE WHOLE POINT OF THIS FUNCTION. The feed's player1/player2 slots are
+    not our home/away: home is whichever player has the LOWER id (_home_away_players), and the
+    provider is free to order its own slots differently — for completed matches it demonstrably
+    puts the WINNER in player1, which is what caused this codebase's worst bug to date (100%
+    target leakage in the first tennis training run). Reading player1_odds as "home odds"
+    positionally would reintroduce exactly that class of error, this time as inverted prices
+    shown to users: a 1.17 favourite displayed at 8.00. So both the price and the identity are
+    resolved by id, never by position.
+
+    Returns None rather than a half-populated payload when either price is missing — an odds
+    row with no usable price is not a real market.
+    """
+    match_id = row.get("match_id")
+    player1, player2 = row.get("player1") or {}, row.get("player2") or {}
+    if match_id is None or player1.get("id") is None or player2.get("id") is None:
+        return None
+
+    # Same rule as _home_away_players, applied to the odds row's own player objects.
+    p1_is_home = int(player1["id"]) < int(player2["id"])
+    home_american = row.get("player1_odds") if p1_is_home else row.get("player2_odds")
+    away_american = row.get("player2_odds") if p1_is_home else row.get("player1_odds")
+
+    home_odds = _american_to_decimal(home_american)
+    away_odds = _american_to_decimal(away_american)
+    if home_odds is None or away_odds is None:
+        return None
+
+    updated_at = _parse_updated_at(row.get("updated_at"))
+    return OddsPayload(
+        # Our own tour-prefixed id, so ingest_odds._resolve_fixture matches this directly
+        # against Fixture.external_id — no fuzzy team-name join for tennis at all.
+        fixture_external_id=_external_id(tour, match_id),
+        bookmaker=str(row.get("vendor") or "unknown"),
+        market="h2h",
+        home_odds=home_odds,
+        draw_odds=None,  # tennis has no draw
+        away_odds=away_odds,
+        updated_at=updated_at,
+    )
+
+
+def _parse_updated_at(raw: str | None) -> datetime:
+    """Falls back to now() rather than failing the row — a real price with an unreadable
+    timestamp is still a real price, and this column only drives staleness display."""
+    if not raw:
+        return datetime.now(UTC)
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.now(UTC)
+
+
 async def _fetch_matches_across_seasons(
     client: httpx.AsyncClient, player_external_id: str, seasons: list[int]
 ) -> list[dict]:
@@ -599,10 +697,50 @@ class BallDontLieTennisAdapter(DataSourceAdapter):
         days_ahead: int,
         dates: list[date] | None = None,
     ) -> list[OddsPayload]:
-        raise NotImplementedError(
-            "BallDontLie tennis odds require the GOAT tier — not wired up yet (predictions "
-            "ship first, odds are an explicit fast-follow; see CLAUDE.md)"
-        )
+        """Real moneyline odds, GOAT tier. Complements TheRundown rather than replacing it:
+        this feed has NO totals market (confirmed live — a row carries only player1_odds/
+        player2_odds), so game-totals lines still come from TheRundown alone.
+
+        What it does bring is a direct ID join. match_id here is the SAME id space as our own
+        Fixture.external_id (BallDontLie is also the tennis fixtures provider), so
+        ingest_odds._resolve_fixture matches on external_id and never reaches the team-name
+        fuzzy fallback that produced both missed and mis-oriented tennis prices. Vendors are
+        DraftKings and FanDuel, both real and unmasked — unlike TheRundown's subscription,
+        where most affiliates return the 0.0001 masked sentinel.
+
+        ONLY NOT-YET-STARTED MATCHES ARE RETURNED, and that filter is load-bearing rather than
+        tidiness. /odds?season=X returns prices for matches that have ALREADY FINISHED —
+        measured on a real response: 70 of 94 rows were `finished`, 2 `in_progress`, and only
+        22 `scheduled`. Those finished rows are last-traded IN-PLAY prices, so they encode the
+        result: every implausible quote in that sample (1.001/74.0, 1.005/51.0 — 24 rows) sat
+        on a match already decided. Ingesting them would show absurd prices against completed
+        fixtures, and would poison moneyline_implied_prob with a feature that has seen the
+        outcome. in_progress is excluded for the same reason.
+
+        There is no status or date filter on /odds itself, so the upcoming set is resolved the
+        same way fetch_fixtures does — tournaments overlapping the window, then their matches.
+        That costs about one call per overlapping tournament (typically ~5), not one per
+        priced match.
+        """
+        tour_prefix = _tour_prefix(league)
+        season = _current_tennis_season()
+        now = datetime.now(UTC)
+        window_start, window_end = now.date(), (now + timedelta(days=days_ahead)).date()
+
+        async with self._client(tour_prefix) as client:
+            rows = await _fetch_all_pages(client, "/odds", {"season": season, "per_page": 100})
+            if not rows:
+                return []
+            upcoming = await _upcoming_match_ids(client, window_start, window_end)
+
+        payloads: list[OddsPayload] = []
+        for row in rows:
+            if str(row.get("match_id")) not in upcoming:
+                continue
+            payload = _map_odds_row_to_payload(row, league)
+            if payload is not None:
+                payloads.append(payload)
+        return payloads
 
     async def fetch_fixtures(
         self, sport: str, league: str, days_ahead: int, days_back: int = 0
