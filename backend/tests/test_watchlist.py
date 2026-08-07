@@ -228,3 +228,77 @@ async def test_deleting_a_fixture_removes_its_watchlist_rows(api_client):
             await db.execute(select(WatchlistItem).where(WatchlistItem.fixture_id == fixture_id))
         ).all()
     assert remaining == []
+
+
+async def test_saving_a_fixture_arms_its_reminder_immediately(api_client):
+    """Saving is when a user expects the reminder to be set.
+
+    The daily sweep runs at 02:00 UTC, so relying on it alone means a fixture saved during the
+    day for a match later that day or the next morning is never queued and the reminder simply
+    never arrives - silently, with nothing in any log to suggest it should have.
+    """
+    from unittest.mock import patch
+
+    from app.workers.ingest_fixtures import KICKOFF_REMINDER_MINUTES
+
+    kickoff = datetime.now(UTC) + timedelta(hours=10)
+    fixture_id = await _seed_fixture(kickoff)
+    token = await _register(api_client)
+
+    with patch("app.workers.notify_users.notify_kickoff_reminder.apply_async") as queued:
+        response = await api_client.post(
+            "/user/watchlist",
+            json={"fixture_id": str(fixture_id)},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 204
+    assert queued.call_count == 1
+    eta = queued.call_args.kwargs["eta"]
+    expected = kickoff - timedelta(minutes=KICKOFF_REMINDER_MINUTES)
+    assert abs((eta - expected).total_seconds()) < 2
+
+
+async def test_saving_does_not_arm_a_reminder_for_an_estimated_kickoff(api_client):
+    """An estimated kickoff is a DATE, not a time (common for tennis). "Starts in an hour" off
+    a midnight placeholder is a false claim, so no reminder is armed at all."""
+    from unittest.mock import patch
+
+    fixture_id = await _seed_fixture(datetime.now(UTC) + timedelta(hours=10))
+    async with async_session_factory() as db:
+        fixture = (await db.execute(select(Fixture).where(Fixture.id == fixture_id))).scalar_one()
+        fixture.kickoff_is_estimated = True
+        await db.commit()
+    token = await _register(api_client)
+
+    with patch("app.workers.notify_users.notify_kickoff_reminder.apply_async") as queued:
+        response = await api_client.post(
+            "/user/watchlist",
+            json={"fixture_id": str(fixture_id)},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 204
+    assert queued.call_count == 0
+
+
+async def test_a_broker_failure_does_not_lose_the_save(api_client):
+    """The fixture must still be saved if the queue is unreachable. The daily sweep is the
+    backstop, so degrading to "saved but not yet armed" is right; losing the save is not."""
+    from unittest.mock import patch
+
+    fixture_id = await _seed_fixture(datetime.now(UTC) + timedelta(hours=10))
+    token = await _register(api_client)
+    auth = {"Authorization": f"Bearer {token}"}
+
+    with patch(
+        "app.workers.notify_users.notify_kickoff_reminder.apply_async",
+        side_effect=OSError("broker down"),
+    ):
+        response = await api_client.post(
+            "/user/watchlist", json={"fixture_id": str(fixture_id)}, headers=auth
+        )
+
+    assert response.status_code == 204
+    listed = (await api_client.get("/user/watchlist", headers=auth)).json()
+    assert any(item["fixture_id"] == str(fixture_id) for item in listed)

@@ -1,3 +1,4 @@
+import logging
 import uuid
 
 from exponent_server_sdk import PushClient
@@ -18,6 +19,8 @@ from app.users.schemas import (
     WatchlistAdd,
     WatchlistItemResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["users"])
 
@@ -164,6 +167,21 @@ async def add_to_watchlist(
         return
     db.add(WatchlistItem(user_id=user.id, fixture_id=body.fixture_id))
     await db.commit()
+
+    # Arm the T-60 reminder now, not at the next daily sweep. ingest_fixtures runs at 02:00
+    # UTC, so without this a fixture saved during the day for a match later the same day or
+    # the next morning is never queued and the reminder silently never arrives — the moment a
+    # user saves is exactly when they expect it to be set.
+    #
+    # Imported here rather than at module scope: app.workers imports the API models, so a
+    # top-level import would be circular. A broker that is down must not fail the save either
+    # — the fixture is stored, and the daily sweep still picks it up.
+    from app.workers.ingest_fixtures import schedule_kickoff_reminder
+
+    try:
+        schedule_kickoff_reminder(fixture)
+    except Exception:
+        logger.exception("Could not queue kickoff reminder for fixture %s", body.fixture_id)
 
 
 @router.delete("/user/watchlist/{fixture_id}", status_code=status.HTTP_204_NO_CONTENT)

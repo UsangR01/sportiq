@@ -294,24 +294,66 @@ MARKET_BASE_RATES: dict[tuple[str, str, float | None], float] = {
     ("corners_total", "over", 10.5): 0.4297,
 }
 
+# Base rates are PER SPORT. The table above is football's, measured on football fixtures, and
+# applying it to another sport silently changes what "informative" means.
+#
+# Tennis is the case that forced this. "Home" there is not a venue — tennis has no home court —
+# it is an arbitrary but stable tiebreak (lower external player id, see
+# balldontlie_tennis.py:_home_away_players). That tiebreak is not 50/50: measured over 17,434
+# real completed ATP matches (2021-2025), the lower-id player wins 62.17%, and 61.77% across
+# all 64,245 matches back to 2007. Ids correlate loosely with how long a player has been on
+# tour, so the lower id is usually the more established player.
+#
+# Judged against football's 45.82%, a tennis "home 55%" call looked like +9 points of real
+# information when it is actually 7 points BELOW what the tiebreak alone gives you. The gate
+# was admitting picks that say less than nothing.
+#
+# Measured with ml/data/tennis_match_stats_atp.parquet; cross-checked against the independent
+# training game log, which agrees to four decimals (0.6217). A first attempt disagreed
+# (0.5198) purely because PLAYER_ID is stored as a string, so min() compared "10" < "9"
+# lexicographically — worth knowing before re-deriving these.
+_TENNIS_BASE_RATES: dict[tuple[str, str, float | None], float] = {
+    ("h2h", "home", None): 0.6217,
+    ("h2h", "away", None): 0.3783,
+    # No draw in tennis, and no double-chance/goals/corners markets either — those keys are
+    # absent rather than zeroed, so _base_rate returns None and the gate abstains instead of
+    # judging a market this sport does not have.
+}
+
+BASE_RATES_BY_SPORT: dict[str, dict[tuple[str, str, float | None], float]] = {
+    "tennis": _TENNIS_BASE_RATES,
+}
+
 # How far above its market's base rate a pick must sit to count as saying anything. A pick at
 # or below base rate is not a prediction, it is the league average wearing a percentage sign.
 MIN_EDGE_OVER_BASE_RATE = 0.05
 
 
-def _base_rate(candidate: _MarketCandidate) -> float | None:
+def _base_rate(candidate: _MarketCandidate, sport_slug: str | None = None) -> float | None:
     """The share of real fixtures this outcome occurs in regardless of who is playing.
 
-    None for a market/line with no measured base rate (a line we have not quantified). Such a
-    candidate is not filtered out - we cannot judge its informativeness, and silently dropping
-    it would be worse than admitting we do not know."""
-    return MARKET_BASE_RATES.get((candidate.market, candidate.selection, candidate.line))
+    Sport-specific rates win where they exist; otherwise the football-measured table applies.
+    NBA deliberately has no override — its h2h home rate is a real home-court advantage in the
+    same 45-55% territory the football numbers describe, so borrowing them is defensible in a
+    way borrowing them for tennis was not.
+
+    None for a market/line with no measured base rate (a line we have not quantified, or a
+    market the sport does not have). Such a candidate is not filtered out - we cannot judge its
+    informativeness, and silently dropping it would be worse than admitting we do not know."""
+    key = (candidate.market, candidate.selection, candidate.line)
+    if sport_slug is not None:
+        by_sport = BASE_RATES_BY_SPORT.get(sport_slug)
+        if by_sport is not None:
+            return by_sport.get(key)
+    return MARKET_BASE_RATES.get(key)
 
 
-def _edge_over_base_rate(candidate: _MarketCandidate) -> float | None:
+def _edge_over_base_rate(
+    candidate: _MarketCandidate, sport_slug: str | None = None
+) -> float | None:
     """How much this pick beats its own market's base rate by - i.e. how much the model is
     actually telling us about THIS fixture, rather than about the sport in general."""
-    base = _base_rate(candidate)
+    base = _base_rate(candidate, sport_slug)
     if base is None or candidate.probability is None:
         return None
     return candidate.probability - base
@@ -332,7 +374,9 @@ def _expected_value(candidate: _MarketCandidate) -> float:
 
 
 def _pick_best(
-    candidates: list[_MarketCandidate], min_probability: float | None = None
+    candidates: list[_MarketCandidate],
+    min_probability: float | None = None,
+    sport_slug: str | None = None,
 ) -> BestPick | None:
     """The best VALUE pick, not the most likely statement.
 
@@ -393,7 +437,9 @@ def _pick_best(
         and (min_probability is None or c.probability >= min_probability)
         # A pick at or below its market's base rate is the league average with a percentage
         # sign on it, not a prediction about THIS fixture.
-        and ((edge := _edge_over_base_rate(c)) is None or edge >= MIN_EDGE_OVER_BASE_RATE)
+        and (
+            (edge := _edge_over_base_rate(c, sport_slug)) is None or edge >= MIN_EDGE_OVER_BASE_RATE
+        )
     ]
     priced = [c for c in candidates if c.probability is not None and c.odds is not None]
     unpriced = [c for c in candidates if c.probability is not None and c.odds is None]
@@ -457,6 +503,19 @@ async def _bulk_best_picks(
             }
         )
 
+    # Which sport each fixture belongs to, so the base-rate gate uses that sport's own rates
+    # rather than football's (see BASE_RATES_BY_SPORT — tennis "home" wins 62% of the time,
+    # against football's 45.8%, so the wrong table admits picks that say less than nothing).
+    sport_by_fixture: dict = dict(
+        (
+            await db.execute(
+                select(Fixture.id, Sport.slug)
+                .join(Sport, Sport.id == Fixture.sport_id)
+                .where(Fixture.id.in_(fixture_ids))
+            )
+        ).all()
+    )
+
     prediction_rows = (
         (await db.execute(select(Prediction).where(Prediction.fixture_id.in_(fixture_ids))))
         .scalars()
@@ -482,7 +541,11 @@ async def _bulk_best_picks(
             candidates = [
                 c for c in candidates if c.market == market and (line is None or c.line == line)
             ]
-        best = _pick_best(candidates, min_probability=min_probability)
+        best = _pick_best(
+            candidates,
+            min_probability=min_probability,
+            sport_slug=sport_by_fixture.get(fixture_id),
+        )
         if best is not None:
             best_picks[fixture_id] = best
 

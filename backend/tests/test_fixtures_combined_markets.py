@@ -574,3 +574,61 @@ def test_informativeness_is_a_fixed_bar_not_something_the_slider_moves():
     uninformative = _MarketCandidate("under", 0.68, 1.68, "goals_total", 3.5)
     for floor in (0.5, 0.6, 0.65):
         assert _pick_best([uninformative], min_probability=floor) is None
+
+
+# --- base rates are per SPORT -------------------------------------------------------------
+
+
+def test_tennis_home_is_judged_against_the_tennis_tiebreak_not_footballs_home_advantage():
+    """Football's base rates must not govern tennis.
+
+    "Home" in tennis is not a venue — there is no home court. It is an arbitrary but stable
+    tiebreak (lower external player id, balldontlie_tennis.py:_home_away_players), and that
+    tiebreak is far from 50/50: measured over 17,434 real completed ATP matches (2021-2025)
+    the lower-id player wins 62.17%, because ids correlate loosely with time on tour.
+
+    Judged against football's 45.82% home rate, a tennis "home 55%" call looks like +9 points
+    of information when it is really 7 points BELOW what the tiebreak alone gives you. The gate
+    was admitting picks that say less than nothing.
+    """
+    from app.fixtures.router import _MarketCandidate, _pick_best
+
+    mediocre = _MarketCandidate("home", 0.55, 1.90, "h2h", None)
+
+    # Under football's table this clears the gate (0.55 - 0.4582 = +0.092 >= 0.05)...
+    assert _pick_best([mediocre], sport_slug="football") is not None
+    # ...but for tennis it is BELOW the base rate entirely (0.55 - 0.6217 = -0.072).
+    assert _pick_best([mediocre], sport_slug="tennis") is None
+
+
+def test_tennis_pick_well_above_its_own_base_rate_still_surfaces():
+    """The gate must not simply suppress tennis. A genuinely strong call still passes."""
+    from app.fixtures.router import _MarketCandidate, _pick_best
+
+    strong = _MarketCandidate("home", 0.85, 1.40, "h2h", None)
+    best = _pick_best([strong], sport_slug="tennis")
+    assert best is not None and best.selection == "home"
+
+
+def test_base_rate_abstains_for_a_market_the_sport_does_not_have():
+    """Tennis has no goals market. The tennis table omits those keys rather than zeroing them,
+    so the gate must abstain (return None, i.e. no opinion) instead of judging the pick against
+    a football number that has no meaning here."""
+    from app.fixtures.router import _base_rate, _MarketCandidate
+
+    goals = _MarketCandidate("under", 0.68, 1.60, "goals_total", 3.5)
+    assert _base_rate(goals, "tennis") is None
+    assert _base_rate(goals, "football") == 0.6941
+    # Unknown sport falls back to the football-measured table rather than abstaining, which
+    # keeps every existing caller's behaviour unchanged.
+    assert _base_rate(goals, None) == 0.6941
+
+
+def test_football_base_rates_are_unchanged_by_the_per_sport_split():
+    """A pure regression guard: the football numbers this gate was calibrated on must not have
+    moved when the tennis table was added."""
+    from app.fixtures.router import MARKET_BASE_RATES
+
+    assert MARKET_BASE_RATES[("h2h", "home", None)] == 0.4582
+    assert MARKET_BASE_RATES[("h2h", "away", None)] == 0.2879
+    assert MARKET_BASE_RATES[("goals_total", "under", 3.5)] == 0.6941

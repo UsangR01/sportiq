@@ -424,7 +424,6 @@ async def _queue_kickoff_reminders(db: AsyncSession, upcoming: list[Fixture]) ->
     """
     if not upcoming:
         return
-    from app.workers.notify_users import notify_kickoff_reminder
 
     now = datetime.now(UTC)
     by_id = {f.id: f for f in upcoming}
@@ -444,16 +443,38 @@ async def _queue_kickoff_reminders(db: AsyncSession, upcoming: list[Fixture]) ->
     )
 
     for fixture_id in watched:
-        fixture = by_id[fixture_id]
-        # An estimated kickoff is a date, not a time — "starts in an hour" off a midnight
-        # placeholder would be wrong, so it is skipped here as well as at send time.
-        if fixture.kickoff_is_estimated or fixture.kickoff_utc is None:
-            continue
-        kickoff = fixture.kickoff_utc
-        if kickoff.tzinfo is None:
-            kickoff = kickoff.replace(tzinfo=UTC)
-        eta = kickoff - timedelta(minutes=KICKOFF_REMINDER_MINUTES)
-        # Already inside the window (a fixture saved 20 minutes before kickoff): send now
-        # rather than scheduling an eta in the past, which Celery would run immediately anyway
-        # but less legibly.
-        notify_kickoff_reminder.apply_async(args=[str(fixture_id)], eta=eta if eta > now else None)
+        schedule_kickoff_reminder(by_id[fixture_id], now=now)
+
+
+def schedule_kickoff_reminder(fixture: Fixture, now: datetime | None = None) -> bool:
+    """Queue one fixture's T-60 reminder. Returns whether it was actually queued.
+
+    Shared by the daily sweep above and by POST /user/watchlist, which needs it because the
+    sweep alone leaves a real gap: it runs once a day at 02:00 UTC, so a fixture saved during
+    the day for a match later the same day or the next morning would never be queued at all,
+    and the reminder would simply not arrive. Saving is exactly when a user expects the
+    reminder to be armed.
+
+    Safe to call more than once for the same fixture: the send path's reminded_at guard means a
+    duplicate eta notifies nobody twice.
+    """
+    from app.workers.notify_users import notify_kickoff_reminder
+
+    now = now or datetime.now(UTC)
+    # An estimated kickoff is a date, not a time — "starts in an hour" off a midnight
+    # placeholder would be wrong, so it is skipped here as well as at send time.
+    if fixture.kickoff_is_estimated or fixture.kickoff_utc is None:
+        return False
+    if fixture.status is not FixtureStatus.SCHEDULED:
+        return False
+    kickoff = fixture.kickoff_utc
+    if kickoff.tzinfo is None:
+        kickoff = kickoff.replace(tzinfo=UTC)
+    eta = kickoff - timedelta(minutes=KICKOFF_REMINDER_MINUTES)
+    # Already inside the window (a fixture saved 20 minutes before kickoff): send now rather
+    # than scheduling an eta in the past, which Celery would run immediately anyway but less
+    # legibly. Past kickoff entirely, and there is nothing to remind anyone about.
+    if kickoff <= now:
+        return False
+    notify_kickoff_reminder.apply_async(args=[str(fixture.id)], eta=eta if eta > now else None)
+    return True
