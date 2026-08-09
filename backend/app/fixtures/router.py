@@ -356,6 +356,43 @@ BASE_RATES_BY_SPORT: dict[str, dict[tuple[str, str, float | None], float]] = {
 # or below base rate is not a prediction, it is the league average wearing a percentage sign.
 MIN_EDGE_OVER_BASE_RATE = 0.05
 
+# How much of the model's own feature vector must have had a real value for its output to be
+# offered as a pick. Below this the number is not a prediction about the fixture; it is the
+# model's fallback prior with a team name attached.
+#
+# The motivating case: Tottenham vs Newcastle, 2026-08-29, with 3 of 31 features populated
+# (EPL's season had not started, so neither side had played a match). It served 1X at 99.7% --
+# Newcastle to neither win nor draw at 0.3%. Running the same near-empty vector through the
+# previous 9-league artefact gave 93.6%, so this predates the 18-league pool and pooling made
+# an existing defect worse rather than creating it.
+#
+# MEASURED, not chosen by feel, over all 159 football predictions carrying a completeness
+# value (fraction of picks whose best 1X/X2 probability was extreme):
+#
+#     completeness    n    >=0.90    settled accuracy
+#     0.00-0.15      26    22 (85%)   0% (n=1)
+#     0.15-0.25       8     1 (13%)  43% (n=7)
+#     0.25-0.35      17     1  (6%)  33% (n=3)
+#     0.35-0.50      44     0  (0%)  38% (n=13)
+#     0.50+          64    62 (97%)  81% (n=64)
+#
+# The 0.50+ row is why this is a completeness floor and NOT a cap on extreme probabilities:
+# that band is just as extreme and is 81% correct on a real settled sample. Confident output
+# built on real data is the product working. Capping by probability would blunt exactly the
+# band that earns its confidence while leaving the empty-vector band untouched.
+#
+# 0.25 is where the cliff is -- 85% extreme below it, 6% just above. Deliberately BELOW
+# mobile's LOW_CONFIDENCE_COMPLETENESS of 0.35, because these are different instruments: 0.35
+# dims a badge and says "limited data", a soft signal that costs nothing if over-applied,
+# while this removes a pick outright and should therefore be the stricter bar to clear.
+# Setting both to 0.35 would suppress the 0.25-0.35 band, which contains one mildly-extreme
+# pick in seventeen and does not deserve it.
+#
+# NULL passes deliberately. feature_completeness was added without a backfill because older
+# predictions genuinely have no measurement -- treating unmeasured as failing would silently
+# erase every prediction made before that migration.
+MIN_FEATURE_COMPLETENESS = 0.25
+
 
 def _base_rate(candidate: _MarketCandidate, sport_slug: str | None = None) -> float | None:
     """The share of real fixtures this outcome occurs in regardless of who is playing.
@@ -468,6 +505,9 @@ def _pick_best(
         and (
             (edge := _edge_over_base_rate(c, sport_slug)) is None or edge >= MIN_EDGE_OVER_BASE_RATE
         )
+        # A vector that was mostly missing at inference time cannot say anything about THIS
+        # fixture, however confident the number looks. See MIN_FEATURE_COMPLETENESS.
+        and (c.feature_completeness is None or c.feature_completeness >= MIN_FEATURE_COMPLETENESS)
     ]
     priced = [c for c in candidates if c.probability is not None and c.odds is not None]
     unpriced = [c for c in candidates if c.probability is not None and c.odds is None]
