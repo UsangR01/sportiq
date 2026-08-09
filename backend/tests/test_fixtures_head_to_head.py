@@ -36,8 +36,13 @@ async def seeded_fixture_with_external_ids():
         )
         db.add(league)
         await db.flush()
-        home = Team(sport_id=sport.id, league_id=league.id, name="Home FC", external_id="100")
-        away = Team(sport_id=sport.id, league_id=league.id, name="Away FC", external_id="200")
+        # Unique per test. These ids are now the H2H CACHE KEY (h2h:detail:<home>:<away>),
+        # so the previous hardcoded "100"/"200" made every test in this file share one entry:
+        # whichever ran first populated the cache and the rest silently received its payload
+        # instead of their own fake. Tests must not be able to see each other's data.
+        home_ext, away_ext = f"h{uuid.uuid4().hex[:8]}", f"a{uuid.uuid4().hex[:8]}"
+        home = Team(sport_id=sport.id, league_id=league.id, name="Home FC", external_id=home_ext)
+        away = Team(sport_id=sport.id, league_id=league.id, name="Away FC", external_id=away_ext)
         db.add_all([home, away])
         await db.flush()
         fixture = Fixture(
@@ -180,7 +185,12 @@ async def test_fetch_head_to_head_maps_real_detail_for_football(
     async with async_session_factory() as db:
         result = await _fetch_head_to_head(db, "football", seeded_fixture_with_external_ids)
 
-    assert captured_ids == [("100", "200")]
+    # The seeded ids are random per test (they are the cache key), so assert the adapter was
+    # asked for THIS fixture's own teams rather than for two hardcoded literals.
+    async with async_session_factory() as db:
+        home = await db.get(Team, seeded_fixture_with_external_ids.home_team_id)
+        away = await db.get(Team, seeded_fixture_with_external_ids.away_team_id)
+    assert captured_ids == [(home.external_id, away.external_id)]
     assert result is not None
     assert result.meetings_count == 2
     assert result.home_wins == 1

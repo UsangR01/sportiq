@@ -1,7 +1,9 @@
+import logging
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +29,8 @@ from app.odds.models import Odds
 from app.picks.service import best_available_odds, best_totals_odds
 from app.predictions.models import Prediction
 from app.sports.models import League, Sport
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["fixtures"])
 
@@ -715,9 +719,26 @@ async def _fetch_head_to_head(
     if not home_team or not away_team or not home_team.external_id or not away_team.external_id:
         return None
 
-    from app.adapters.api_football import fetch_h2h_detail
+    from app.adapters.api_football import H2HDetail, fetch_h2h_detail
+    from app.core.redis import get_redis
+    from app.fixtures.h2h_cache import get_cached_h2h, set_cached_h2h
 
-    detail = await fetch_h2h_detail(home_team.external_id, away_team.external_id)
+    # Cached because this panel cost up to SIX live API calls on EVERY view (2-3s measured),
+    # for facts that do not change until these two teams next meet. See h2h_cache.py.
+    redis = get_redis()
+    hit, detail = await get_cached_h2h(
+        redis, home_team.external_id, away_team.external_id, H2HDetail
+    )
+    if not hit:
+        try:
+            detail = await fetch_h2h_detail(home_team.external_id, away_team.external_id)
+        except httpx.HTTPError:
+            # Quota exhaustion arrives here as APIFootballQuotaExceeded. The panel is an
+            # enrichment; losing it must not fail the whole fixture screen, which is exactly
+            # what happened when the daily allowance ran out.
+            logger.warning("H2H fetch failed; rendering the fixture without the panel")
+            return None
+        await set_cached_h2h(redis, home_team.external_id, away_team.external_id, detail)
     if detail is None:
         return None
 
