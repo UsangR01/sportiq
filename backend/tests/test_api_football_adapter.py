@@ -579,3 +579,66 @@ def test_parse_match_stats_block_missing_fields_stay_none():
     assert stats.shots is None
     assert stats.shots_on_goal is None
     assert stats.possession_pct is None
+
+
+# --- quota exhaustion must be loud ---------------------------------------------------------
+
+
+def _fake_response(payload: dict):
+    """Minimal stand-in for an httpx.Response carrying HTTP 200."""
+
+    class _R:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return payload
+
+    return _R()
+
+
+def test_quota_exhaustion_raises_instead_of_looking_like_an_empty_schedule():
+    """The failure mode this guard exists for.
+
+    API-Football reports a spent allowance with HTTP 200, an `errors` OBJECT, and an EMPTY
+    `response` list. raise_for_status() passes and .get("response", []) yields [], so without
+    reading `errors` the caller cannot distinguish "quota gone" from "no matches today".
+
+    Observed live: with the daily limit spent, ingest_live_scores completed without a single
+    warning and silently stopped updating football scores.
+    """
+    from app.adapters.api_football import APIFootballQuotaExceeded, _api_response
+
+    spent = _fake_response(
+        {
+            "errors": {"requests": "You have reached the request limit for the day"},
+            "response": [],
+        }
+    )
+    with pytest.raises(APIFootballQuotaExceeded):
+        _api_response(spent)
+
+
+def test_a_non_quota_error_object_still_raises():
+    """Any populated errors object means the body is not trustworthy."""
+    import httpx
+
+    from app.adapters.api_football import _api_response
+
+    bad = _fake_response({"errors": {"league": "The League id is not valid"}, "response": []})
+    with pytest.raises(httpx.HTTPError):
+        _api_response(bad)
+
+
+def test_the_normal_empty_errors_list_passes_through():
+    """A healthy call returns `errors` as an empty LIST, not a dict — an genuinely empty
+    schedule must stay an ordinary empty result, not an exception."""
+    from app.adapters.api_football import _api_response
+
+    healthy = _fake_response({"errors": [], "response": []})
+    assert _api_response(healthy)["response"] == []
+
+    with_data = _fake_response({"errors": [], "response": [{"fixture": {"id": 1}}]})
+    assert len(_api_response(with_data)["response"]) == 1

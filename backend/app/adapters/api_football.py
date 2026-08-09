@@ -54,6 +54,45 @@ CALENDAR_YEAR_SEASON_LEAGUES = {"brasileirao", "mls", "csl"}
 INJURY_LOOKAHEAD_DAYS = 3  # how far ahead fetch_injuries looks for fixtures to check dates for
 
 
+class APIFootballQuotaExceeded(httpx.HTTPError):
+    """The daily/plan request limit is spent. Not an outage, and not an empty schedule.
+
+    Subclasses httpx.HTTPError deliberately. Every ingest worker already isolates one league or
+    one adapter from the rest by catching httpx.HTTPError, so inheriting from it means a spent
+    allowance is logged and skipped exactly like any other provider failure. As a bare
+    RuntimeError it escaped that isolation and took down the whole live-score run, stopping
+    TENNIS updates too -- worse than the silent failure it was written to replace.
+    """
+
+
+def _api_response(response) -> dict:
+    """Return the parsed body, raising if API-Football reported an error.
+
+    API-Football signals quota exhaustion with HTTP **200** plus an `errors` object and an
+    EMPTY `response` list. raise_for_status() therefore passes and .get("response", [])
+    yields [], so running out of quota is indistinguishable from "nothing scheduled today"
+    unless the errors field is actually read.
+
+    That was live for real: with the daily limit spent, ingest_live_scores completed without a
+    single warning and simply stopped updating football scores. This codebase has been bitten
+    by the same shape twice before -- the injury worker failing unnoticed for weeks, and the
+    odds outage that presented as a modelling problem -- which is why a loud exception is worth
+    more here than a tidy empty list.
+
+    `errors` comes back as a LIST when there is nothing to report and a DICT when there is;
+    both arrive with HTTP 200.
+    """
+    response.raise_for_status()
+    payload = response.json()
+    errors = payload.get("errors")
+    if isinstance(errors, dict) and errors:
+        message = "; ".join(f"{key}: {value}" for key, value in errors.items())
+        if "limit" in message.lower() or "quota" in message.lower():
+            raise APIFootballQuotaExceeded(message)
+        raise httpx.HTTPError(f"API-Football error: {message}")
+    return payload
+
+
 def _current_football_season(league: str, now: datetime | None = None) -> int:
     """API-Football labels a season by the year it starts. For the 5 European leagues that's
     Aug-May (e.g. 2025 for "2025-26") — same start-year convention as BallDontLie's NBA
@@ -432,7 +471,7 @@ class APIFootballAdapter(DataSourceAdapter):
             fixtures_response.raise_for_status()
             dates: set[date] = {
                 datetime.fromisoformat(fx["fixture"]["date"].replace("Z", "+00:00")).date()
-                for fx in fixtures_response.json().get("response", [])
+                for fx in _api_response(fixtures_response).get("response", [])
             }
 
             for fixture_date in dates:
@@ -445,7 +484,7 @@ class APIFootballAdapter(DataSourceAdapter):
                     },
                 )
                 odds_response.raise_for_status()
-                for row in odds_response.json().get("response", []):
+                for row in _api_response(odds_response).get("response", []):
                     payloads.extend(_map_odds_response_to_payloads(row))
 
         return payloads
@@ -467,7 +506,7 @@ class APIFootballAdapter(DataSourceAdapter):
         async with self._client() as client:
             response = await client.get("/fixtures", params=params)
             response.raise_for_status()
-        fixtures = response.json().get("response", [])
+        fixtures = _api_response(response).get("response", [])
         return [_map_fixture_to_payload(fx, league) for fx in fixtures]
 
     async def fetch_team_stats(
@@ -487,7 +526,7 @@ class APIFootballAdapter(DataSourceAdapter):
         async with self._client() as client:
             response = await client.get("/teams/statistics", params=params)
             response.raise_for_status()
-        stats = response.json().get("response", {})
+        stats = _api_response(response).get("response", {})
         return _compute_team_stats(team_id, stats)
 
     async def fetch_injuries(self, sport: str) -> list[InjuryUpdate]:
@@ -516,7 +555,7 @@ class APIFootballAdapter(DataSourceAdapter):
                 fixtures_response.raise_for_status()
                 dates: set[date] = {
                     datetime.fromisoformat(fx["fixture"]["date"].replace("Z", "+00:00")).date()
-                    for fx in fixtures_response.json().get("response", [])
+                    for fx in _api_response(fixtures_response).get("response", [])
                 }
 
                 for fixture_date in dates:
@@ -529,7 +568,7 @@ class APIFootballAdapter(DataSourceAdapter):
                         },
                     )
                     injuries_response.raise_for_status()
-                    for injury in injuries_response.json().get("response", []):
+                    for injury in _api_response(injuries_response).get("response", []):
                         updates.append(_map_injury_to_update(injury))
 
         return updates
@@ -557,7 +596,7 @@ async def _fetch_h2h_meetings(
             params={"h2h": f"{home_external_id}-{away_external_id}", "last": last},
         )
         response.raise_for_status()
-    meetings = response.json().get("response", [])
+    meetings = _api_response(response).get("response", [])
     return [fx for fx in meetings if fx["fixture"]["status"]["short"] in ("FT", "AET", "PEN")]
 
 
@@ -691,7 +730,7 @@ async def fetch_match_stats(fixture_external_id: str) -> dict[str, MatchStats]:
 
     return {
         str(team_block["team"]["id"]): _parse_match_stats_block(team_block)
-        for team_block in response.json().get("response", [])
+        for team_block in _api_response(response).get("response", [])
     }
 
 
@@ -863,7 +902,7 @@ async def fetch_lineup_presence(fixture_external_id: str) -> dict[str, set[str]]
         response.raise_for_status()
 
     by_team: dict[str, set[str]] = {}
-    for team_block in response.json().get("response", []):
+    for team_block in _api_response(response).get("response", []):
         team_id = str(team_block["team"]["id"])
         names = set()
         for player_row in team_block.get("players", []):
