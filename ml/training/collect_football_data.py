@@ -88,6 +88,30 @@ LEAGUE_CONFIGS: dict[str, dict] = {
     "seriea": {"league_id": LEAGUE_IDS["seriea"], "rundown_sport_id": 15},
     "laliga": {"league_id": LEAGUE_IDS["laliga"], "rundown_sport_id": 14},
     "ligue1": {"league_id": LEAGUE_IDS["ligue1"], "rundown_sport_id": 12},
+    # --- Tier-1 expansion candidates (top_30_football_leagues_for_prediction.md) -------------
+    # League ids are LITERALS here, deliberately NOT added to app.adapters.api_football's
+    # LEAGUE_IDS: fetch_injuries iterates every entry in that dict every 30 minutes, so adding
+    # nine leagues there would silently spend quota polling competitions nothing serves yet.
+    # These are collection-only until a retrain shows they earn a place.
+    #
+    # All nine were verified to carry REAL odds on upcoming fixtures (14 bookmakers each) --
+    # checked against actual fixtures, not the coverage.odds flag, which claims True for
+    # Allsvenskan while played fixtures return zero bookmakers. A-League Men is deliberately
+    # absent: 0 bookmakers on upcoming fixtures and no TheRundown entry at all.
+    #
+    # rundown_sport_id is None for all but J1 League: TheRundown's own /sports list carries no
+    # Nordic, Polish, Danish, Romanian, Czech or Austrian competition. J1 maps to JPN1 (19),
+    # making it the only one of the nine with a second odds source and therefore the only one
+    # that could ever support game-totals lines.
+    "allsvenskan": {"league_id": 113, "rundown_sport_id": None},
+    "eliteserien": {"league_id": 103, "rundown_sport_id": None},
+    "veikkausliiga": {"league_id": 244, "rundown_sport_id": None},
+    "ekstraklasa": {"league_id": 106, "rundown_sport_id": None},
+    "denmark_superliga": {"league_id": 119, "rundown_sport_id": None},
+    "liga_i": {"league_id": 283, "rundown_sport_id": None},
+    "j1_league": {"league_id": 98, "rundown_sport_id": 19},
+    "czech_first": {"league_id": 345, "rundown_sport_id": None},
+    "austria_bundesliga": {"league_id": 218, "rundown_sport_id": None},
 }
 
 # Collection is stageable because the per-fixture endpoints genuinely can't all run in one
