@@ -37,6 +37,11 @@ _RUNDOWN_SPORT_IDS: dict[str, int] = {
     "laliga": 14,
     "seriea": 15,
     "mls": 10,  # confirmed live via GET /sports — real coverage, unlike Scottish Prem/CSL below
+    "j1_league": 19,  # the only one of the nine Tier-1 leagues TheRundown carries at all
+    # The other eight Tier-1 leagues (allsvenskan, eliteserien, veikkausliiga, ekstraklasa,
+    # denmark_superliga, liga_i, czech_first, austria_bundesliga) have no entry here for the
+    # same reason as Scottish Prem/CSL/Brasileirão — no coverage on this subscription. Their
+    # real odds come from API-Football alone.
     # No "scottish_prem" or "csl" entry: confirmed live via GET /sports that this subscription's
     # sport list has no Scotland or China league entry at all (same real gap as Brasileirão's
     # missing Brazil entry) — _rundown_sport_id_for raises ValueError for these, caught

@@ -52,7 +52,22 @@ def test_league_ids_match_therundown_slugs_where_covered():
     # (see CLAUDE.md) — real odds for these three come from API-Football's own /odds instead.
     from app.adapters.therundown import _RUNDOWN_SPORT_IDS
 
-    no_rundown_coverage = {"brasileirao", "scottish_prem", "csl"}
+    no_rundown_coverage = {
+        "brasileirao",
+        "scottish_prem",
+        "csl",
+        # Eight of the nine Tier-1 leagues, same real gap confirmed the same way. The J1 League
+        # is the only one TheRundown carries (sport_id 19), so it is absent from this set and
+        # must appear in _RUNDOWN_SPORT_IDS like any other covered league.
+        "allsvenskan",
+        "eliteserien",
+        "veikkausliiga",
+        "ekstraklasa",
+        "denmark_superliga",
+        "liga_i",
+        "czech_first",
+        "austria_bundesliga",
+    }
     assert set(LEAGUE_IDS.keys()) == {
         "epl",
         "ligue1",
@@ -63,6 +78,15 @@ def test_league_ids_match_therundown_slugs_where_covered():
         "scottish_prem",
         "mls",
         "csl",
+        "allsvenskan",
+        "eliteserien",
+        "veikkausliiga",
+        "ekstraklasa",
+        "denmark_superliga",
+        "liga_i",
+        "j1_league",
+        "czech_first",
+        "austria_bundesliga",
     }
     for league_slug in LEAGUE_IDS:
         if league_slug in no_rundown_coverage:
@@ -80,10 +104,31 @@ def test_league_ids_match_therundown_slugs_where_covered():
 def test_calendar_year_season_leagues_are_exactly_the_non_european_convention_ones():
     from app.adapters.api_football import CALENDAR_YEAR_SEASON_LEAGUES
 
-    assert CALENDAR_YEAR_SEASON_LEAGUES == {"brasileirao", "mls", "csl"}
+    assert CALENDAR_YEAR_SEASON_LEAGUES == {
+        "brasileirao",
+        "mls",
+        "csl",
+        # Confirmed from the real collected match dates in ml/data/football_game_log_*.parquet,
+        # not assumed: each of these opens and closes inside one calendar year (e.g. Allsvenskan
+        # 2025 ran 2025-03-29 to 2025-11-29, J1 League 2025-02-14 to 2025-12-06).
+        "allsvenskan",
+        "eliteserien",
+        "veikkausliiga",
+        "j1_league",
+    }
     assert _current_football_season("scottish_prem", datetime(2026, 1, 15, tzinfo=UTC)) == 2025
     assert _current_football_season("mls", datetime(2026, 1, 15, tzinfo=UTC)) == 2026
     assert _current_football_season("csl", datetime(2026, 1, 15, tzinfo=UTC)) == 2026
+
+    # January is where the two conventions disagree, so it is the month that catches a league
+    # placed in the wrong set. Applying Europe's rule to a calendar-year league asks for a
+    # season a full year stale -- the original Brasileirão bug, silent in every downstream call.
+    assert _current_football_season("j1_league", datetime(2026, 1, 15, tzinfo=UTC)) == 2026
+    assert _current_football_season("allsvenskan", datetime(2026, 1, 15, tzinfo=UTC)) == 2026
+    # ...and the five Tier-1 leagues that genuinely do follow Aug-May must NOT shift with it.
+    assert _current_football_season("ekstraklasa", datetime(2026, 1, 15, tzinfo=UTC)) == 2025
+    assert _current_football_season("liga_i", datetime(2026, 1, 15, tzinfo=UTC)) == 2025
+    assert _current_football_season("austria_bundesliga", datetime(2026, 1, 15, tzinfo=UTC)) == 2025
 
 
 def test_map_status_not_started():

@@ -61,6 +61,19 @@ FOOTBALL_LEAGUES = [
     ("scottish_prem", "Scottish Premiership", "Scotland"),
     ("mls", "Major League Soccer", "USA"),
     ("csl", "Chinese Super League", "China"),
+    # The nine Tier-1 leagues pooled into the trained model (train_football.py's LEAGUES).
+    # Seeded so ingestion has a League row to attach fixtures to; TheRundown covers only the
+    # J1 League of these, so the rest get their odds from API-Football alone, which is the
+    # same graceful per-adapter fallback Brasileirão already relies on.
+    ("allsvenskan", "Allsvenskan", "Sweden"),
+    ("eliteserien", "Eliteserien", "Norway"),
+    ("veikkausliiga", "Veikkausliiga", "Finland"),
+    ("ekstraklasa", "Ekstraklasa", "Poland"),
+    ("denmark_superliga", "Superliga", "Denmark"),
+    ("liga_i", "Liga I", "Romania"),
+    ("j1_league", "J1 League", "Japan"),
+    ("czech_first", "Czech First League", "Czech-Republic"),
+    ("austria_bundesliga", "Bundesliga", "Austria"),
 ]
 
 

@@ -39,6 +39,20 @@ LEAGUE_IDS: dict[str, int] = {
     "scottish_prem": 179,  # Scottish Premiership — confirmed live: id 179, country=Scotland
     "mls": 253,  # Major League Soccer (USA) — confirmed live: id 253, NOT "MLS" by name search
     "csl": 169,  # Chinese Super League — confirmed live: id 169, country=China
+    # The nine Tier-1 leagues the model is now trained on (see ml/training/train_football.py's
+    # LEAGUES). They were collected and pooled into the model before being added here, which
+    # meant the model had learned from them while the app ingested nothing for them — no
+    # fixture, odds or prediction ever reached a user. Training config and this map are
+    # separate wirings and had silently drifted apart.
+    "allsvenskan": 113,
+    "eliteserien": 103,
+    "veikkausliiga": 244,
+    "ekstraklasa": 106,
+    "denmark_superliga": 119,
+    "liga_i": 283,
+    "j1_league": 98,
+    "czech_first": 345,
+    "austria_bundesliga": 218,
 }
 
 # Leagues whose season runs on the calendar year (Jan-Dec) rather than the European Aug-May
@@ -49,7 +63,24 @@ LEAGUE_IDS: dict[str, int] = {
 # 2026-03-06 to 2026-11-08) are the same calendar-year shape, confirmed live the same way —
 # Scottish Premiership stays out of this set, its 2026 season runs 2026-07-31 to 2027-04-10,
 # the same Aug-May convention as the 5 original European leagues.
-CALENDAR_YEAR_SEASON_LEAGUES = {"brasileirao", "mls", "csl"}
+#
+# The four Nordic/Japanese additions were confirmed the same way, but from the real match dates
+# already collected in ml/data/football_game_log_{league}.parquet rather than by spending API
+# calls: Allsvenskan 2025 ran 2025-03-29 to 2025-11-29, Eliteserien 2025-03-29 to 2025-12-11,
+# Veikkausliiga 2025-04-05 to 2025-11-09, J1 League 2025-02-14 to 2025-12-06 — all opening and
+# closing inside one calendar year. The other five Tier-1 leagues stay out of this set, equally
+# confirmed: Ekstraklasa 2025 ran 2025-07-18 to 2026-05-23, Danish Superliga 2025-07-18 to
+# 2026-05-21, Liga I 2025-07-11 to 2026-06-01, Czech First 2025-07-18 to 2026-05-31, Austrian
+# Bundesliga 2025-08-01 to 2026-05-25.
+CALENDAR_YEAR_SEASON_LEAGUES = {
+    "brasileirao",
+    "mls",
+    "csl",
+    "allsvenskan",
+    "eliteserien",
+    "veikkausliiga",
+    "j1_league",
+}
 
 INJURY_LOOKAHEAD_DAYS = 3  # how far ahead fetch_injuries looks for fixtures to check dates for
 
