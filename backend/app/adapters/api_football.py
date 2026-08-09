@@ -79,8 +79,36 @@ CALENDAR_YEAR_SEASON_LEAGUES = {
     "allsvenskan",
     "eliteserien",
     "veikkausliiga",
-    "j1_league",
+    # NOTE: the J1 League is NOT here despite its 2021-2025 history being calendar-year. See
+    # END_YEAR_SEASON_LEAGUES below — Japan switched conventions from 2026-27.
 }
+
+# A third convention, found live and not derivable from history: a league on an Aug-May window
+# whose season API-Football labels by the year it ENDS.
+#
+# The J1 League is the only known case, and only because Japan is mid-transition from a
+# calendar-year season to an autumn-spring one. Confirmed live via /leagues?id=98:
+#
+#     season 2025  2025-02-14 -> 2025-12-06   (calendar year, as the collected history shows)
+#     season 2026  2026-02-06 -> 2026-06-06   (a short transitional season)
+#     season 2027  2026-08-07 -> 2027-06-06   <- current=true on 2026-08-10
+#
+# So the season running RIGHT NOW is labelled 2027. Neither existing rule produces that: the
+# calendar-year rule gives 2026, and the European start-year rule also gives 2026. The
+# provider is not being inconsistent for its own sake -- it follows each league's own naming,
+# and the EPL's 2026-27 season really is labelled 2026 while Japan's really is labelled 2027.
+#
+# HOW THIS WAS CAUGHT, because the failure mode is silent: ingesting the J1 League returned
+# zero fixtures with HTTP 200, an empty `errors` object and results=0 -- indistinguishable
+# from "this league genuinely has no matches this week". It was only found by comparing our
+# computed season against the `current: true` flag for all 18 leagues at once, which showed
+# 17 correct and this one wrong. Do that comparison rather than trusting an empty response.
+#
+# STRUCTURAL FOLLOW-UP worth taking: this is the second season-convention bug (Brasileirão was
+# the first), and the provider already publishes the authoritative answer via that `current`
+# flag. Resolving the season from /leagues with a cached lookup, falling back to these rules,
+# would remove the whole class of bug rather than accumulating a fourth hardcoded set.
+END_YEAR_SEASON_LEAGUES = {"j1_league"}
 
 INJURY_LOOKAHEAD_DAYS = 3  # how far ahead fetch_injuries looks for fixtures to check dates for
 
@@ -134,7 +162,8 @@ def _current_football_season(league: str, now: datetime | None = None) -> int:
     now = now or datetime.now(UTC)
     if league in CALENDAR_YEAR_SEASON_LEAGUES:
         return now.year
-    return now.year if now.month >= 7 else now.year - 1
+    season = now.year if now.month >= 7 else now.year - 1
+    return season + 1 if league in END_YEAR_SEASON_LEAGUES else season
 
 
 #  Confirmed live on a real matchday (see CLAUDE.md): API-Football genuinely returns "PST"

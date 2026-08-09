@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 import pytest
 
 from app.adapters.api_football import (
+    CALENDAR_YEAR_SEASON_LEAGUES,
     LEAGUE_IDS,
     MatchStats,
     _compute_team_stats,
@@ -102,19 +103,16 @@ def test_league_ids_match_therundown_slugs_where_covered():
 
 
 def test_calendar_year_season_leagues_are_exactly_the_non_european_convention_ones():
-    from app.adapters.api_football import CALENDAR_YEAR_SEASON_LEAGUES
-
     assert CALENDAR_YEAR_SEASON_LEAGUES == {
         "brasileirao",
         "mls",
         "csl",
         # Confirmed from the real collected match dates in ml/data/football_game_log_*.parquet,
         # not assumed: each of these opens and closes inside one calendar year (e.g. Allsvenskan
-        # 2025 ran 2025-03-29 to 2025-11-29, J1 League 2025-02-14 to 2025-12-06).
+        # 2025 ran 2025-03-29 to 2025-11-29).
         "allsvenskan",
         "eliteserien",
         "veikkausliiga",
-        "j1_league",
     }
     assert _current_football_season("scottish_prem", datetime(2026, 1, 15, tzinfo=UTC)) == 2025
     assert _current_football_season("mls", datetime(2026, 1, 15, tzinfo=UTC)) == 2026
@@ -123,12 +121,40 @@ def test_calendar_year_season_leagues_are_exactly_the_non_european_convention_on
     # January is where the two conventions disagree, so it is the month that catches a league
     # placed in the wrong set. Applying Europe's rule to a calendar-year league asks for a
     # season a full year stale -- the original Brasileirão bug, silent in every downstream call.
-    assert _current_football_season("j1_league", datetime(2026, 1, 15, tzinfo=UTC)) == 2026
     assert _current_football_season("allsvenskan", datetime(2026, 1, 15, tzinfo=UTC)) == 2026
-    # ...and the five Tier-1 leagues that genuinely do follow Aug-May must NOT shift with it.
+    # ...and the Tier-1 leagues that genuinely do follow Aug-May must NOT shift with it.
     assert _current_football_season("ekstraklasa", datetime(2026, 1, 15, tzinfo=UTC)) == 2025
     assert _current_football_season("liga_i", datetime(2026, 1, 15, tzinfo=UTC)) == 2025
     assert _current_football_season("austria_bundesliga", datetime(2026, 1, 15, tzinfo=UTC)) == 2025
+
+
+def test_the_j1_league_season_is_labelled_by_the_year_it_ends():
+    """A third convention, confirmed live and NOT derivable from the collected history.
+
+    Japan switched from a calendar-year season to autumn-spring, and API-Football labels the
+    resulting 2026-08-07 -> 2027-06-06 season "2027" -- by its END year -- while the EPL's
+    equally autumn-spring 2026-08 -> 2027-05 season is labelled "2026". Both existing rules
+    return 2026 here, which is a season that ended in June.
+
+    The failure mode is why this is pinned: asking for the wrong season returns HTTP 200 with
+    an empty `errors` object and results=0, indistinguishable from "no matches this week". The
+    J1 League silently ingested nothing until our computed season was compared against the
+    provider's own `current: true` flag across all 18 leagues at once.
+    """
+    from app.adapters.api_football import END_YEAR_SEASON_LEAGUES
+
+    assert END_YEAR_SEASON_LEAGUES == {"j1_league"}
+    assert "j1_league" not in CALENDAR_YEAR_SEASON_LEAGUES  # its history is, its present isn't
+
+    # The live season on the day this was found; both other rules would have said 2026.
+    assert _current_football_season("j1_league", datetime(2026, 8, 10, tzinfo=UTC)) == 2027
+    # Still the same season the following spring, not a new one.
+    assert _current_football_season("j1_league", datetime(2027, 3, 1, tzinfo=UTC)) == 2027
+    # ...and it does roll over at the next August.
+    assert _current_football_season("j1_league", datetime(2027, 8, 15, tzinfo=UTC)) == 2028
+    # The rule must not leak onto ordinary Aug-May leagues.
+    assert _current_football_season("epl", datetime(2026, 8, 10, tzinfo=UTC)) == 2026
+    assert _current_football_season("ekstraklasa", datetime(2026, 8, 10, tzinfo=UTC)) == 2026
 
 
 def test_map_status_not_started():
