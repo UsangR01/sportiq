@@ -40,7 +40,19 @@ Built once the user obtained a genuine API-Football **Pro** subscription (7,500 
 
 **Deliberate scope decision, not a hidden gap**: the pipeline is built generically (works for any of the 5 domestic leagues — EPL/Ligue1/Bundesliga/LaLiga/SerieA, all seeded via `scripts/seed_sports.py`, all with working fixture/odds ingestion), but **real trained-model historical data collection now covers EPL and Brasileirão** (5 seasons each, 2021–2025 — Brasileirão was added specifically to give retrodiction and the model itself more real data; see "Real historical data + Elo/streaks/richer H2H" below). The other 3 European leagues are still seeded with working fixture/odds ingestion but have no historical training data collected. A full 5-league × 5-season historical lineup-presence collection would run ~8–9k API calls, close to the daily ceiling in one sitting, and the subscription itself is only active for ~1 month — expanding to the remaining 3 leagues is a natural, bounded follow-up.
 
-**Two-layer model (TDD §3.2)** — `app/models_ml/football.py`: two XGBoost Poisson regressors (`objective="count:poisson"`, one per side) produce expected goals from `app/models_ml/football_features.py`'s 21 pre-match features (see below for the 5 added on top of the original 16), then an XGBoost multiclass classifier (`objective="multi:softprob"`) predicts home/draw/away from those two xG values plus `LAYER2_CONTEXT_FEATURES` (form, H2H incl. avg goals, key-player availability, moneyline-implied-prob, Elo diff, win streaks) — `requirements.txt`'s `catboost` dependency stays unused; XGBoost does both layers rather than mixing boosting libraries. One-vs-rest isotonic calibration per class, renormalised to sum to 1 (the 3-way-market extension of NBA's binary calibration). A documented simplification: Layer 2 trains on Layer 1's own in-sample predictions for the training split (a proper stacked-generalization setup would use out-of-fold predictions there) — flagged in `train_football.py`'s docstring, not hidden.
+**Two-layer model (TDD §3.2)** — `app/models_ml/football.py`: two XGBoost Poisson regressors (`objective="count:poisson"`, one per side) produce expected goals from `app/models_ml/football_features.py`'s **18** pre-match features, then an XGBoost multiclass classifier (`objective="multi:softprob"`) predicts home/draw/away from those two xG values plus `FootballModel.LAYER2_CONTEXT_FEATURES` (form, H2H incl. avg goals, Elo diff, win streaks) —
+
+> **The vector is 18, NOT the 21 this document claimed until 2026-08-09.** Commit `d0a24d9`
+> pruned the four key-player features and `moneyline_implied_prob_home` after measuring 1X2
+> accuracy IDENTICAL without them and Over/Under discrimination BETTER. This stale line is
+> not a harmless typo — it cost ~10,500 real API calls on 2026-08-09, spent collecting
+> lineups and rosters for nine new leagues to populate features the model can no longer
+> consume. **`app/models_ml/football_features.py:FEATURE_NAMES` is the only authority on
+> what the model reads; check it before collecting anything to feed it.** The same applies
+> to `compute_football_key_players.py`, which still computes Stage 1 rankings that no
+> football feature currently uses — it is retained for the live Stage 2 availability path
+> and the mobile display, not for training.
+ `requirements.txt`'s `catboost` dependency stays unused; XGBoost does both layers rather than mixing boosting libraries. One-vs-rest isotonic calibration per class, renormalised to sum to 1 (the 3-way-market extension of NBA's binary calibration). A documented simplification: Layer 2 trains on Layer 1's own in-sample predictions for the training split (a proper stacked-generalization setup would use out-of-fold predictions there) — flagged in `train_football.py`'s docstring, not hidden.
 
 **Real historical data + Elo/streaks/richer H2H — a real pivot, driven by wanting genuinely trustworthy past-game (retrodicted) predictions.** The user asked how many seasons of data predictions actually draw on, was told the honest answer (training: 6 NBA seasons / 5 EPL-only football seasons; but *retrodiction* for a past game only had our own live DB's ~7-day fixture history to work from — a real, thin gap), and in response asked for retrodiction to use ALL real historical data for the season, and for the model's own accuracy to be pushed higher using ideas from the user's own prior personal NBA-prediction project (two Jupyter notebooks, `feature_engineering.ipynb` and `Running - NBA Games Prediction Project.ipynb`, added to the repo root). That notebook's own real walk-forward backtest (`RidgeClassifier` + `SequentialFeatureSelector`, genuinely leakage-safe `train = seasons < current`) scored **62.65% accuracy** — LOWER than this project's own NBA model (68.57%), so the useful takeaway was specific FEATURE ideas, not the notebook's modeling approach:
 - **Real, persistent, iterative Elo rating** (`app/models_ml/elo.py`, adopted from the notebook's own sequential Elo-update loop): `INITIAL_ELO=1500`, `K_FACTOR=32`, standard win/draw/loss update. Architecturally different from every other feature here — it needs genuinely STATEFUL, sequential computation across a team's entire match history, not an independently-re-derivable rolling window. Two code paths, by necessity: `elo.compute_elo_history(games_df)` walks a full historical game log ONCE in chronological order for training (`ml/training/train_football.py`); live serving instead reads real, incrementally-updated state off a new `teams.elo_rating` column (Alembic migration `f3a8b1c9d4e2`), updated exactly once per real completed match in `app/workers/ingest_fixtures.py:_maybe_settle_outcome` (the same idempotency guard that already prevented double-writing the `Outcome` row now also prevents double-applying Elo). The model itself only ever sees `elo_diff` (home minus away), not two absolute ratings — Elo is only meaningful relatively (matches how the notebook itself used `elo_rating` vs `elo_rating_opp`).
@@ -640,7 +652,8 @@ the actual scope of what's possible per league:
   team's own rolling average corners won/conceded over its last 5 real matches) — deliberately
   **not** added to `FEATURE_NAMES` itself, so Layer 1's goals regressors and Layer 2's 1X2
   classifier are completely unaffected; only `corners_home_model`/`corners_away_model` see the
-  expanded 25-feature vector, via a new `corners_row` in `app/models_ml/football.py:predict`
+  expanded 22-feature vector (18 + 4; it was 25 before the `d0a24d9` prune described above),
+  via a new `corners_row` in `app/models_ml/football.py:predict`
   (falls back to `layer1_row` for an older artefact with no `corners_feature_names` key — those
   artefacts' corners regressors were only ever trained on the 21-feature vector, so that's the
   *correct* row for them, not a degraded fallback). Training-side: `merge_corners_into_game_log`
@@ -1016,7 +1029,32 @@ backend/.venv/Scripts/python ml/training/train_football.py              # pools 
                                                                           # models_registry row
 ```
 
-Real results from the pooled run (temporal split: train 2021-22..2023-24, validate 2024-25, test 2025-26, now with 21 features including Elo/streaks/richer H2H — see "Real historical data + Elo/streaks/richer H2H" above): **47.89% test accuracy vs. a 46.45% "always pick home" baseline**, real RPS (not NBA's 2-outcome shortcut) **= 0.2138** (down from the prior EPL-only run's 0.2223 — lower is better). Flat-stake ROI on n=45 home-favoured picks with real odds (EPL only, after fixing a real extreme-odds data-quality bug — see above) = **-11.5%**, a small-sample, non-robust, negative-but-plausible number, not a demonstrated edge.
+**Current model: `football_xgb_v20260809224336`, pooled across 18 leagues** (the 9 original +
+the 9 Tier-1 additions — `allsvenskan`, `eliteserien`, `veikkausliiga`, `ekstraklasa`,
+`denmark_superliga`, `liga_i`, `j1_league`, `czech_first`, `austria_bundesliga`). Temporal
+split train 2021-22..2023-24 / validate 2024-25 / test 2025-26, 27,232 examples (16,287 /
+5,458 / 5,487), **18** features. Real result: **48.57% test accuracy vs. a 44.43% "always pick
+home" baseline** (+4.14pp), RPS **0.2144**, corners MAE **2.167**, flat-stake ROI **-6.4%**
+on n=38 — still no demonstrated betting edge, and n=38 is far too small to claim one either way.
+
+**Compare the gap over each run's OWN baseline, never the headline accuracy.** Changing the
+league pool changes the test set, so 0.4916 (9 leagues) and 0.4857 (18) are scores on different
+exam papers. The gap held (+4.09pp → +4.14pp) and the real gain was elsewhere: the under-3.5
+reliability buckets became **monotonic for the first time** (.585/.715/.693/.733 →
+.604/.673/.716/.755, trend z +3.35 → +5.92). Under 9 leagues the model's own ordering did not
+survive contact with the data — fixtures it rated 0.6-0.7 outscored ones it rated 0.7-0.8 —
+which is the defect that matters for a product that asks users to bet on that ordering.
+Calibration was already ~0 beforehand and stayed there, so this is a discrimination gain, the
+constraint repeatedly identified as binding on this market.
+
+Earlier lineage, for reference: EPL+Brasileirão only scored 47.89% vs 46.45% with RPS 0.2138.
+
+The Tier-1 leagues carry a game log and real xG but **no corners and no lineups** —
+`_load_optional` tolerates both absences (those rows score as missing, which XGBoost handles).
+A consequence worth knowing: the corners regressors are **byte-identical** across the 9- and
+18-league artefacts, verified by hashing the boosters, because those leagues contribute zero
+corners rows. An unchanged metric after adding data is the same signature as the pruned
+key-player features — benign here only because the cause is known and was checked.
 
 `ml/training/collect_football_data.py`'s lineup collection (`/fixtures/players`, 1 call per fixture — no bulk-by-league-and-date equivalent exists for lineups the way `/injuries` has) hit real `429`s under sustained load (roughly every ~100-150 calls, both for EPL originally and again for the new Brasileirão run); the same retry-with-backoff pattern as `collect_nba_data.py`'s odds pull handled these automatically. `ml/training/compute_football_key_players.py`'s own `/players` pagination calls hit the same real `429`s partway through Brasileirão's historical backfill (no retry logic existed there originally, unlike the fixtures/lineups script) — fixed by adding the same `_get_with_retry` backoff pattern; the run was resumed from where it stopped rather than restarted from scratch, since the underlying Stage 1 write is already idempotent (delete-then-insert per team+season).
 
