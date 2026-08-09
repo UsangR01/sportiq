@@ -21,6 +21,7 @@ from app.fixtures.schemas import (
     TeamFeaturesResponse,
     TotalsProbability,
 )
+from app.models_ml.corners_reference import blend_probability, bulk_corners_reference
 from app.models_ml.markets import CORNERS_LINES, GOALS_LINES, double_chance_probs, over_under_probs
 from app.odds.models import Odds
 from app.picks.service import best_available_odds, best_totals_odds
@@ -44,11 +45,16 @@ class _MarketCandidate:
     feature_completeness: float | None = None
 
 
-def _build_extra_markets(prediction: Prediction) -> ExtraMarketsResponse:
+def _build_extra_markets(
+    prediction: Prediction, reference_corners: float | None = None
+) -> ExtraMarketsResponse:
     """Derives double chance and Over/Under goals/corners probabilities from an existing
     Prediction row — see app/models_ml/markets.py for why none of this needs a new model or
     a live recompute (double chance is arithmetic on home/draw/away; totals reuse the stored
-    xg_home/xg_away and corners_xg_home/corners_xg_away as a Poisson rate)."""
+    xg_home/xg_away and corners_xg_home/corners_xg_away as a Poisson rate).
+
+    Corners take the same historical blend the feed's picks do, so the detail screen cannot
+    quote a different number from the card that led the user to it."""
     home_or_draw, away_or_draw = double_chance_probs(
         prediction.home_prob, prediction.draw_prob, prediction.away_prob
     )
@@ -63,7 +69,14 @@ def _build_extra_markets(prediction: Prediction) -> ExtraMarketsResponse:
         else None
     )
     goals_probs = over_under_probs(goals_total, GOALS_LINES)
-    corners_probs = over_under_probs(corners_total, CORNERS_LINES)
+    reference_probs = over_under_probs(reference_corners, CORNERS_LINES)
+    corners_probs = {
+        line: (
+            blend_probability(under, reference_probs.get(line, (None, None))[0]),
+            blend_probability(over, reference_probs.get(line, (None, None))[1]),
+        )
+        for line, (under, over) in over_under_probs(corners_total, CORNERS_LINES).items()
+    }
     return ExtraMarketsResponse(
         double_chance_home_or_draw_prob=home_or_draw,
         double_chance_away_or_draw_prob=away_or_draw,
@@ -152,7 +165,9 @@ async def _bulk_live_states(db: AsyncSession, fixture_ids: list) -> dict:
 
 
 def _all_market_candidates(
-    prediction: Prediction, odds_by_market: dict[str, list[dict]]
+    prediction: Prediction,
+    odds_by_market: dict[str, list[dict]],
+    reference_corners: float | None = None,
 ) -> list[_MarketCandidate]:
     """Every real candidate outcome across all four markets for one fixture's prediction —
     h2h (home/draw/away), double chance (1X/X2), Over/Under goals (per GOALS_LINES), Over/Under
@@ -200,7 +215,16 @@ def _all_market_candidates(
         if prediction.corners_xg_home is not None and prediction.corners_xg_away is not None
         else None
     )
+    # The corners model alone measured WORSE than always backing the more common side (52.1%
+    # vs 59.4% at the 10.5 line, on gated picks over 1,277 held-out fixtures), so its
+    # probabilities are blended toward a rolling attack/defence reference before they can
+    # become a pick. See app/models_ml/corners_reference.py for the measurement and for why
+    # head-to-head, the intuitive choice, is deliberately not the reference.
+    reference_probs = over_under_probs(reference_corners, CORNERS_LINES)
     for line, (under, over) in over_under_probs(corners_total, CORNERS_LINES).items():
+        ref_under, ref_over = reference_probs.get(line, (None, None))
+        under = blend_probability(under, ref_under)
+        over = blend_probability(over, ref_over)
         over_odds, under_odds = best_totals_odds(odds_by_market.get("corners_total", []), line)
         if over is not None:
             candidates.append(_MarketCandidate("over", over, over_odds, "corners_total", line))
@@ -506,15 +530,17 @@ async def _bulk_best_picks(
     # Which sport each fixture belongs to, so the base-rate gate uses that sport's own rates
     # rather than football's (see BASE_RATES_BY_SPORT — tennis "home" wins 62% of the time,
     # against football's 45.8%, so the wrong table admits picks that say less than nothing).
-    sport_by_fixture: dict = dict(
-        (
-            await db.execute(
-                select(Fixture.id, Sport.slug)
-                .join(Sport, Sport.id == Fixture.sport_id)
-                .where(Fixture.id.in_(fixture_ids))
-            )
-        ).all()
-    )
+    # The Fixture rows themselves are needed for the corners reference, which keys off both
+    # team ids and the kickoff time, so both come from one query.
+    fixture_rows = (
+        await db.execute(
+            select(Fixture, Sport.slug)
+            .join(Sport, Sport.id == Fixture.sport_id)
+            .where(Fixture.id.in_(fixture_ids))
+        )
+    ).all()
+    sport_by_fixture: dict = {fixture.id: slug for fixture, slug in fixture_rows}
+    reference_corners = await bulk_corners_reference(db, [fixture for fixture, _ in fixture_rows])
 
     prediction_rows = (
         (await db.execute(select(Prediction).where(Prediction.fixture_id.in_(fixture_ids))))
@@ -534,7 +560,9 @@ async def _bulk_best_picks(
             db_market: odds_by_fixture_market.get((fixture_id, db_market), [])
             for db_market in ("h2h", "double_chance", "total", "corners_total")
         }
-        candidates = _all_market_candidates(prediction, odds_by_market)
+        candidates = _all_market_candidates(
+            prediction, odds_by_market, reference_corners.get(fixture_id)
+        )
         all_picks[fixture_id] = [_candidate_to_best_pick(c) for c in candidates]
 
         if market and market != "all":
@@ -785,7 +813,9 @@ async def get_fixture(fixture_id: uuid.UUID, db: AsyncSession = Depends(get_db))
                 away_prob=latest_prediction.away_prob,
                 confidence_tier=latest_prediction.confidence_tier.value,
                 expected_value=latest_prediction.expected_value,
-                extra_markets=_build_extra_markets(latest_prediction),
+                extra_markets=_build_extra_markets(
+                    latest_prediction, (await bulk_corners_reference(db, [fixture])).get(fixture.id)
+                ),
             )
             if latest_prediction and fixture.status != FixtureStatus.POSTPONED
             else None
@@ -832,6 +862,10 @@ async def get_fixture_prediction(fixture_id: uuid.UUID, db: AsyncSession = Depen
     latest = max(prediction_rows, key=lambda p: p.created_at, default=None)
     if latest is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No prediction available")
+    fixture = (
+        await db.execute(select(Fixture).where(Fixture.id == fixture_id))
+    ).scalar_one_or_none()
+    reference = (await bulk_corners_reference(db, [fixture] if fixture else [])).get(fixture_id)
     return PredictionResponse(
         model_version=latest.model_version,
         home_prob=latest.home_prob,
@@ -839,5 +873,5 @@ async def get_fixture_prediction(fixture_id: uuid.UUID, db: AsyncSession = Depen
         away_prob=latest.away_prob,
         confidence_tier=latest.confidence_tier.value,
         expected_value=latest.expected_value,
-        extra_markets=_build_extra_markets(latest),
+        extra_markets=_build_extra_markets(latest, reference),
     )
