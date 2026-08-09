@@ -38,7 +38,7 @@ load_dotenv(BACKEND_DIR / ".env")  # see collect_nba_data.py for why this is nee
 
 from sqlalchemy import delete, select  # noqa: E402
 
-from app.adapters.api_football import BASE_URL, LEAGUE_IDS  # noqa: E402
+from app.adapters.api_football import BASE_URL, LEAGUE_IDS, _api_response  # noqa: E402
 from app.core.config import get_settings  # noqa: E402
 from app.core.database import async_session_factory  # noqa: E402
 from app.fixtures.models import TeamKeyPlayer  # noqa: E402
@@ -48,12 +48,27 @@ from app.sports.models import League, Sport  # noqa: E402
 
 # (league_slug, [seasons]) — see module docstring for why Brasileirão now matches EPL's
 # historical depth (plus its own current season on top).
+# Stage 1 must cover every league/season the MODEL trains on, not just the ones with live
+# fixtures. Key-player availability works by matching collected lineups against each team's
+# Top-5 roster, so a league with lineups but no roster here contributes NOTHING -- the join has
+# nothing to match on.
+#
+# That was live for real: 158,418 lineup rows were collected for bundesliga/laliga/ligue1/seriea
+# and the retrain came back BYTE-IDENTICAL (accuracy 0.4916, ROI 0.00844285714285709 to sixteen
+# digits) because none of those leagues had rosters. Lineups are necessary but not sufficient.
+#
+# MLS/CSL/Scottish Prem previously listed 2026 only -- the current season, useful for live
+# serving but absent from the 2021-2025 training window entirely.
 TARGET_LEAGUES: list[tuple[str, list[int]]] = [
     ("epl", [2021, 2022, 2023, 2024, 2025]),
     ("brasileirao", [2021, 2022, 2023, 2024, 2025, 2026]),
-    ("scottish_prem", [2026]),
-    ("mls", [2026]),
-    ("csl", [2026]),
+    ("scottish_prem", [2021, 2022, 2023, 2024, 2025, 2026]),
+    ("mls", [2021, 2022, 2023, 2024, 2025, 2026]),
+    ("csl", [2021, 2022, 2023, 2024, 2025, 2026]),
+    ("bundesliga", [2021, 2022, 2023, 2024, 2025]),
+    ("laliga", [2021, 2022, 2023, 2024, 2025]),
+    ("ligue1", [2021, 2022, 2023, 2024, 2025]),
+    ("seriea", [2021, 2022, 2023, 2024, 2025]),
 ]
 
 MAX_PAGES = 30  # safety cap on /players pagination per team
@@ -84,8 +99,19 @@ async def _get_with_retry(client: httpx.AsyncClient, path: str, params: dict) ->
 
 
 async def _fetch_teams(client: httpx.AsyncClient, league_id: int, season: int) -> list[dict]:
+    """Routed through _api_response so a rate-limited reply cannot masquerade as an empty league.
+
+    API-Football answers a spent per-minute or per-day allowance with HTTP 200, an `errors`
+    object and an EMPTY `response` list. raise_for_status() passes and .get("response", [])
+    yields [] -- indistinguishable from "this league had no teams that season".
+
+    That was live: a Stage 1 run reported "0 team_key_players rows written across 0 teams" for
+    the whole of bundesliga and most of laliga/seriea, and looked like a completed run. A
+    direct check afterwards showed /teams returning 19-20 teams for every one of those
+    league-seasons. Without this the retrain would have been fed silently incomplete rosters.
+    """
     response = await _get_with_retry(client, "/teams", {"league": league_id, "season": season})
-    return [row["team"] for row in response.json().get("response", [])]
+    return [row["team"] for row in _api_response(response).get("response", [])]
 
 
 async def _fetch_team_players(
