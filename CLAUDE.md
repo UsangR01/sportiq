@@ -510,6 +510,39 @@ fixture and told the user nothing**; 0.35 separates "no real data yet" from "par
 genuine data". Below it the badge dims and reads "limited data", worded as a limitation of the
 DATA rather than a hedge on the number.
 
+**Dimming was not enough, and `MIN_FEATURE_COMPLETENESS = 0.25` (`app/fixtures/router.py`) is
+the hard version.** Found by opening the running app after the 18-league retrain: Tottenham vs
+Newcastle served **1X at 99.7%** — Newcastle to neither win nor draw at 0.3% — from a vector
+with **3 of 31 features** populated, because EPL's season had not opened and neither side had
+played. Two things made it worse than a single silly number:
+- **Those picks RANKED FIRST.** August EPL fixtures have no odds posted yet, and with no odds
+  both EV ranking and `MAX_EDGE_OVER_MARKET` degrade to raw probability — so the emptiest
+  vectors sorted to the top of the feed. Dimming a badge does not stop that.
+- **It pre-dated the retrain.** The same vector through the previous 9-league artefact gives
+  93.6%, so pooling worsened an existing defect rather than creating one. Worth stating plainly
+  because the timing invited the opposite conclusion.
+
+The floor is **measured, not chosen by feel** — over all 159 football predictions carrying a
+completeness value, the share whose best 1X/X2 probability was extreme:
+
+    completeness    n    >=0.90     settled accuracy
+    0.00-0.15      26    22 (85%)    0% (n=1)
+    0.15-0.25       8     1 (13%)   43% (n=7)
+    0.25-0.35      17     1  (6%)   33% (n=3)
+    0.35-0.50      44     0  (0%)   38% (n=13)
+    0.50+          64    62 (97%)   81% (n=64)
+
+**The 0.50+ row is why this is a completeness floor and NOT a cap on extreme probabilities** —
+that band is just as extreme and is 81% correct on a real settled sample. Confident output
+built on real data is the product working; a probability cap would blunt exactly the band that
+earns its confidence while leaving the empty-vector band untouched. 0.25 is where the cliff
+sits (85% extreme below, 6% just above), deliberately **below** mobile's 0.35: dimming a badge
+is cheap if over-applied, removing a pick is not, so the hard bar is the stricter one. NULL
+passes, for the same no-backfill reason the column itself is nullable. A suppressed fixture
+still appears in the schedule with `best_pick: null` — same shape as POSTPONED — rather than
+vanishing. Live effect: max served probability 0.997 → 0.934, picks ≥0.95 went 16 → **0**.
+Regression-tested in `backend/tests/test_feature_completeness_floor.py`.
+
 **Negative Binomial for Over/Under was investigated and DELIBERATELY NOT BUILT — the premise
 was measured and found false.** The stated reasoning for it (twice, confidently) was: "real
 football goals are overdispersed, so Poisson's variance-equals-mean assumption gives too-thin
@@ -1048,6 +1081,36 @@ Calibration was already ~0 beforehand and stayed there, so this is a discriminat
 constraint repeatedly identified as binding on this market.
 
 Earlier lineage, for reference: EPL+Brasileirão only scored 47.89% vs 46.45% with RPS 0.2138.
+
+**The nine Tier-1 leagues are now SERVED as well as trained, and the gap between those two is
+a trap worth knowing.** `ml/training/train_football.py`'s `LEAGUES` and
+`app/adapters/api_football.py`'s `LEAGUE_IDS` are **separate wirings**. The retrain pooled 18
+leagues while `LEAGUE_IDS` still listed 9, so the model had learned from leagues the app
+ingested nothing for — no fixture, no odds, no prediction, nothing a user could ever see.
+Nothing failed; the work simply never reached anybody.
+`backend/tests/test_train_serve_league_parity.py` now pins it (parsing `LEAGUES` via `ast`, so
+the backend suite needn't import xgboost/mlflow/optuna). **One direction only** — everything
+trained must be served, but served-but-untrained is legitimate, since one model serves the
+whole sport (Scottish Prem/MLS/CSL were served by an EPL/Brasileirão-trained model for weeks).
+- **Season conventions were confirmed per league, never assumed** — assuming Europe's Aug-May
+  shape is precisely the Brasileirão bug. Derived at **zero API cost** from the real match
+  dates already sitting in `ml/data/football_game_log_*.parquet`: Allsvenskan (2025-03-29 to
+  2025-11-29), Eliteserien, Veikkausliiga and the J1 League (2025-02-14 to 2025-12-06) all open
+  and close inside one calendar year and join `CALENDAR_YEAR_SEASON_LEAGUES`; Ekstraklasa,
+  Danish Superliga, Liga I, Czech First and Austrian Bundesliga run Aug-May and stay out.
+- **TheRundown carries only the J1 League** (`sport_id` 19) of the nine; the other eight get
+  odds from API-Football alone, via the per-adapter `ValueError` isolation Brasileirão
+  established. Added cost ≈ 5k calls/day, ~6% of Ultra's 75,000 (odds runs every 6 hours, not
+  every 5 minutes — check the real beat schedule before estimating this).
+
+**A third instance of the duplicate-process trap, and the worst so far**: found **2 uvicorn, 2
+Celery workers AND 2 Celery beats** running simultaneously. Duplicate *beat* is the dangerous
+one — every scheduled task fires twice against a metered API, with no error anywhere to notice
+it. It also poisons diagnosis: a background collection run saturating the per-minute limit made
+a live league probe return empty `response` lists, which reads exactly like "this league has no
+data" (the same false negative that nearly wrote off Liga I and the J1 League). Check the
+process count before diagnosing either quota burn or missing coverage:
+`Get-CimInstance Win32_Process -Filter "Name like '%python%'"`.
 
 The Tier-1 leagues carry a game log and real xG but **no corners and no lineups** —
 `_load_optional` tolerates both absences (those rows score as missing, which XGBoost handles).
