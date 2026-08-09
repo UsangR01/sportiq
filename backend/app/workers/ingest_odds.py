@@ -161,7 +161,7 @@ async def _dates_with_fixtures(sport: Sport, league: League) -> list[date]:
 
 
 async def _fetch_odds_payloads(
-    sport: Sport, league: League, adapters: list | None = None
+    sport: Sport, league: League, adapters: list | None = None, dates: list | None = None
 ) -> list[OddsPayload]:
     """Queries every odds adapter registered for this sport (see
     AdapterFactory.get_odds_adapters) and merges their results — football queries both
@@ -172,8 +172,12 @@ async def _fetch_odds_payloads(
 
     `adapters` restricts the run to a specific subset, which exists so a quota-free provider
     can be refreshed more often than a quota-metered one — see _ingest_tennis_odds. Default
-    (None) queries every adapter registered for the sport."""
-    dates = await _dates_with_fixtures(sport, league)
+    (None) queries every adapter registered for the sport.
+
+    `dates` likewise narrows the request to specific match days. The closing-odds capture uses
+    it to ask for ONLY the day a fixture kicks off on, rather than the whole lookahead window,
+    which is what keeps that job affordable against TheRundown's monthly cap."""
+    dates = dates if dates is not None else await _dates_with_fixtures(sport, league)
     if not dates:
         return []
 
@@ -216,12 +220,12 @@ async def _fetch_odds_payloads(
 
 
 async def _ingest_odds_for_league(
-    sport: Sport, league: League, adapters: list | None = None
+    sport: Sport, league: League, adapters: list | None = None, dates: list | None = None
 ) -> None:
     redis = get_redis()
 
     async with async_session_factory() as db:
-        payloads = await _fetch_odds_payloads(sport, league, adapters)
+        payloads = await _fetch_odds_payloads(sport, league, adapters, dates)
 
         for payload in payloads:
             # Events for a game we haven't ingested fixtures for yet (or can't match) are
@@ -317,6 +321,83 @@ async def _ingest_tennis_odds() -> None:
             # failing must never stop the other — the same per-league isolation ingest_fixtures
             # already applies for exactly this reason.
             logger.exception("Tennis odds refresh failed for league=%s", league.slug)
+
+
+# How close to kickoff the closing snapshot is taken. Short enough that the price is genuinely
+# the market's last word, long enough that a 15-minute scheduler always catches the window.
+CLOSING_WINDOW_START_MINUTES = 10
+CLOSING_WINDOW_END_MINUTES = 45
+
+
+async def _capture_closing_odds() -> None:
+    """Take one last price for fixtures about to kick off, so CLV can be measured.
+
+    Closing Line Value is the only test that distinguishes a model with an edge from one that
+    merely wins short-priced favourites, and it needs the market's FINAL pre-kickoff price. The
+    6-hourly job cannot supply that: whether its last run lands 10 minutes or 5 hours before
+    kickoff is chance. Measured over settled fixtures, only 72 of 2,369 had any pre-kickoff
+    price at all.
+
+    COST IS PROPORTIONAL TO MATCH DAYS, NOT TO THE CLOCK. This runs every 15 minutes but makes
+    ZERO API calls unless a fixture is actually kicking off in the next 10-45 minutes, and then
+    asks only for that fixture's own date rather than the whole lookahead window. A naive
+    every-15-minutes sweep would be ~672 requests/day against TheRundown's 5,000 per MONTH --
+    the same arithmetic that caused the original weeks-long outage.
+
+    Snapshots are appended, never updated (Odds has no unique constraint, by design), so this
+    adds a row rather than overwriting the price history CLV is computed from.
+    """
+    now = datetime.now(UTC)
+    window_start = now + timedelta(minutes=CLOSING_WINDOW_START_MINUTES)
+    window_end = now + timedelta(minutes=CLOSING_WINDOW_END_MINUTES)
+
+    async with async_session_factory() as db:
+        rows = (
+            await db.execute(
+                select(Fixture.league_id, Fixture.kickoff_utc).where(
+                    Fixture.status == FixtureStatus.SCHEDULED,
+                    Fixture.kickoff_utc >= window_start,
+                    Fixture.kickoff_utc <= window_end,
+                )
+            )
+        ).all()
+        if not rows:
+            return  # nothing imminent: no request, no quota spent
+
+        dates_by_league: dict = {}
+        for league_id, kickoff in rows:
+            dates_by_league.setdefault(league_id, set()).add(kickoff.date())
+
+        leagues = (
+            (await db.execute(select(League).where(League.id.in_(dates_by_league.keys()))))
+            .scalars()
+            .all()
+        )
+        sports = {
+            s.id: s
+            for s in (
+                await db.execute(select(Sport).where(Sport.id.in_({lg.sport_id for lg in leagues})))
+            )
+            .scalars()
+            .all()
+        }
+
+    for league in leagues:
+        sport = sports.get(league.sport_id)
+        if sport is None:
+            continue
+        try:
+            await _ingest_odds_for_league(sport, league, dates=sorted(dates_by_league[league.id]))
+        except Exception:
+            # One league's provider failing must not cost every other league its closing
+            # price - the window will have passed by the next run.
+            logger.exception("Closing-odds capture failed for league=%s", league.slug)
+
+
+@celery_app.task(name="app.workers.ingest_odds.capture_closing_odds")
+def capture_closing_odds() -> None:
+    """Every 15 minutes; free unless a fixture is imminent - see _capture_closing_odds."""
+    run_task(_capture_closing_odds())
 
 
 @celery_app.task(name="app.workers.ingest_odds.ingest_tennis_odds")

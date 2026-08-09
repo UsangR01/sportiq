@@ -95,6 +95,18 @@ celery_app.conf.beat_schedule = {
         # ingest-tennis-odds-hourly below.
         "schedule": 21600.0,
     },
+    "capture-closing-odds-every-15-minutes": {
+        "task": "app.workers.ingest_odds.capture_closing_odds",
+        # Frequent but nearly free: the task returns immediately without an API call unless a
+        # fixture kicks off in the next 10-45 minutes, and then asks only for that fixture's
+        # own date. Cost tracks the match calendar, not the clock.
+        #
+        # It exists because CLV needs the market's FINAL pre-kickoff price and the 6-hourly job
+        # cannot reliably supply one - only 72 of 2,369 settled fixtures had any pre-kickoff
+        # price at all. Without it there is no way to tell a model with an edge from one that
+        # just backs short favourites.
+        "schedule": 900.0,
+    },
     "ingest-tennis-odds-hourly": {
         "task": "app.workers.ingest_odds.ingest_tennis_odds",
         # Tennis only, BallDontLie only. Exempt from the 6-hourly cadence above because it
