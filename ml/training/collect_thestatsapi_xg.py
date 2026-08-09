@@ -161,6 +161,50 @@ TARGETS = [
     ("ligue1", "comp_0256", "23/24", 2023),
     ("ligue1", "comp_0256", "24/25", 2024),
     ("ligue1", "comp_0256", "25/26", 2025),
+    # --- Tier-1 expansion candidates (top_30_football_leagues_for_prediction.md) ------------
+    # NOT yet in train_football.py's LEAGUES: these have no API-Football game log yet, so
+    # resolve() skips them and only the raw cache is populated. Re-run with --resolve-only once
+    # their game logs exist.
+    #
+    # Competition ids were matched by NAME per country against the full 150-competition list
+    # (paginated 20 at a time). A "shortest name without digits" heuristic was tried first and
+    # picked Sweden's SUPERETTAN over Allsvenskan and Finland's YKKOSLIIGA over Veikkausliiga --
+    # both second tiers -- while excluding J1 League for containing a digit. Second-division
+    # data silently labelled as top-flight would have been worse than collecting nothing.
+    #
+    # Start seasons are MEASURED, not assumed: two matches sampled per season (144 calls) show
+    # xG begins at 2023 for the calendar-year leagues, 22/23 for the split-year ones, and
+    # ONLY 25/26 for the Austrian Bundesliga. That pruned 16 of 45 seasons before fetching.
+    ("allsvenskan", "comp_1002", "2025", 2025),
+    ("allsvenskan", "comp_1002", "2024", 2024),
+    ("allsvenskan", "comp_1002", "2023", 2023),
+    ("eliteserien", "comp_1992", "2025", 2025),
+    ("eliteserien", "comp_1992", "2024", 2024),
+    ("eliteserien", "comp_1992", "2023", 2023),
+    ("veikkausliiga", "comp_2674", "2025", 2025),
+    ("veikkausliiga", "comp_2674", "2024", 2024),
+    ("veikkausliiga", "comp_2674", "2023", 2023),
+    ("j1_league", "comp_6240", "2025", 2025),
+    ("j1_league", "comp_6240", "2024", 2024),
+    ("j1_league", "comp_6240", "2023", 2023),
+    ("ekstraklasa", "comp_9711", "25/26", 2025),
+    ("ekstraklasa", "comp_9711", "24/25", 2024),
+    ("ekstraklasa", "comp_9711", "23/24", 2023),
+    ("ekstraklasa", "comp_9711", "22/23", 2022),
+    ("denmark_superliga", "comp_7938", "25/26", 2025),
+    ("denmark_superliga", "comp_7938", "24/25", 2024),
+    ("denmark_superliga", "comp_7938", "23/24", 2023),
+    ("denmark_superliga", "comp_7938", "22/23", 2022),
+    ("liga_i", "comp_9639", "25/26", 2025),
+    ("liga_i", "comp_9639", "24/25", 2024),
+    ("liga_i", "comp_9639", "23/24", 2023),
+    ("liga_i", "comp_9639", "22/23", 2022),
+    ("czech_first", "comp_9766", "25/26", 2025),
+    ("czech_first", "comp_9766", "24/25", 2024),
+    ("czech_first", "comp_9766", "23/24", 2023),
+    ("czech_first", "comp_9766", "22/23", 2022),
+    # Austria: 24/25 and earlier sampled 0/2 in every season - a genuine upstream gap.
+    ("austria_bundesliga", "comp_4893", "25/26", 2025),
 ]
 
 
