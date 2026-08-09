@@ -124,6 +124,43 @@ LEAGUES = [
     "seriea",
     "laliga",
     "ligue1",
+    # Tier-1 expansion candidates. They carry a game log and real xG but NO corners and NO
+    # lineups: corners cost ~1 call per fixture and had not been collected, and lineups
+    # would be pointless because the four key-player features were pruned from the vector
+    # in d0a24d9 after measuring 1X2 accuracy IDENTICAL without them. _load_optional
+    # tolerates both absences -- those rows simply score as missing, which XGBoost handles.
+    #
+    # Pooling nearly doubles the training set (15,746 -> 27,232 fixtures). That also moves
+    # the TEST set, so the headline accuracy is NOT comparable like-for-like with the
+    # 0.4916 measured on nine leagues -- the same caveat that applied when the pool went
+    # from five leagues to nine. Judged instead on the O/U trend z and the baseline gap,
+    # both of which were stated BEFORE the run so the verdict could not be fitted after it:
+    #
+    #   baseline gap   +4.09pp (9 leagues) -> +4.14pp (18)   held
+    #   under-3.5 z    +3.35               -> +5.92          strengthened
+    #   under-3.5 buckets   .585 .715 .693 .733  ->  .604 .673 .716 .755
+    #
+    # That last line is the real result: the buckets are MONOTONIC for the first time. Under
+    # nine leagues a fixture the model called at 0.6-0.7 actually landed ABOVE one it called
+    # at 0.7-0.8, which means the ordering it was asked to bet on did not exist. Calibration
+    # gaps were already ~0 before this and stayed there (<=0.9pp on every line), so the gain
+    # is discrimination, not calibration -- the thing repeatedly identified as the binding
+    # constraint on this market. RPS 0.2123 -> 0.2144 is measured on a different test set and
+    # is not a like-for-like regression.
+    #
+    # Corners MAE is byte-identical (2.1667484307278717) because these leagues contribute no
+    # corners rows at all, so that regressor trains on exactly the set it did before. Worth
+    # stating explicitly: an unchanged metric after adding data is the same signature as the
+    # pruned key-player features, and it is only benign here because the cause is known.
+    "allsvenskan",
+    "eliteserien",
+    "veikkausliiga",
+    "ekstraklasa",
+    "denmark_superliga",
+    "liga_i",
+    "j1_league",
+    "czech_first",
+    "austria_bundesliga",
 ]
 
 # 5-fold out-of-fold Layer 1 predictions for Layer 2 training (see oof_xg). Deterministic
