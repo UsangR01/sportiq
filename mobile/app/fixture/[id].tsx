@@ -76,9 +76,15 @@ export default function FixtureDetailScreen() {
             drawProb={fixture.prediction.draw_prob}
             awayProb={fixture.prediction.away_prob}
           />
-          <Text className="mt-2 text-xs text-gray-400">
-            {fixture.prediction.model_version} · {fixture.prediction.confidence_tier} confidence
-          </Text>
+          {/* The confidence tier is deliberately NOT shown. Measured 2026-08-10 on settled
+              pre-match predictions: HIGH claimed 74.1% and delivered 60.9% (n=69) while MEDIUM
+              claimed 57.8% and delivered 68.5% (n=89) — so the badge pointed users at the
+              WEAKER set. The intervals overlap, so the inversion is not established, but the
+              calibration gap is not in doubt and the thresholds were always documented as
+              provisional guesses. A wrong signal is worse than no signal, so it is hidden until
+              recalibrated against outcomes rather than assumed. The field is still stored and
+              still returned by the API — it is measurement data, just not advice. */}
+          <Text className="mt-2 text-xs text-gray-400">{fixture.prediction.model_version}</Text>
         </View>
       )}
 

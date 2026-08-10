@@ -26,8 +26,11 @@ export default function HowItWorksScreen() {
         guarantee, just a statistical edge over many bets.
       </Section>
       <Section title="Confidence tiers">
-        High/Medium/Low confidence reflects how sure the model is of its own probability
-        estimate, not how big the edge is — a Low-confidence pick can still have positive EV.
+        Temporarily hidden. We checked the High/Medium/Low labels against real settled results
+        and they did not hold up — picks labelled High were no more accurate than Medium ones,
+        so showing the label would have pointed you at the wrong games. We would rather show
+        nothing than something we have measured as misleading. It will come back if and when it
+        earns its place.
       </Section>
       <Section title="What isn't live yet">
         Player injury data (RotoWire/BallDontLie) isn't connected yet, so key-player

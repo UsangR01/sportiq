@@ -102,6 +102,24 @@ async def _notify_new_pick(fixture_id: uuid.UUID, prediction_id: uuid.UUID) -> N
         if fixture is None or prediction is None:
             return
 
+        # UNVALIDATED GATE, KNOWINGLY LEFT IN PLACE — see the note below before extending push.
+        #
+        # This selects the tier that MEASURED WORST. On settled pre-match predictions
+        # (2026-08-10): HIGH claimed 74.1% and delivered 60.9% (n=69), while MEDIUM claimed
+        # 57.8% and delivered 68.5% (n=89). So the most intrusive channel currently targets the
+        # weaker set, and the fixture-detail badge has already been hidden from users for the
+        # same reason.
+        #
+        # Not changed here, deliberately and on two grounds. The intervals overlap, so the
+        # inversion is suggestive rather than established, and rewriting the gate on n=69 would
+        # be the same over-fitting that was refused for MIN_FEATURE_COMPLETENESS on n=16.
+        # Second, exactly ONE real push token exists today, so the practical cost of waiting is
+        # near zero while the cost of inventing a replacement rule is a fresh unvalidated
+        # assumption in its place.
+        #
+        # BEFORE push reaches real users: either recalibrate the tier thresholds against
+        # measured outcomes, or replace this with a criterion that has been measured. Do not
+        # simply widen it.
         if prediction.confidence_tier != ConfidenceTier.HIGH:
             return
 
