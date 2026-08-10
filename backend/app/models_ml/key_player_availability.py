@@ -13,7 +13,7 @@ away from NBA-specific names (ws_48/per -> rank_metric/combined_metric). Only St
 team's Top 5 gets ranked/scored in the first place) differs per sport.
 """
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 
 async def get_key_player_availability(
@@ -42,14 +42,32 @@ async def get_key_player_availability(
     available_count = 0
     combined = 0.0
     for key_player in key_players:
+        # Match on the provider's player id FIRST, falling back to the name.
+        #
+        # The name join was inherited from NBA, where the two tables genuinely do come from
+        # different providers (nba_api rosters vs RotoWire/BallDontLie injuries) and share no
+        # id space. For FOOTBALL both sides are API-Football, so the id is available and is the
+        # correct key — matching "a. barboza" against "a. adams"-style abbreviations across
+        # accents, transfers and duplicate names was always going to be lossy.
+        #
+        # Measured before changing it, because the size of the win matters: id matching finds
+        # 31 of the top-5 players who have an injury row against the name join's 27. Four
+        # players. Worth taking as a correctness fix -- it removes a real fragility rather than
+        # a real bottleneck -- but it is NOT why availability is near-constant. That is feed
+        # coverage: 130 distinct injured players spanning six days. See CLAUDE.md.
+        #
+        # The name fallback stays for NBA, which has no shared id.
         status_row = (
             (
                 await db.execute(
                     select(PlayerInjuryStatus)
                     .where(
                         PlayerInjuryStatus.team_id == team_id,
-                        func.lower(PlayerInjuryStatus.player_name)
-                        == key_player.player_name.lower(),
+                        or_(
+                            PlayerInjuryStatus.player_id == key_player.player_id,
+                            func.lower(PlayerInjuryStatus.player_name)
+                            == key_player.player_name.lower(),
+                        ),
                     )
                     .order_by(PlayerInjuryStatus.updated_at.desc())
                 )

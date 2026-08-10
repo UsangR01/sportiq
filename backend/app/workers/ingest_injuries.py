@@ -130,19 +130,42 @@ async def _ingest_injuries_rotowire(db, sport: Sport) -> None:
         if team is None:
             continue
 
-        db.add(
-            PlayerInjuryStatus(
-                sport_id=sport.id,
-                player_id=update.player_external_id,
-                team_id=team.id,
-                player_name=update.player_name,
-                status=update.status,
-                return_date=update.return_date,
-                salary_rank=update.salary_rank,
-                source=update.source,
-                updated_at=now,
+        # UPSERT, not insert. API-Football's /injuries is fixture-scoped, so every run
+        # re-reports the same standing injury for every upcoming fixture date — measured at
+        # 12,330 rows for 130 distinct players, i.e. 95 duplicates each. Nothing read the
+        # duplicates (Stage 2 already takes the newest row per player), so they were pure
+        # storage and query noise, and they made "how many players are injured" impossible to
+        # answer without a DISTINCT.
+        existing = (
+            await db.execute(
+                select(PlayerInjuryStatus).where(
+                    PlayerInjuryStatus.sport_id == sport.id,
+                    PlayerInjuryStatus.team_id == team.id,
+                    PlayerInjuryStatus.player_id == update.player_external_id,
+                )
             )
-        )
+        ).scalar_one_or_none()
+        if existing is not None:
+            existing.player_name = update.player_name
+            existing.status = update.status
+            existing.return_date = update.return_date
+            existing.salary_rank = update.salary_rank
+            existing.source = update.source
+            existing.updated_at = now
+        else:
+            db.add(
+                PlayerInjuryStatus(
+                    sport_id=sport.id,
+                    player_id=update.player_external_id,
+                    team_id=team.id,
+                    player_name=update.player_name,
+                    status=update.status,
+                    return_date=update.return_date,
+                    salary_rank=update.salary_rank,
+                    source=update.source,
+                    updated_at=now,
+                )
+            )
         await db.commit()
 
         if update.status == "OUT":
@@ -192,19 +215,42 @@ async def _ingest_injuries_api_football(db, sport: Sport) -> None:
         if team is None:
             continue
 
-        db.add(
-            PlayerInjuryStatus(
-                sport_id=sport.id,
-                player_id=update.player_external_id,
-                team_id=team.id,
-                player_name=update.player_name,
-                status=update.status,
-                return_date=update.return_date,
-                salary_rank=update.salary_rank,
-                source=update.source,
-                updated_at=now,
+        # UPSERT, not insert. API-Football's /injuries is fixture-scoped, so every run
+        # re-reports the same standing injury for every upcoming fixture date — measured at
+        # 12,330 rows for 130 distinct players, i.e. 95 duplicates each. Nothing read the
+        # duplicates (Stage 2 already takes the newest row per player), so they were pure
+        # storage and query noise, and they made "how many players are injured" impossible to
+        # answer without a DISTINCT.
+        existing = (
+            await db.execute(
+                select(PlayerInjuryStatus).where(
+                    PlayerInjuryStatus.sport_id == sport.id,
+                    PlayerInjuryStatus.team_id == team.id,
+                    PlayerInjuryStatus.player_id == update.player_external_id,
+                )
             )
-        )
+        ).scalar_one_or_none()
+        if existing is not None:
+            existing.player_name = update.player_name
+            existing.status = update.status
+            existing.return_date = update.return_date
+            existing.salary_rank = update.salary_rank
+            existing.source = update.source
+            existing.updated_at = now
+        else:
+            db.add(
+                PlayerInjuryStatus(
+                    sport_id=sport.id,
+                    player_id=update.player_external_id,
+                    team_id=team.id,
+                    player_name=update.player_name,
+                    status=update.status,
+                    return_date=update.return_date,
+                    salary_rank=update.salary_rank,
+                    source=update.source,
+                    updated_at=now,
+                )
+            )
         await db.commit()
 
         if update.status == "OUT":

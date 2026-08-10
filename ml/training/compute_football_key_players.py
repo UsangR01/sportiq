@@ -23,6 +23,7 @@ Usage (from repo root):
     backend/.venv/Scripts/python ml/training/compute_football_key_players.py
 """
 
+import argparse
 import asyncio
 import sys
 from datetime import UTC, datetime
@@ -68,6 +69,23 @@ TARGET_LEAGUES: list[tuple[str, list[int]]] = [
     ("laliga", [2021, 2022, 2023, 2024, 2025]),
     ("ligue1", [2021, 2022, 2023, 2024, 2025]),
     ("seriea", [2021, 2022, 2023, 2024, 2025]),
+    # Added 2026-08-11. These leagues were wired into ingestion but never into Stage 1 — the
+    # same drift that separated train_football.py's LEAGUES from api_football.py's LEAGUE_IDS.
+    # Consequence: every fixture in them produced key_players_available=None regardless of the
+    # injury feed, because there was no roster for an injury to attach to. All five are PLAYING
+    # (10-13 completed fixtures each in the 30 days to 2026-08-11), so per-player stats exist.
+    #
+    # Current season only. Historical seasons are deliberately omitted: Stage 1 for a past
+    # season costs real calls and would only feed a training feature that has been measured
+    # worthless twice and still carries known leakage. This is about making availability
+    # OBSERVABLE at serving time, not about rebuilding that feature.
+    ("allsvenskan", [2026]),
+    ("ekstraklasa", [2026]),
+    ("liga_i", [2026]),
+    # NOT 2026 — API-Football labels the J1 season running 2026-08-07 to 2027-06-06 as "2027",
+    # by its END year (see END_YEAR_SEASON_LEAGUES in app/adapters/api_football.py). Asking for
+    # 2026 here would return the short transitional Feb-Jun season, which is over.
+    ("j1_league", [2027]),
 ]
 
 MAX_PAGES = 30  # safety cap on /players pagination per team
@@ -239,14 +257,36 @@ async def compute_and_store_season(league_slug: str, season: int) -> None:
     print(f"  {written} team_key_players rows written across {len(teams)} teams")
 
 
-async def main_async() -> None:
+async def main_async(only: dict[str, list[int]] | None = None) -> None:
     for league_slug, seasons in TARGET_LEAGUES:
+        if only is not None and league_slug not in only:
+            continue
         for season in seasons:
+            if only is not None and season not in only[league_slug]:
+                continue
             await compute_and_store_season(league_slug, season)
 
 
 def main() -> None:
-    asyncio.run(main_async())
+    """--only league:season,league:season restricts the run.
+
+    Stage 1 is idempotent per team+season (delete-then-insert), so a full run is always safe —
+    but it is also thousands of real API calls for seasons that already have rosters. The
+    filter exists so topping up one league's current season does not re-fetch five years of
+    history for nine others."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--only",
+        help="comma-separated league:season pairs, e.g. allsvenskan:2026,j1_league:2027",
+    )
+    args = parser.parse_args()
+    only = None
+    if args.only:
+        only = {}
+        for pair in args.only.split(","):
+            league, _, season = pair.partition(":")
+            only.setdefault(league.strip(), []).append(int(season))
+    asyncio.run(main_async(only))
 
 
 if __name__ == "__main__":
