@@ -96,3 +96,34 @@ class WatchlistItem(Base):
     # the same user twice about the same fixture — the same idempotency guard style as
     # _maybe_settle_outcome. NULL means "not yet reminded".
     reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PushTicketRecord(Base):
+    """One Expo push ticket, kept until its receipt has been checked.
+
+    Expo delivery is two-stage and only the FIRST stage was ever observed here. publish()
+    returns a TICKET, which means "accepted for delivery" — it is not a delivery. The actual
+    outcome arrives later in a RECEIPT, and that is the only place errors like
+    DeviceNotRegistered, MessageTooBig or InvalidCredentials appear. _send_push discarded the
+    ticket id, so a misconfigured FCM credential would have failed every single send while every
+    log line said the push had succeeded.
+
+    Rows are deleted once checked: this is a work queue, not history. Keeping them would grow a
+    table forever to record that a notification worked.
+    """
+
+    __tablename__ = "push_tickets"
+    __table_args__ = (
+        # The worker's only query: unchecked tickets old enough to have a receipt.
+        Index("ix_push_tickets_created", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # Expo's own ticket id. Nullable because a ticket can be accepted without one being
+    # returned, in which case there is nothing to look up and the row is pointless — but the
+    # send still happened, so it is recorded rather than silently dropped.
+    ticket_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

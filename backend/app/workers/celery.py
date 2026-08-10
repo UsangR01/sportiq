@@ -127,6 +127,14 @@ celery_app.conf.beat_schedule = {
         "task": "app.workers.ingest_injuries.ingest_injuries",
         "schedule": 1800.0,
     },
+    "check-push-receipts-every-30-minutes": {
+        "task": "app.workers.notify_users.check_push_receipts",
+        # An Expo push ticket only means ACCEPTED. The delivery outcome arrives later in a
+        # receipt, and that is the only place a wrong FCM credential shows up — it fails every
+        # send while every ticket still reports success. Cheap: one Expo call per batch, and it
+        # returns immediately when no ticket is old enough to have a receipt yet.
+        "schedule": 1800.0,
+    },
 }
 
 

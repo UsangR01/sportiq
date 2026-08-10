@@ -1,7 +1,8 @@
 import asyncio
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import requests
 from exponent_server_sdk import (
@@ -9,6 +10,7 @@ from exponent_server_sdk import (
     PushClient,
     PushMessage,
     PushServerError,
+    PushTicket,
     PushTicketError,
 )
 from sqlalchemy import select
@@ -19,7 +21,7 @@ from app.fixtures.models import Fixture, FixtureStatus, Team
 from app.odds.models import Odds
 from app.picks.service import best_available_odds, best_outcome
 from app.predictions.models import ConfidenceTier, Prediction
-from app.users.models import User, UserPreference, WatchlistItem
+from app.users.models import PushTicketRecord, User, UserPreference, WatchlistItem
 from app.workers.celery import celery_app, run_task
 
 logger = logging.getLogger(__name__)
@@ -75,8 +77,18 @@ async def _send_push(db, user: User, title: str, body: str, data: dict) -> None:
     except DeviceNotRegisteredError:
         user.expo_push_token = None
         await db.commit()
+        return
     except (PushServerError, PushTicketError) as exc:
         logger.warning("Expo push send failed for user %s: %s", user.id, exc)
+        return
+
+    # A ticket means ACCEPTED, not DELIVERED. The real outcome — including a wrong FCM
+    # credential, which fails every send while every ticket still looks fine — is only visible
+    # in the receipt, fetched later by check_push_receipts. The id was previously discarded,
+    # which made that entire class of failure invisible.
+    if getattr(ticket, "id", None):
+        db.add(PushTicketRecord(ticket_id=ticket.id, user_id=user.id))
+        await db.commit()
 
 
 async def _notify_new_pick(fixture_id: uuid.UUID, prediction_id: uuid.UUID) -> None:
@@ -202,3 +214,87 @@ def notify_kickoff_reminder(fixture_id: str) -> None:
     ingest_fixtures.py:_queue_kickoff_reminders.
     """
     run_task(_notify_kickoff_reminder(uuid.UUID(fixture_id)))
+
+
+# Expo does not populate a receipt the instant a ticket is issued. Waiting before asking avoids
+# a round of "not ready yet" lookups that would have to be retried anyway.
+PUSH_RECEIPT_MIN_AGE_MINUTES = 15
+# Expo caps a single getReceipts call; the SDK exposes its own limit, used rather than guessed.
+PUSH_RECEIPT_BATCH = PushClient.DEFAULT_MAX_RECEIPT_COUNT
+
+
+async def _check_push_receipts() -> None:
+    """Read the delivery receipts for tickets issued at least PUSH_RECEIPT_MIN_AGE_MINUTES ago.
+
+    A ticket says Expo ACCEPTED the message. Only the receipt says what happened to it, and
+    that is where the failures that matter live: DeviceNotRegistered (stale token),
+    MessageTooBig, MessageRateExceeded, and InvalidCredentials — a wrong FCM credential, which
+    fails every send for every user while every ticket still reports success. Without this the
+    whole notification feature could be silently dead and the logs would look healthy.
+
+    Checked rows are DELETED rather than flagged: this is a work queue, not history. Keeping
+    them would grow a table forever to record that a notification worked.
+    """
+    cutoff = datetime.now(UTC) - timedelta(minutes=PUSH_RECEIPT_MIN_AGE_MINUTES)
+    async with async_session_factory() as db:
+        pending = (
+            (
+                await db.execute(
+                    select(PushTicketRecord)
+                    .where(PushTicketRecord.created_at <= cutoff)
+                    .order_by(PushTicketRecord.created_at)
+                    .limit(PUSH_RECEIPT_BATCH)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not pending:
+            return
+
+        by_ticket = {row.ticket_id: row for row in pending}
+        try:
+            receipts = await asyncio.to_thread(
+                _push_client().check_receipts,
+                [SimpleNamespace(id=ticket_id) for ticket_id in by_ticket],
+            )
+        except (PushServerError, requests.ConnectionError, requests.HTTPError) as exc:
+            # Leave the rows in place so the next run retries. A lookup failure is not a
+            # delivery failure, and deleting here would lose the only record that could
+            # surface a real one.
+            logger.warning("Could not fetch Expo push receipts: %s", exc)
+            return
+
+        for receipt in receipts:
+            record = by_ticket.get(getattr(receipt, "id", None))
+            if receipt.is_success():
+                continue
+            details = getattr(receipt, "details", None) or {}
+            error = details.get("error")
+            if error == PushTicket.ERROR_DEVICE_NOT_REGISTERED and record is not None:
+                user = (
+                    await db.execute(select(User).where(User.id == record.user_id))
+                ).scalar_one_or_none()
+                if user is not None:
+                    user.expo_push_token = None
+                logger.info("Cleared a push token Expo reported as unregistered")
+            elif error == "InvalidCredentials":
+                # Not per-device: every send is failing. Loud on purpose — this is the failure
+                # the whole receipt check exists to make visible.
+                logger.error(
+                    "Expo rejected the push credentials (%s). Every notification is failing; "
+                    "check the FCM/APNs credentials on the EAS project.",
+                    receipt.message,
+                )
+            else:
+                logger.warning("Expo push receipt error %s: %s", error, receipt.message)
+
+        for row in pending:
+            await db.delete(row)
+        await db.commit()
+        logger.info("Checked %d Expo push receipt(s)", len(pending))
+
+
+@celery_app.task(name="app.workers.notify_users.check_push_receipts")
+def check_push_receipts() -> None:
+    run_task(_check_push_receipts())
