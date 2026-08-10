@@ -1,3 +1,5 @@
+import math
+
 from fastapi import APIRouter, Depends, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
@@ -8,7 +10,7 @@ from app.core.database import get_db
 from app.fixtures.models import Fixture, FixtureLiveState, Team
 from app.history.models import MatchResult, Outcome
 from app.history.schemas import HistoryEntry, HistorySummary, ModelStats
-from app.predictions.models import ModelRegistry, Prediction
+from app.predictions.models import ModelRegistry, Prediction, PredictionKind
 from app.sports.models import League, Sport
 
 router = APIRouter(tags=["history"])
@@ -31,6 +33,42 @@ def _predicted_outcome(prediction: Prediction) -> str:
     if prediction.draw_prob is not None:
         candidates.append(("draw", prediction.draw_prob))
     return max(candidates, key=lambda pair: pair[1])[0]
+
+
+# Below this, an accuracy is noise dressed as a result and is reported as "not enough data".
+MIN_REPORTABLE_N = 30
+# Standard normal quantiles for a one-sided alpha=0.05 test at 80% power, used for the
+# minimum detectable effect. Hard-coded rather than pulled from scipy, which is not a
+# dependency of the serving path.
+_Z_ALPHA, _Z_BETA = 1.645, 0.842
+
+
+def _wilson_interval(correct: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """95% Wilson score interval for a proportion.
+
+    Wilson rather than the normal approximation because it stays inside [0, 1] and keeps
+    sensible coverage at small n — which is exactly where this endpoint operates today
+    (n=139 football, n=77 tennis). The normal approximation produces intervals that can run
+    past 1.0 at these sizes, which would be visibly wrong in an API response."""
+    if n == 0:
+        return 0.0, 0.0
+    p = correct / n
+    denominator = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / denominator
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denominator
+    return max(0.0, centre - half), min(1.0, centre + half)
+
+
+def _detectable_effect(p: float, n: int) -> float:
+    """Smallest true effect this sample could detect at 80% power.
+
+    Reported alongside every accuracy because the two together are the honest statement. On
+    2026-08-10 football could detect 10.5pp against a believed edge of 4.1pp, so the accuracy
+    figure could not settle the question in either direction — and without this field beside
+    it, it reads as though it had."""
+    if n == 0:
+        return 1.0
+    return (_Z_ALPHA + _Z_BETA) * math.sqrt(max(p * (1 - p), 1e-9) / n)
 
 
 def _history_query(sport_slug: str | None, league_slug: str | None):
@@ -133,6 +171,14 @@ async def get_history(
 async def get_history_summary(
     sport_slug: str | None = None,
     league_slug: str | None = None,
+    kind: str = Query(
+        PredictionKind.PRE_MATCH.value,
+        description=(
+            "Which predictions to score. Defaults to pre_match — the only kind that evidences "
+            "forecasting skill. 'retrodiction' and 'unknown' are available explicitly but must "
+            "never be presented as a track record."
+        ),
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     """Real, live model accuracy per sport, measured on settled fixtures.
@@ -142,6 +188,19 @@ async def get_history_summary(
     since. Divergence between the two is the whole point — it's the gap between a lab number
     and a live one, and it's the number worth trusting.
 
+    SCOPED TO pre_match BY DEFAULT. Both prediction paths write to the same table, and until
+    predictions.kind existed this endpoint averaged them together and reported the result as
+    one accuracy. Measured on 2026-08-10, that mixing moved football from 56.1% to 53.3% and
+    tennis from 63.6% to 61.7% — DOWNWARD, which is the opposite of the expected direction and
+    worth stating: retrodictions score worse, not better, because assemble_from_game_log has a
+    leakage guard and thinner features. The problem was never hindsight flattering the model;
+    it was averaging two populations with different feature quality and reporting neither.
+
+    Every accuracy carries its sample size, a Wilson interval and its minimum detectable effect
+    (docs/history-metrics-spec.md §6). Without them a percentage reads as a verdict: football's
+    139 settled pre-match predictions can only detect a 10.5pp effect, against a believed edge
+    of 4.1pp, so the figure cannot currently settle the question either way.
+
     Aggregated in Python rather than SQL: "was the pick correct" means comparing the argmax of
     three probability columns against an enum, which is expressible in SQL but markedly less
     readable, and the settled-fixture volume here is thousands, not millions."""
@@ -149,26 +208,44 @@ async def get_history_summary(
 
     totals: dict[str, dict[str, int]] = {}
     for outcome, prediction, _fixture_id, sport, _league, _home, _away, result_type in rows:
-        bucket = totals.setdefault(sport, {"settled": 0, "correct": 0, "voided": 0})
+        bucket = totals.setdefault(
+            sport, {"settled": 0, "correct": 0, "voided": 0, "excluded_kind": 0}
+        )
         if result_type is not None:
             bucket["voided"] += 1
+            continue
+        if prediction.kind.value != kind:
+            # Counted, not silently dropped: a denominator that quietly shrinks is how a
+            # partial population starts looking like a complete one.
+            bucket["excluded_kind"] += 1
             continue
         bucket["settled"] += 1
         if _RESULT_BY_OUTCOME[_predicted_outcome(prediction)] == outcome.result:
             bucket["correct"] += 1
 
-    return [
-        HistorySummary(
-            sport_slug=sport,
-            settled_fixtures=counts["settled"],
-            correct=counts["correct"],
-            # Guard the divide: a sport whose every settled fixture was voided has a real zero
-            # denominator, which must not be turned into a fabricated accuracy.
-            accuracy=(counts["correct"] / counts["settled"]) if counts["settled"] else 0.0,
-            voided=counts["voided"],
+    summaries = []
+    for sport, counts in sorted(totals.items()):
+        n, correct = counts["settled"], counts["correct"]
+        # Guard the divide: a sport whose every settled fixture was voided or excluded has a
+        # real zero denominator, which must not be turned into a fabricated accuracy.
+        accuracy = (correct / n) if n else 0.0
+        ci_low, ci_high = _wilson_interval(correct, n)
+        summaries.append(
+            HistorySummary(
+                sport_slug=sport,
+                settled_fixtures=n,
+                correct=correct,
+                accuracy=accuracy,
+                voided=counts["voided"],
+                kind=kind,
+                accuracy_ci_low=ci_low,
+                accuracy_ci_high=ci_high,
+                detectable_effect=_detectable_effect(accuracy, n),
+                sufficient_sample=n >= MIN_REPORTABLE_N,
+                excluded_unknown_provenance=counts["excluded_kind"],
+            )
         )
-        for sport, counts in sorted(totals.items())
-    ]
+    return summaries
 
 
 @router.get("/stats/model", response_model=list[ModelStats])

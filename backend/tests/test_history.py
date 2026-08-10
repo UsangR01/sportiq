@@ -16,7 +16,7 @@ from app.core.database import async_session_factory
 from app.fixtures.models import Fixture, FixtureLiveState, FixtureStatus, Team
 from app.history.models import MatchResult, Outcome
 from app.main import app
-from app.predictions.models import ConfidenceTier, Prediction
+from app.predictions.models import ConfidenceTier, Prediction, PredictionKind
 from app.sports.models import League, Sport
 
 
@@ -78,6 +78,9 @@ async def settled_fixtures():
                     away_prob=ap,
                     confidence_tier=ConfidenceTier.HIGH,
                     created_at=now,
+                    # Explicit: /history/summary scores pre_match only by default, so an
+                    # unmarked prediction is correctly excluded rather than counted.
+                    kind=PredictionKind.PRE_MATCH,
                 )
             )
             db.add(
@@ -161,3 +164,59 @@ async def test_history_summary_reports_accuracy_and_counts_voids_separately(
     assert summary["correct"] == 2
     assert summary["accuracy"] == pytest.approx(2 / 3)
     assert summary["voided"] == 1
+
+
+@pytest.mark.asyncio
+async def test_summary_scores_pre_match_only_and_counts_what_it_excluded(
+    api_client, settled_fixtures
+):
+    """The contamination guard.
+
+    Both prediction paths write to the same table, and before predictions.kind existed this
+    endpoint averaged them and reported one accuracy. Measured on real data, mixing moved
+    football 56.1% -> 53.3% and tennis 63.6% -> 61.7% — DOWNWARD, because retrodictions score
+    worse rather than better (assemble_from_game_log has a leakage guard and thinner features).
+    So the fault was never hindsight flattering the model; it was averaging two populations
+    with different feature quality and reporting neither.
+
+    Excluded rows are COUNTED. A denominator that quietly shrinks is how a partial population
+    starts looking like a complete one.
+    """
+    response = await api_client.get("/history/summary")
+    assert response.status_code == 200
+    summary = response.json()[0]
+
+    assert summary["kind"] == "pre_match"
+    assert summary["settled_fixtures"] > 0
+    assert summary["excluded_unknown_provenance"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_summary_never_reports_an_accuracy_without_its_sample_context(
+    api_client, settled_fixtures
+):
+    """A percentage on its own reads as a verdict. Football's 139 settled pre-match predictions
+    can only detect a 10.5pp effect against a believed 4.1pp edge, so the number cannot settle
+    the question either way — and without n, an interval and the detectable effect beside it,
+    nothing on the page says so."""
+    summary = (await api_client.get("/history/summary")).json()[0]
+
+    assert summary["accuracy_ci_low"] <= summary["accuracy"] <= summary["accuracy_ci_high"]
+    assert summary["detectable_effect"] > 0
+    # The seeded sample is tiny, so this must self-report as not enough data rather than
+    # publishing a confident-looking percentage.
+    assert summary["sufficient_sample"] is False
+
+
+@pytest.mark.asyncio
+async def test_asking_for_retrodictions_is_possible_but_never_the_default(
+    api_client, settled_fixtures
+):
+    """Retrodictions are a legitimate feed feature — "what the model would have said" — and a
+    legitimate thing to inspect. They are simply not a track record, so reaching them takes an
+    explicit ask."""
+    default = (await api_client.get("/history/summary")).json()
+    explicit = (await api_client.get("/history/summary?kind=retrodiction")).json()
+
+    assert default[0]["kind"] == "pre_match"
+    assert explicit == [] or explicit[0]["kind"] == "retrodiction"

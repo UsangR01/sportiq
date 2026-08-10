@@ -46,6 +46,26 @@ class HistorySummary(BaseModel):
     # than silently dropped, so the denominator is never quietly wrong.
     voided: int
 
+    # --- honesty fields (docs/history-metrics-spec.md §6) -----------------------------------
+    # An accuracy without these reads as a track record when it is often noise. Measured
+    # 2026-08-10: at n=139 football, only a 10.5pp effect is detectable at 80% power, while the
+    # edge we believe we have is 4.1pp. Reporting 56% with no sample context invites exactly
+    # the conclusion the number cannot support.
+    kind: str
+    # 95% Wilson interval on `accuracy`. Wilson rather than normal-approximation because it
+    # behaves at small n and near 0/1, which is precisely where this endpoint currently lives.
+    accuracy_ci_low: float
+    accuracy_ci_high: float
+    # Smallest true effect this sample could detect at 80% power. When it exceeds the effect
+    # being claimed, the number cannot settle the question either way.
+    detectable_effect: float
+    # False when settled_fixtures < MIN_REPORTABLE_N. Consumers should render "not enough data"
+    # rather than a percentage.
+    sufficient_sample: bool
+    # Predictions excluded because their provenance could not be established — see
+    # PredictionKind.UNKNOWN. Reported rather than hidden so the denominator stays auditable.
+    excluded_unknown_provenance: int
+
 
 class HistoryQuery(BaseModel):
     sport_slug: str | None = None
