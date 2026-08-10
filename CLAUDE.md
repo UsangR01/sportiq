@@ -27,6 +27,28 @@ Real logic exists for: auth (`POST /auth/register|login|refresh`, Argon2id + JWT
 **Big3/Top5 key player availability (TDD §3.3, §2.1) is real and fully wired**, in two stages that must never be merged into one query (see `app/models_ml/nba_key_players.py`'s module docstring):
 - **Stage 1** (season-level, backward-looking): `ml/training/compute_key_players.py` ranks each team's players by a trailing WS/48 approximation among a 26+ MPG pool (falling back to the 18-26 MPG band if fewer than 5 qualify), writing the Top 5 to `team_key_players` once per team/season. Re-runnable/idempotent (delete-then-insert per team+season). Run for real across all 6 seasons — e.g. Detroit Pistons 2025: Jalen Duren, Cade Cunningham, Tobias Harris, Ausar Thompson, Duncan Robinson.
 - **Stage 2** (pre-game, forward-looking, live production): `get_key_player_availability(db, team_id, season_year)` reads **only** `player_injury_status` (joined to `team_key_players` by player name, case-insensitive — the two tables share no ID space, same cross-provider mismatch pattern as fixtures/odds) and writes `TeamFeatures.key_players_available`/`.key_players_per_combined`. A player with zero injury-status rows at all counts as *available* (not on any injury report is itself informative); only a team with zero `team_key_players` rows for the season produces `(None, None)`. Computed at ingest time (`ingest_fixtures.py`) and again whenever the re-inference trigger fires.
+
+> **MEASURED 2026-08-10: that name join resolves 1% of the time, and the whole Stage 2 path is
+> effectively inert.** Only **27 of 2,609** top-5 player names ever match an injury row —
+> `player_injury_status` stores `"a. barboza"`-style abbreviations against rosters holding
+> `"a. adams"`, and 12,330 real injury rows attach to almost nothing. Consequence: where a
+> roster exists at all, **132 of 143** `TeamFeatures` rows (92%) report all five available, so
+> the live signal is near-constant and cannot move any model.
+>
+> **This is the prerequisite for any future player-availability work.** An external review of
+> the dropped key-player feature correctly identified real derivation flaws — the top-5 was
+> selected from WHOLE-SEASON data and applied to fixtures earlier in that same season (real
+> leakage), and training used post-match appearance rather than anything knowable pre-kickoff.
+> Both true. But every proposed replacement still depends on knowing who is unavailable, and
+> that pipeline currently resolves 1% of the time. **Fix the join and confirm absences actually
+> surface before rebuilding the feature** — otherwise it is a feature built on a variable we
+> cannot observe. Availability very likely does matter in football; what has been measured is
+> that our measurement of it is broken.
+>
+> A second, separate cause of missingness is NOT a bug: `key_players_available` is NULL for
+> 100% of ATP rows by design (tennis never populates `TeamKeyPlayer`) and for pre-season leagues
+> that have no per-player stats yet. Stage 1 holds ~800 rows per historical season but only 250
+> for 2026, so it also needs re-running for the current season once matches have been played.
 - **Re-inference trigger** (`ingest_injuries.py`) now checks `team_key_players` membership by name (not a salary-rank proxy) *and* an actual per-fixture 3-hour-before-tip-off window (`Fixture.kickoff_utc.between(now, now+3h)`, previously just "any fixture today") *and* actually dispatches `run_predictions.delay(...)` (previously logged only — dead code from before a trained model existed).
 - **The historical-training-label counterpart is a deliberately separate, non-reusable function**: `ml/training/train_nba.py`'s `historical_key_player_availability` derives an availability label from **completed-game box-score presence** (`nba_api` player-game-logs, cached via `collect_nba_data.py`'s `collect_player_game_log`) — fine for backtest labels, explicitly documented as **never** to be imported into the live Stage 2 path (and kept in `train_nba.py`, outside `nba_key_players.py`, specifically so it can't be accidentally imported live). `backend/tests/test_nba_key_players.py::test_stage2_follows_injury_status_not_box_score` asserts the two diverge on the same underlying facts (a player marked `OUT` in `player_injury_status` who nonetheless has real minutes in the box score) — this is the regression guard against Stage 2 ever drifting into target leakage.
 - `ws_48`/`per` are **explicitly simplified, documented approximations** (a PIE-based per-48 value formula; a Hollinger-style uPER rescaled to PER's 15.0 league-average convention) — not bit-exact Basketball-Reference/Hollinger reproductions.
