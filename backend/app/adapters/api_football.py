@@ -1,3 +1,5 @@
+import logging
+import time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
@@ -11,6 +13,8 @@ from app.adapters.base import (
     TeamStats,
 )
 from app.core.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 # Confirmed via live research (see CLAUDE.md): the real, working base host and auth header —
 # NOT RapidAPI, despite TDD §2.2 saying "API-Football (via RapidAPI)". Auth is a raw key value
@@ -109,6 +113,81 @@ CALENDAR_YEAR_SEASON_LEAGUES = {
 # flag. Resolving the season from /leagues with a cached lookup, falling back to these rules,
 # would remove the whole class of bug rather than accumulating a fourth hardcoded set.
 END_YEAR_SEASON_LEAGUES = {"j1_league"}
+
+# How long a resolved current-season label is trusted. A season boundary moves a handful of
+# times a year, so this is deliberately long: 18 leagues at two refreshes a day is ~36 calls
+# against a 75,000/day allowance.
+SEASON_CACHE_TTL_SECONDS = 12 * 60 * 60
+_SEASON_CACHE: dict[str, tuple[int, float]] = {}
+
+
+def _cached_season(league: str) -> int | None:
+    entry = _SEASON_CACHE.get(league)
+    if entry is None or entry[1] <= time.monotonic():
+        return None
+    return entry[0]
+
+
+async def resolve_current_season(client: httpx.AsyncClient, league: str) -> int:
+    """The season label API-Football itself considers current, falling back to the hardcoded
+    conventions above.
+
+    Those conventions have now been wrong three times, each silently: Brasileirão runs Jan-Dec
+    rather than Aug-May, four Tier-1 leagues likewise, and the J1 League labels its season by
+    the year it ENDS. The failure mode never raises -- asking for the wrong season returns
+    HTTP 200 with an empty `errors` object and results=0, which is indistinguishable from "no
+    matches scheduled". The J1 League ingested nothing at all until its computed season was
+    compared against this very field.
+
+    A convention is a guess about a league's calendar; `current: true` is the provider stating
+    it. Preferring the statement removes the whole class rather than accumulating a fourth
+    hardcoded set -- so a league that changes its calendar (as Japan just did) now corrects
+    itself within the cache TTL instead of needing a code change.
+
+    Best-effort by design: any failure falls back to _current_football_season, so this can only
+    improve on the previous behaviour, never take ingestion down. The fallback is also why the
+    convention sets are kept rather than deleted.
+    """
+    cached = _cached_season(league)
+    if cached is not None:
+        return cached
+
+    fallback = _current_football_season(league)
+    league_id = LEAGUE_IDS.get(league)
+    if league_id is None:
+        return fallback
+
+    try:
+        response = await client.get("/leagues", params={"id": league_id})
+        response.raise_for_status()
+        entries = _api_response(response).get("response") or []
+        seasons = entries[0].get("seasons", []) if entries else []
+        current = next((s for s in seasons if s.get("current")), None)
+        season = int(current["year"]) if current and current.get("year") is not None else None
+    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError):
+        logger.warning(
+            "Could not resolve the current season for league=%s; falling back to the "
+            "hardcoded convention (%s)",
+            league,
+            fallback,
+            exc_info=True,
+        )
+        return fallback
+
+    if season is None:
+        return fallback
+    if season != fallback:
+        # Worth surfacing: it means a hardcoded convention is now wrong for this league.
+        logger.info(
+            "League %s: provider reports season %s, hardcoded convention says %s — using %s",
+            league,
+            season,
+            fallback,
+            season,
+        )
+    _SEASON_CACHE[league] = (season, time.monotonic() + SEASON_CACHE_TTL_SECONDS)
+    return season
+
 
 INJURY_LOOKAHEAD_DAYS = 3  # how far ahead fetch_injuries looks for fixtures to check dates for
 
@@ -515,10 +594,10 @@ class APIFootballAdapter(DataSourceAdapter):
             raise ValueError(f"No API-Football league id mapping for league={league!r}")
 
         now = datetime.now(UTC)
-        season = _current_football_season(league, now)
         payloads: list[OddsPayload] = []
 
         async with self._client() as client:
+            season = await resolve_current_season(client, league)
             fixtures_response = await client.get(
                 "/fixtures",
                 params={
@@ -557,13 +636,13 @@ class APIFootballAdapter(DataSourceAdapter):
             raise ValueError(f"No API-Football league id mapping for league={league!r}")
 
         now = datetime.now(UTC)
-        params = {
-            "league": league_id,
-            "season": _current_football_season(league, now),
-            "from": (now - timedelta(days=days_back)).date().isoformat(),
-            "to": (now + timedelta(days=days_ahead)).date().isoformat(),
-        }
         async with self._client() as client:
+            params = {
+                "league": league_id,
+                "season": await resolve_current_season(client, league),
+                "from": (now - timedelta(days=days_back)).date().isoformat(),
+                "to": (now + timedelta(days=days_ahead)).date().isoformat(),
+            }
             response = await client.get("/fixtures", params=params)
             response.raise_for_status()
         fixtures = _api_response(response).get("response", [])
@@ -578,12 +657,12 @@ class APIFootballAdapter(DataSourceAdapter):
         if league_id is None:
             raise ValueError(f"No API-Football league id mapping for league={league!r}")
 
-        params = {
-            "league": league_id,
-            "season": _current_football_season(league),
-            "team": team_id,
-        }
         async with self._client() as client:
+            params = {
+                "league": league_id,
+                "season": await resolve_current_season(client, league),
+                "team": team_id,
+            }
             response = await client.get("/teams/statistics", params=params)
             response.raise_for_status()
         stats = _api_response(response).get("response", {})
@@ -602,7 +681,7 @@ class APIFootballAdapter(DataSourceAdapter):
 
         async with self._client() as client:
             for league_slug, league_id in LEAGUE_IDS.items():
-                season = _current_football_season(league_slug, now)
+                season = await resolve_current_season(client, league_slug)
                 fixtures_response = await client.get(
                     "/fixtures",
                     params={
