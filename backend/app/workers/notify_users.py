@@ -18,9 +18,7 @@ from sqlalchemy import select
 from app.core.config import get_settings
 from app.core.database import async_session_factory
 from app.fixtures.models import Fixture, FixtureStatus, Team
-from app.odds.models import Odds
-from app.picks.service import best_available_odds, best_outcome
-from app.predictions.models import ConfidenceTier, Prediction
+from app.predictions.models import Prediction
 from app.users.models import PushTicketRecord, User, UserPreference, WatchlistItem
 from app.workers.celery import celery_app, run_task
 
@@ -91,6 +89,17 @@ async def _send_push(db, user: User, title: str, body: str, data: dict) -> None:
         await db.commit()
 
 
+def format_selection(pick) -> str:
+    """Human-readable selection, including the market when it is not a plain 1X2 call.
+
+    "under @ 1.30" is meaningless without knowing under WHAT — the previous body only ever
+    described h2h picks, so it never had to say."""
+    if pick.market in ("goals_total", "corners_total") and pick.line is not None:
+        what = "goals" if pick.market == "goals_total" else "corners"
+        return f"{pick.selection.upper()} {pick.line} {what}"
+    return pick.selection.upper()
+
+
 async def _notify_new_pick(fixture_id: uuid.UUID, prediction_id: uuid.UUID) -> None:
     async with async_session_factory() as db:
         fixture = (
@@ -102,55 +111,48 @@ async def _notify_new_pick(fixture_id: uuid.UUID, prediction_id: uuid.UUID) -> N
         if fixture is None or prediction is None:
             return
 
-        # UNVALIDATED GATE, KNOWINGLY LEFT IN PLACE — see the note below before extending push.
+        # Gated on the FEED'S OWN pick selection, not on the confidence tier.
         #
-        # This selects the tier that MEASURED WORST. On settled pre-match predictions
-        # (2026-08-10): HIGH claimed 74.1% and delivered 60.9% (n=69), while MEDIUM claimed
-        # 57.8% and delivered 68.5% (n=89). So the most intrusive channel currently targets the
-        # weaker set, and the fixture-detail badge has already been hidden from users for the
-        # same reason.
+        # The tier gate was removed because it selected the tier that measured WORST: on settled
+        # pre-match predictions, HIGH claimed 74.1% and delivered 60.9% (n=69) while MEDIUM
+        # claimed 57.8% and delivered 68.5% (n=89). The most intrusive channel was pointing at
+        # the weaker set, and the badge has already been hidden from users for the same reason.
         #
-        # Not changed here, deliberately and on two grounds. The intervals overlap, so the
-        # inversion is suggestive rather than established, and rewriting the gate on n=69 would
-        # be the same over-fitting that was refused for MIN_FEATURE_COMPLETENESS on n=16.
-        # Second, exactly ONE real push token exists today, so the practical cost of waiting is
-        # near zero while the cost of inventing a replacement rule is a fresh unvalidated
-        # assumption in its place.
+        # This is NOT a new rule invented on that evidence -- n=69 is far too thin to justify
+        # one, and inventing a replacement was explicitly refused. It is the rule the product
+        # ALREADY applies to decide a pick is worth showing: _bulk_best_picks runs the same
+        # base-rate edge, market-disagreement and feature-completeness guards the feed uses.
+        # Notifying about a pick the feed itself would not surface was never defensible.
         #
-        # BEFORE push reaches real users: either recalibrate the tier thresholds against
-        # measured outcomes, or replace this with a criterion that has been measured. Do not
-        # simply widen it.
-        if prediction.confidence_tier != ConfidenceTier.HIGH:
+        # It also fixes a real incoherence. The previous path used best_outcome, which only
+        # considers h2h, while the card shows the best pick ACROSS markets -- so a push could
+        # say "back home" while the app showed "UNDER 3.5" for the same fixture. Now they are
+        # the same selection by construction.
+        #
+        # Volume control comes from the guards plus each user's own saved min_odds, which is a
+        # preference they set, rather than from a threshold we never validated.
+        from app.fixtures.router import _bulk_best_picks
+
+        best_picks, _all_picks = await _bulk_best_picks(db, [fixture_id])
+        pick = best_picks.get(fixture_id)
+        if pick is None or pick.odds is None:
+            # No pick the feed would surface, or no real price to quote. Either way there is
+            # nothing worth interrupting someone for.
             return
 
-        odds_rows = [
-            {"home_odds": o.home_odds, "draw_odds": o.draw_odds, "away_odds": o.away_odds}
-            for o in (await db.execute(select(Odds).where(Odds.fixture_id == fixture_id)))
-            .scalars()
-            .all()
-        ]
-        best_odds = best_available_odds(odds_rows)
-        outcome = best_outcome(
-            prediction.home_prob,
-            prediction.draw_prob,
-            prediction.away_prob,
-            best_odds["home"],
-            best_odds["draw"],
-            best_odds["away"],
-        )
-        if outcome is None:
-            return
-
-        recipients = await _recipients_for_pick(db, fixture, min_odds_met=outcome.odds)
+        recipients = await _recipients_for_pick(db, fixture, min_odds_met=pick.odds)
 
         for user in recipients:
             await _send_push(
                 db,
                 user,
-                title="New high-confidence pick",
+                # No longer "high-confidence": that label came from a tier measured as
+                # misleading and hidden from the app for the same reason. The notification
+                # should not claim something the product itself has stopped asserting.
+                title="New pick",
                 body=(
-                    f"{outcome.selection} @ {outcome.odds} — "
-                    f"{outcome.probability:.0%} model probability"
+                    f"{format_selection(pick)} @ {pick.odds} — "
+                    f"{pick.probability:.0%} model probability"
                 ),
                 data={"fixture_id": str(fixture_id)},
             )
@@ -158,8 +160,13 @@ async def _notify_new_pick(fixture_id: uuid.UUID, prediction_id: uuid.UUID) -> N
 
 @celery_app.task(name="app.workers.notify_users.notify_new_pick")
 def notify_new_pick(fixture_id: str, prediction_id: str) -> None:
-    """Queued by run_predictions when a new HIGH-confidence prediction is generated (TDD
-    §5.4). Deep link on tap: sportpiq://fixture/{fixture_id}, handled by Expo Router."""
+    """Queued by run_predictions for every new prediction (TDD §5.4); _notify_new_pick decides
+    whether it is worth sending, using the feed's own pick selection.
+
+    It was previously described as firing on HIGH-confidence predictions. run_predictions never
+    actually gated on the tier — the filter lived downstream — and that tier has since been
+    measured as misleading and removed from the gate entirely. Deep link on tap:
+    sportpiq://fixture/{fixture_id}, handled by Expo Router."""
     run_task(_notify_new_pick(uuid.UUID(fixture_id), uuid.UUID(prediction_id)))
 
 
