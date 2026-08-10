@@ -134,6 +134,10 @@ class PredictionResponse(BaseModel):
     home_prob: float
     draw_prob: float | None = None
     away_prob: float
+    # UNVALIDATED — do not render this to users. Measured 2026-08-10: HIGH claimed 74.1% and
+    # delivered 60.9% (n=69) while MEDIUM claimed 57.8% and delivered 68.5% (n=89), so the
+    # label pointed at the weaker set and was removed from the app and the push gate. Still
+    # returned as MEASUREMENT DATA so the thresholds can be recalibrated later — not as advice.
     confidence_tier: str
     expected_value: float | None = None
     extra_markets: ExtraMarketsResponse | None = None

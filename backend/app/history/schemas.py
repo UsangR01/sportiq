@@ -21,6 +21,13 @@ class HistoryEntry(BaseModel):
     model_version: str
     # The model's own confidence in the outcome it picked (not necessarily the home side).
     predicted_probability: float
+    # UNVALIDATED — do not render this to users.
+    #
+    # Measured on settled pre-match predictions (2026-08-10): HIGH claimed 74.1% and delivered
+    # 60.9% (n=69), while MEDIUM claimed 57.8% and delivered 68.5% (n=89). The label pointed at
+    # the weaker set, so it was removed from the app and from the push gate. It is still
+    # computed and returned as MEASUREMENT DATA, so the thresholds can be recalibrated against
+    # outcomes once the sample supports it — not as advice.
     confidence_tier: str
     predicted_outcome: str  # "home" | "draw" | "away"
     result: str  # the real settled MatchResult
