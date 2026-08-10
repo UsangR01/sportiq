@@ -167,6 +167,22 @@ LEAGUES = [
 # fold order; 5 is the standard choice and keeps each fold at ~1,000 training fixtures.
 OOF_FOLDS = 5
 
+# The temporal split. NOTE THAT ANY SEASON OUTSIDE THESE THREE WINDOWS IS SILENTLY DROPPED:
+# examples are assembled for it and then matched by no split, so it trains and tests nothing.
+#
+# That cost a full retrain on 2026-08-10. Current-season history had just been collected for
+# nine leagues (1,344 rows for 2026, 20 for 2027), the example count duly rose 27,232 ->
+# 27,914, and the retrain produced a model whose every booster hashed BYTE-IDENTICAL to the
+# previous one. Nothing was wrong with the collection -- it was genuinely needed, and it fixed
+# retrodiction, which reads the game log directly rather than through these windows. It simply
+# cannot reach the model until the windows advance.
+#
+# Advancing them is a real decision, not a formality, and it is deliberately NOT taken yet:
+# season 2026 currently holds 1,344 rows against ~10,900 for every completed season, because
+# most of these leagues have only just kicked off. Promoting a 12%-complete season to TEST
+# would make every headline metric a small-sample number while looking like a like-for-like
+# comparison. Revisit once 2026 is substantially complete -- and when advancing, move all three
+# windows together (train 2022-2024 / val 2025 / test 2026) rather than only the test season.
 TRAIN_SEASONS = [2021, 2022, 2023]
 VAL_SEASON = 2024
 TEST_SEASON = 2025

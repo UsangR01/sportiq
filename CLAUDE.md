@@ -1149,6 +1149,20 @@ zero corners rows. After it the hashes invert exactly as they should: `corners_h
 correct scoping rather than a silently-broken run — the same "unchanged metric after adding
 data" signature as the pruned key-player features, but this time checked rather than assumed.
 
+**Collecting current-season data does NOT reach the model until the split windows advance —
+this cost a full no-op retrain on 2026-08-10.** `train_football.py`'s split is
+`TRAIN=[2021,2022,2023] / VAL=2024 / TEST=2025`, and **any season outside those three windows
+is silently dropped**: examples are assembled for it and then matched by no split. After
+collecting 2026 history for nine leagues the example count rose 27,232 → 27,914 and the
+retrain produced a model whose every booster hashed **byte-identical** to the previous one.
+The collection was not wasted — it was what fixed retrodiction, which reads the game log
+directly rather than through these windows, and it is what exposed the Elo bug below — but it
+cannot influence training yet. Advancing the windows is deliberately **not** done yet: season
+2026 holds 1,344 rows against ~10,900 for every completed season, so promoting a ~12%-complete
+season to TEST would turn every headline metric into a small-sample number while still looking
+like a like-for-like comparison. Revisit when 2026 is substantially complete, and move all
+three windows together.
+
 **Do not read corners MAE 2.167 → 2.157 as an improvement.** The corners *test set* grew from
 2,291 to 3,731 rows (training 6,521 → 10,877) precisely because those leagues now contribute,
 so the two numbers score different exams — the identical trap as comparing headline accuracy
