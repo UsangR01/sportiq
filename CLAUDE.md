@@ -433,6 +433,61 @@ code changes without a restart**, and the symptom is never an error — it looks
 didn't take". Restart both after any worker/adapter change before concluding anything from live
 data.
 
+## Measuring whether the predictions work
+
+Spec: `docs/history-metrics-spec.md`, written **before** the endpoint was touched so its shape
+could not be chosen after seeing which cut of the data looked best.
+
+**`predictions.kind`** (`pre_match` | `retrodiction` | `unknown`) records provenance at write
+time. Both paths wrote to one table with nothing to tell them apart, so `/history/summary`
+averaged them and reported one accuracy. Measured: mixing moved football **56.1% → 53.3%** and
+tennis **63.6% → 61.7%** — *downward*, the opposite of the expected direction, because
+retrodictions score WORSE (`assemble_from_game_log` carries a leakage guard and thinner
+features). The fault was never hindsight flattering the model; it was averaging two populations
+with different feature quality and reporting neither.
+- **A timestamp cannot substitute for the column.** `created_at < kickoff` breaks on
+  regeneration — 91 football predictions were regenerated on 2026-08-10, resetting `created_at`
+  to after those kickoffs. So the historical backfill is **one-directional**: before-kickoff
+  proves a forecast, the reverse proves nothing, and those rows stay `UNKNOWN` rather than being
+  guessed. `UNKNOWN` is also the column default, so a future write path that forgets to set it
+  is excluded from skill measurement rather than silently claiming to be a forecast.
+
+**`pick_snapshots`** records the pick as it was SHOWN, because `best_pick` is computed per
+request and was never stored — grading it later would mean recomputing against today's odds and
+today's guards, i.e. a different product than users saw. **Nothing before 2026-08-10 is
+recoverable.** Captured **4-8 hours out**, and that window is load-bearing: snapshotting next to
+`capture_closing_odds` (T-10..45min) would make CLV meaningless *by construction*, since
+`taken/closing - 1` is ~0 when both prices are minutes apart. Delegates to `_bulk_best_picks`,
+the feed's own selection, with a test asserting the delegation.
+
+**Every accuracy carries `n`, a 95% Wilson interval and its minimum detectable effect.** Live:
+football n=139, 0.561, CI [0.478, 0.641], detectable 0.105; tennis n=77, 0.636, CI
+[0.525, 0.735], detectable 0.136. **Both are underpowered for the edge we believe in** — 4.1pp
+football against a 10.5pp detectable effect, needing ~891 graded picks against 139; tennis needs
+~5,406 against 77. An early percentage is noise in either direction, which is exactly why the
+fields sit beside it.
+
+### What the first measurements found
+
+- **CLV is negative, but less so than the naive number.** Proxy over pre-match picks: favoured
+  side **-3.47%**, control (the side NOT favoured) **+0.83%**, a gap of **-4.30pp**. The control
+  matters — football's control is also negative (-2.40%), so a real part of the raw -3.61% is
+  systematic price drift rather than anything about the model. **The control is not clean**
+  either: for a 3-way market it is the less-likely of home/away, usually the underdog, whose
+  prices are longer and more volatile. Directionally this is still evidence against an edge; it
+  is not a measurement to quote precisely.
+- **The confidence badge is miscalibrated, and possibly inverted.** HIGH claims 74.1% and
+  delivers **60.9%** (n=69); MEDIUM claims 57.8% and delivers **68.5%** (n=89). So MEDIUM
+  outperformed HIGH. The intervals overlap, so the ordering is not established — but the
+  calibration gap is stark, and CLAUDE.md has always said these thresholds were "provisional
+  guesses". They are now measured, and wrong.
+- **The completeness floor works, and 0.25 may be too low.** Below 0.25: 33.3% (n=9). 0.25-0.35:
+  **37.5%** (n=16). Above 0.35: **69.9%** (n=123). The real break is at 0.35, not 0.25 — where
+  mobile's own `LOW_CONFIDENCE_COMPLETENESS` already sits. The 0.25 choice was defensible on the
+  evidence used at the time (extremeness: 85% of picks below 0.25 were >=0.90 versus 6% above),
+  but *correctness* evidence points higher. Small n, wide intervals — a candidate to revisit,
+  not a settled answer.
+
 ## Pick ranking, odds reliability, and prediction-quality measurement
 
 A block of work driven by two user observations that turned out to share one root cause: "a
@@ -617,7 +672,7 @@ Added so completed fixtures show a final score and the Home feed can browse past
 
 **`fetch_fixtures` gained an optional `days_back` param** (both real adapters + all stub adapters, for ABC compliance) so `ingest_fixtures.py` can backfill the last 7 days of completed fixtures (`FIXTURE_HISTORY_DAYS`, symmetric with the existing 7-day forward `FEATURE_LOOKAHEAD_DAYS`) — nothing had ever ingested a past fixture before this, only ever forward-looking.
 
-**A real, previously-dormant `outcomes` table now gets written to**: `Outcome`/`MatchResult` (TDD schema) existed but nothing ever inserted a row — `_maybe_settle_outcome` (called from both `ingest_fixtures.py` and `ingest_live_scores.py`, idempotent) writes one the moment a fixture completes with real scores. This is a real, unblocking step for `GET /history`'s own documented blocker ("no settled outcomes exist") — aggregating these into `/history` itself (real model-performance rollups) is still a separate, larger task, not attempted here.
+**A real, previously-dormant `outcomes` table now gets written to**: `Outcome`/`MatchResult` (TDD schema) existed but nothing ever inserted a row — `_maybe_settle_outcome` (called from both `ingest_fixtures.py` and `ingest_live_scores.py`, idempotent) writes one the moment a fixture completes with real scores. This is a real, unblocking step for `GET /history`'s own documented blocker ("no settled outcomes exist") — aggregating these into `/history` itself is **done** — see "Measuring whether the predictions work" below.
 
 **A real, previously-latent `TeamFeatures` duplicate-row bug was found and fixed while touching this code**: re-running `ingest_fixtures.py` (daily, per TDD §2.3) for the same not-yet-played fixture inserted a brand-new `TeamFeatures` row every time — there was no dedup at all. Over several days before kickoff this would accumulate multiple rows per `(team_id, fixture_id)`, and `run_predictions.py`'s `.scalar_one_or_none()` lookup would eventually raise `MultipleResultsFound`. Fixed with delete-then-insert per `(team_id, fixture_id)`, the same idiom already used for `team_key_players`; regression-tested in `backend/tests/test_ingest_fixtures.py::test_rerunning_ingest_does_not_duplicate_team_features` via a fake adapter run twice. Completed fixtures are now also excluded from the feature/prediction loop entirely (they don't need pre-game features), avoiding wasted `fetch_team_stats` calls on the newly-backfilled historical games.
 
@@ -639,7 +694,7 @@ Added so the Home feed can show "what the model would have called" alongside a r
 
 Wired automatically: `_retrodict_league` runs at the end of `ingest_fixtures.py`'s own per-league backfill (football only — `assemble_from_game_log`'s shape doesn't fit NBA's), so every newly-completed fixture gets a real retrodicted prediction with no separate schedule needed. `backfill_predictions()` (a Celery task) exists as a standalone manual entry point across every football league at once, not because the per-league path needs it.
 
-Stubbed (signature + schema exist, body is `NotImplementedError`/`501`, pending real API keys or settled outcomes): `GET /history` (needs an outcomes-ingestion pipeline plus real settled games — neither exists yet; unlike `/stats/model`, there's no shortcut here since this needs actual game results, not just a registered model), `RotoWireAdapter` and `BallDontLieAdapter.fetch_injuries` (live-tested: BallDontLie's `/nba/v1/player_injuries` 401s on this key's plan, same paid-tier gate as `/season_averages`/`/standings`; no `ROTOWIRE_API_KEY` was ever provisioned), `TheRundownAdapter.fetch_fixtures`/`.fetch_team_stats`, and `SportsDataIOAdapter` entirely. `ingest_injuries.py`'s NBA path (re-inference trigger and DB-write logic) is fully real and tested — only the underlying HTTP calls into RotoWire/BallDontLie are stubbed, so NBA's `player_injury_status` stays empty in practice until one of those exists. Football's injury path is real end-to-end since API-Football's `/injuries` is live. `FootballModel` is a real, trained model, and football's odds now come from both TheRundown and API-Football (per-league, see above) — see "Football model + key-player availability" above.
+Stubbed (signature + schema exist, body is `NotImplementedError`/`501`, pending real API keys): ~~`GET /history`~~ — **no longer stubbed, and it had not been for some time.** It is live, backed by real settled outcomes, and serving `/history`, `/history/summary` and `/stats/model`. This line said otherwise for long enough that it was quoted back as a reason to "build" an endpoint that already existed. **The cost of that drift was worse than a wasted afternoon**: because nobody was looking at it, `/history/summary` spent that time averaging pre-match forecasts together with retrodictions and reporting the result as one accuracy — a live, user-facing number computed over a population nobody had chosen. See "Measuring whether the predictions work" below. `RotoWireAdapter` and `BallDontLieAdapter.fetch_injuries` (live-tested: BallDontLie's `/nba/v1/player_injuries` 401s on this key's plan, same paid-tier gate as `/season_averages`/`/standings`; no `ROTOWIRE_API_KEY` was ever provisioned), `TheRundownAdapter.fetch_fixtures`/`.fetch_team_stats`, and `SportsDataIOAdapter` entirely. `ingest_injuries.py`'s NBA path (re-inference trigger and DB-write logic) is fully real and tested — only the underlying HTTP calls into RotoWire/BallDontLie are stubbed, so NBA's `player_injury_status` stays empty in practice until one of those exists. Football's injury path is real end-to-end since API-Football's `/injuries` is live. `FootballModel` is a real, trained model, and football's odds now come from both TheRundown and API-Football (per-league, see above) — see "Football model + key-player availability" above.
 
 **Known divergences from the TDD, introduced deliberately while building — check these before assuming the docs are authoritative:**
 - `refresh_tokens` table and `users.expo_push_token` column exist in code but aren't in the TDD §2.1 schema listing (the TDD's own prose requires both — §4.3, §5.4).
