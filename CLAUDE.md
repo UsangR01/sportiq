@@ -125,10 +125,27 @@ alongside their overall H2H/streak** — see `FEATURE_NAMES` below (14, not the 
 
 **A real, serious target-leakage bug was found and fixed only after the first real training
 run** (impossible to catch before ALL-STAR access, since it only shows up in genuinely
-completed match data): BallDontLie's `/matches` response always lists the eventual **WINNER**
-as `player1` for a completed match — confirmed live, 20/20 in a sampled batch of real 2022
-matches — while a genuinely scheduled (not-yet-played) match shows no such pattern (the winner
-isn't known yet, confirmed live against real 2026 upcoming matches). The original design
+completed match data): BallDontLie's `/matches` response ~~always~~ **usually** lists the
+eventual **WINNER** as `player1` for a completed match — confirmed live, 20/20 in a sampled
+batch of real 2022 matches — while a genuinely scheduled (not-yet-played) match shows no such
+pattern (the winner isn't known yet, confirmed live against real 2026 upcoming matches).
+
+> **"Always" is too strong, and the difference matters — measured 2026-08-10.** The ordering
+> is a property of SETTLED HISTORICAL data on the LIST endpoint, not of completed matches in
+> general:
+>
+>     LIST /matches?season=2022    60/60 = 100%
+>     LIST /matches?season=2025    59/59 = 100%
+>     LIST /matches?season=2026    41/60 =  68%     <- current season
+>     GET  /matches/{id}           12/25 =  48%     <- coin flip
+>
+> Both facts stand. The leakage was real and the `_home_away_players` id-based tiebreak below
+> is still required, because training reads settled seasons where the ordering is ~100%
+> informative. But the rule **cannot be inverted to recover a winner** — at 48% on the
+> single-match endpoint it carries no information, which is exactly the case where a winner is
+> wanted (a retirement with tied completed sets). That is why
+> `ingest_fixtures.SPORTS_WITHOUT_DRAWS` refuses to settle a tied tennis score rather than
+> assigning a winner from `player1`. The original design
 (inherited from the plan's own, pre-ALL-STAR assumption that `player1`/`player2` was a neutral
 positional label) trusted that ordering directly as home/away — which baked the outcome
 straight into the label. First real training run: train (2021-2023) and validation (2024)
@@ -368,13 +385,24 @@ retirement can legitimately leave equal completed sets (real example: `6-1, 6-7,
 (one-off, re-fetches from the real API and recomputes through the fixed code path, never
 patching values by hand) correctly *skips* those rather than forcing a fabricated winner —
 they're already handled by `result_type`, which is what actually suppresses the bogus verdict.
-**Known, currently-inert gap**: ~20 tennis `Outcome` rows still carry `MatchResult.DRAW` for
-exactly these, since `_maybe_settle_outcome` derives the result from the score alone (correct
-for football/NBA, wrong for a tennis retirement where the winner is known independently).
-Nothing consumes tennis `Outcome` rows yet (`GET /history` is still a 501 stub), so this is
-recorded rather than silently left — fix it when `/history` is built. Elo is likewise not
-recomputed for those (it would need a full ordered replay) and is genuinely inert here, since
-tennis's feature set uses `rank_diff`, not Elo.
+~~**Known, currently-inert gap**: ~20 tennis `Outcome` rows still carry `MatchResult.DRAW`~~ —
+**fixed 2026-08-10.** `_maybe_settle_outcome` derived the result from the score alone (correct
+for football, wrong for a tennis retirement) and fell through to `MatchResult.DRAW` on a tie.
+`ingest_fixtures.SPORTS_WITHOUT_DRAWS = {"tennis", "nba"}` now settles **nothing** for a tied
+score in those sports — no `Outcome` and no draw-shaped Elo update, since both live in that
+function. The 12 accumulated rows were deleted via
+`scripts/remove_impossible_draw_outcomes.py`.
+- **No winner is guessed, because none is available** — see the measured `player1` breakdown
+  above. The earlier note here said the winner "is known independently"; it is not, on the
+  endpoints that would be used. At 48% that would have been a coin flip.
+- **An absent `Outcome` is the honest state**, and it stays settleable if a real winner signal
+  appears. It is retried each ingest at no API cost.
+- **Deletion only sticks because of the guard.** Not hypothetical: the first removal was undone
+  within minutes by the running Celery worker, which still held pre-guard code — the
+  stale-worker trap, hit for the second time in one day. Verified after restarting: two real
+  scheduled `ingest_live_scores` runs, two guard activations, zero rows recreated.
+- Elo is still not recomputed for those fixtures (it would need a full ordered replay) and
+  remains genuinely inert, since tennis's feature set uses `rank_diff`, not Elo.
 
 **Tournament grouping with flag + surface** (direct user request: "I want the games separated
 by tournament name. Inline with the tournament name, add country flag and surface... This will
