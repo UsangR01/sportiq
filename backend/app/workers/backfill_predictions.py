@@ -239,6 +239,20 @@ async def _retrodict_league(sport: Sport, league: League) -> None:
         )
         new_rows = db_game_log[~db_game_log["FIXTURE_ID"].astype(str).isin(cached_fixture_ids)]
         game_log = pd.concat([cached_games, new_rows], ignore_index=True)
+        # FIXTURE_ID arrives as int64 from the parquet and as str from the DB (external_id), so
+        # the concatenated frame carries BOTH types. compute_elo_history keys its result on
+        # whatever each row holds, while the lookup below always uses the str external_id — so
+        # every fixture sourced from the parquet silently returned elo_diff=None. The value was
+        # there; only the key type differed.
+        #
+        # Silent in the worst way: a missing Elo does not raise, it just drops the single
+        # strongest team-strength signal and leaves a confident-looking prediction behind.
+        # Measured on the nine newly-collected leagues, whose 2026 fixtures moved from
+        # DB-sourced to parquet-sourced and so lost Elo: predicted away-win probability
+        # collapsed to 5.7% against an actual 36.6%, and mean home xG rose to 2.43 against an
+        # actual 1.73. Note the dedup filter directly above already normalised with
+        # .astype(str) -- the same fix, applied to one of the two places that needed it.
+        game_log["FIXTURE_ID"] = game_log["FIXTURE_ID"].astype(str)
 
         team_key_players_by_team_season = await load_team_key_players_by_team_season(db)
         elo_history = compute_elo_history(game_log) if not game_log.empty else {}

@@ -103,15 +103,33 @@ LEAGUE_CONFIGS: dict[str, dict] = {
     # Nordic, Polish, Danish, Romanian, Czech or Austrian competition. J1 maps to JPN1 (19),
     # making it the only one of the nine with a second odds source and therefore the only one
     # that could ever support game-totals lines.
-    "allsvenskan": {"league_id": 113, "rundown_sport_id": None},
-    "eliteserien": {"league_id": 103, "rundown_sport_id": None},
-    "veikkausliiga": {"league_id": 244, "rundown_sport_id": None},
-    "ekstraklasa": {"league_id": 106, "rundown_sport_id": None},
-    "denmark_superliga": {"league_id": 119, "rundown_sport_id": None},
-    "liga_i": {"league_id": 283, "rundown_sport_id": None},
-    "j1_league": {"league_id": 98, "rundown_sport_id": 19},
-    "czech_first": {"league_id": 345, "rundown_sport_id": None},
-    "austria_bundesliga": {"league_id": 218, "rundown_sport_id": None},
+    # These nine carry an explicit `seasons` because SEASONS alone left them ending in 2025,
+    # while the fixtures being predicted are in 2026. A game log that stops months before the
+    # match still produces form/Elo/streak values -- just stale ones -- and stale-but-present
+    # is invisible to feature_completeness, which measures presence rather than freshness.
+    # Measured consequence: picks in these leagues went 11/24 against 19.7 expected (claimed
+    # 82.3%, actual 45.8%, P=0.0001) while established leagues were fine at 16/19.
+    "allsvenskan": {"league_id": 113, "rundown_sport_id": None, "seasons": SEASONS + [2026]},
+    "eliteserien": {"league_id": 103, "rundown_sport_id": None, "seasons": SEASONS + [2026]},
+    "veikkausliiga": {"league_id": 244, "rundown_sport_id": None, "seasons": SEASONS + [2026]},
+    "ekstraklasa": {"league_id": 106, "rundown_sport_id": None, "seasons": SEASONS + [2026]},
+    "denmark_superliga": {
+        "league_id": 119,
+        "rundown_sport_id": None,
+        "seasons": SEASONS + [2026],
+    },
+    "liga_i": {"league_id": 283, "rundown_sport_id": None, "seasons": SEASONS + [2026]},
+    # J1 needs BOTH: 2026 is the short transitional Feb-Jun season, and 2027 is the current
+    # one running 2026-08-07 -> 2027-06-06 (API-Football labels it by the year it ENDS -- see
+    # END_YEAR_SEASON_LEAGUES in app/adapters/api_football.py). Collecting only "2026" here
+    # would miss every match played from August 2026 onward.
+    "j1_league": {"league_id": 98, "rundown_sport_id": 19, "seasons": SEASONS + [2026, 2027]},
+    "czech_first": {"league_id": 345, "rundown_sport_id": None, "seasons": SEASONS + [2026]},
+    "austria_bundesliga": {
+        "league_id": 218,
+        "rundown_sport_id": None,
+        "seasons": SEASONS + [2026],
+    },
 }
 
 # Collection is stageable because the per-fixture endpoints genuinely can't all run in one
@@ -204,7 +222,7 @@ async def _fetch_teams(
 
 
 async def collect_game_log(
-    league_slug: str, league_id: int
+    league_slug: str, league_id: int, seasons: list[int] | None = None
 ) -> tuple[pd.DataFrame, dict[str, str], dict[str, str]]:
     """One row per team per completed fixture — the football analogue of
     collect_nba_data.py's leaguegamelog pull, built from API-Football's /fixtures rather than
@@ -215,7 +233,7 @@ async def collect_game_log(
     team_codes: dict[str, str] = {}
     team_names: dict[str, str] = {}
     async with _football_client() as client:
-        for season in SEASONS:
+        for season in seasons if seasons is not None else SEASONS:
             season_codes, season_names = await _fetch_teams(client, league_id, season)
             team_codes.update(season_codes)
             team_names.update(season_names)
@@ -418,6 +436,23 @@ async def collect_odds_sample(rundown_sport_id: int, game_dates: list[str]) -> p
     return pd.DataFrame(rows, columns=["date", "home_short", "away_short", "home_odds"])
 
 
+def _merge_lookup(path: Path, fresh: dict[str, str], value_column: str) -> None:
+    """Merge newly-seen team_id -> code/name pairs into an existing lookup parquet.
+
+    New seasons bring promoted clubs, so these files have to grow alongside the game log. A
+    missing NAME is not cosmetic: it is what stops roughly 20% of real xG being dropped as
+    ambiguous during resolution (see _fetch_teams)."""
+    if not fresh:
+        return
+    rows = pd.DataFrame([{"team_id": k, value_column: v} for k, v in fresh.items()])
+    if path.exists():
+        rows = pd.concat([pd.read_parquet(path), rows], ignore_index=True).drop_duplicates(
+            subset=["team_id"], keep="last"
+        )
+    rows.to_parquet(path, index=False)
+    print(f"  lookup {path.name} now {len(rows)} rows")
+
+
 def collect_league(league_slug: str, stages: tuple[str, ...] = STAGES) -> None:
     config = LEAGUE_CONFIGS[league_slug]
     league_id = config["league_id"]
@@ -426,14 +461,40 @@ def collect_league(league_slug: str, stages: tuple[str, ...] = STAGES) -> None:
     games_path = DATA_DIR / f"football_game_log_{league_slug}.parquet"
     codes_path = DATA_DIR / f"football_team_codes_{league_slug}.parquet"
     names_path = DATA_DIR / f"football_team_names_{league_slug}.parquet"
+    wanted = sorted(config.get("seasons", SEASONS))
     if games_path.exists() and names_path.exists():
-        print(f"{games_path} already exists, skipping API-Football re-fetch")
         games = pd.read_parquet(games_path)
+        have = set(games["SEASON"].astype(int).tolist()) if "SEASON" in games else set()
+        missing = [s for s in wanted if s not in have]
+        if missing and "gamelog" in stages:
+            # ADDITIVE, not all-or-nothing. This used to skip outright whenever the parquet
+            # existed, which quietly made the script a one-off: a league collected through 2025
+            # stayed frozen there, and its retrodictions kept deriving form/Elo from a game log
+            # ending months before the fixture being predicted. Stale-but-present features look
+            # exactly like good ones -- feature_completeness measures presence, not freshness --
+            # so nothing downstream could notice. Fetching only the missing seasons costs ~1
+            # call per league-season and makes this re-runnable every season.
+            print(f"{league_slug}: have seasons {sorted(have)}, fetching missing {missing}")
+            fresh, fresh_codes, fresh_names = asyncio.run(
+                collect_game_log(league_slug, league_id, seasons=missing)
+            )
+            if not fresh.empty:
+                games = pd.concat([games, fresh], ignore_index=True).drop_duplicates(
+                    subset=["FIXTURE_ID", "TEAM_ID"], keep="last"
+                )
+                games.to_parquet(games_path, index=False)
+                print(f"merged {len(fresh)} new rows; game log now {len(games)} rows")
+                _merge_lookup(codes_path, fresh_codes, "code")
+                _merge_lookup(names_path, fresh_names, "name")
+        else:
+            print(f"{games_path} covers seasons {wanted}, skipping API-Football re-fetch")
     elif "gamelog" in stages:
         # A game log collected before team names were captured re-runs here deliberately: the
         # names are what stop ~20% of real xG being dropped as ambiguous (see _fetch_teams),
         # and re-fetching is only ~1 call per league-season.
-        games, team_codes, team_names = asyncio.run(collect_game_log(league_slug, league_id))
+        games, team_codes, team_names = asyncio.run(
+            collect_game_log(league_slug, league_id, seasons=wanted)
+        )
         games.to_parquet(games_path, index=False)
         print(f"saved {len(games)} game-log rows to {games_path}")
         pd.DataFrame([{"team_id": k, "code": v} for k, v in team_codes.items()]).to_parquet(
