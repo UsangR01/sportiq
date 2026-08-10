@@ -27,6 +27,13 @@ FEATURE_WINDOW_MATCHES = 10
 # so a fresh backfill of the current window is needed once, not just going forward.
 FIXTURE_HISTORY_DAYS = 7
 
+# Sports where a tied score cannot mean a draw. Tennis matches always have a winner, including
+# retirements, where equal COMPLETED sets (6-1, 6-7, 0-2 ret.) still leave a real result. NBA
+# games go to overtime rather than end level. For these, a tie means the winner is not
+# derivable from the score, which is a different statement from "the match was drawn" — see
+# _maybe_settle_outcome.
+SPORTS_WITHOUT_DRAWS = {"tennis", "nba"}
+
 
 async def _upsert_live_state(db, fixture_id, payload: FixturePayload) -> None:
     """Real score storage for both in-progress and completed fixtures — FixtureLiveState
@@ -102,6 +109,31 @@ async def _maybe_settle_outcome(
         result = MatchResult.HOME_WIN
     elif payload.away_score > payload.home_score:
         result = MatchResult.AWAY_WIN
+    elif sport_slug in SPORTS_WITHOUT_DRAWS:
+        # A tied score in a sport that cannot draw means the winner is not derivable from the
+        # score, NOT that the match was drawn. In tennis it happens on a retirement: 6-1, 6-7,
+        # 0-2 ret. is 1-1 in completed sets and still has a real winner (see
+        # balldontlie_tennis._is_completed_set). Writing DRAW recorded a result that cannot
+        # exist -- 12 such rows accumulated before this guard.
+        #
+        # Nothing is written, deliberately. The absent Outcome is the honest state and leaves
+        # the match settleable later if a real winner signal appears; a wrong one would have to
+        # be found and corrected first. It also means this is retried on each ingest, which is
+        # cheap (no API call) and self-healing.
+        #
+        # The provider offers no usable winner here. BallDontLie exposes no retirement marker,
+        # and its habit of listing the winner as player1 -- 100% on settled 2022/2025 data via
+        # the list endpoint -- does NOT hold where it would be needed: 68% on the current
+        # season and 48% via /matches/{id}. Measured, not assumed.
+        logger.info(
+            "Not settling an outcome for %s fixture %s: score %s-%s is tied in a sport with no "
+            "draw, so the winner is not derivable",
+            sport_slug,
+            fixture_id,
+            payload.home_score,
+            payload.away_score,
+        )
+        return
     else:
         result = MatchResult.DRAW
     db.add(
