@@ -51,6 +51,14 @@ def best_outcome(
     )
 
 
+# A decimal price above this is treated as not a real quote. Matches the threshold
+# ml/training/train_football.py already applies (PLAUSIBLE_MAX_DECIMAL_ODDS), so training and
+# serving agree on what counts as a usable price. 15.0 is comfortably above any realistic
+# three-way football or two-way tennis price while excluding the 41.00-151.00 rows measured in
+# real data against medians of 1.97-2.90.
+PLAUSIBLE_MAX_DECIMAL_ODDS = 15.0
+
+
 def _median(values: list[float]) -> float:
     ordered = sorted(values)
     mid = len(ordered) // 2
@@ -106,7 +114,22 @@ def best_available_odds(odds_rows: list[dict]) -> dict[str, float | None]:
     both h2h (home/draw/away columns) and double_chance (which reuses the same home_odds/
     away_odds columns for its own two outcomes — see app/odds/models.py:Odds).
 
-    Rows that contradict the consensus are excluded first — see _consensus_outliers."""
+    Rows that contradict the consensus are excluded first — see _consensus_outliers — and
+    implausible prices are excluded too, which is a genuinely different failure: a row can be
+    the right way round and still absurd. Measured across real tennis h2h rows, HardRock
+    supplied 151.00 where fourteen other books had a median of 1.97, plus 76.00 against 2.07
+    and 61.00 against 2.90. None of those are inverted, so the consensus test passes them, and
+    taking the MAXIMUM then actively selects them.
+
+    ml/training/train_football.py already filters exactly this with PLAUSIBLE_MAX_DECIMAL_ODDS
+    after an inflated ROI traced back to the same kind of row; serving simply never gained the
+    same filter. Train/serve parity, not a new idea.
+
+    Currently a latent gap rather than a live bug — MAX_EDGE_OVER_MARKET happens to reject the
+    resulting pick, because a 151.00 price implies 0.7% and any real model probability exceeds
+    that by far more than the guard allows. But relying on that is relying on a coincidence:
+    the pick is dropped as untrustworthy rather than repriced, so a fixture with perfectly good
+    odds elsewhere can lose its pick entirely because one absurd row won the selection."""
     outliers = _consensus_outliers(odds_rows)
     best = {"home": None, "draw": None, "away": None}
     for i, row in enumerate(odds_rows):
@@ -114,7 +137,9 @@ def best_available_odds(odds_rows: list[dict]) -> dict[str, float | None]:
             continue
         for side in ("home", "draw", "away"):
             value = row.get(f"{side}_odds")
-            if value is not None and (best[side] is None or value > best[side]):
+            if value is None or value > PLAUSIBLE_MAX_DECIMAL_ODDS:
+                continue
+            if best[side] is None or value > best[side]:
                 best[side] = value
     return best
 

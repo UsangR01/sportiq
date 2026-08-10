@@ -79,3 +79,39 @@ def test_best_available_odds_trusts_everything_when_there_is_no_consensus():
     ]
 
     assert best_available_odds(rows)["home"] == 3.13
+
+
+def test_an_implausible_price_never_becomes_the_best_available():
+    """A row can be the right way round and still absurd — a different failure from inversion.
+
+    Measured in real tennis h2h data: HardRock supplied 151.00 where fourteen other books had a
+    median of 1.97, plus 76.00 against 2.07 and 61.00 against 2.90. The consensus test passes
+    them because they are not reversed, and taking the MAXIMUM then actively selects them.
+
+    ml/training/train_football.py already filters this after an inflated ROI traced back to the
+    same kind of row; this is the serving half of that, not a new idea.
+    """
+    from app.picks.service import PLAUSIBLE_MAX_DECIMAL_ODDS, best_available_odds
+
+    rows = [
+        {"home_odds": 1.95, "draw_odds": None, "away_odds": 1.90},
+        {"home_odds": 1.97, "draw_odds": None, "away_odds": 1.88},
+        {"home_odds": 2.00, "draw_odds": None, "away_odds": 1.85},
+        {"home_odds": 151.00, "draw_odds": None, "away_odds": 1.02},  # not inverted, just absurd
+    ]
+    best = best_available_odds(rows)
+    assert best["home"] == 2.00, "the 151.00 row must not set the displayed price"
+    assert PLAUSIBLE_MAX_DECIMAL_ODDS == 15.0
+
+
+def test_a_genuinely_long_but_plausible_price_is_still_used():
+    """The filter must not swallow real longshots. A 12.00 outsider in a three-way market is an
+    ordinary price, not an error, and dropping it would quietly cost real value."""
+    from app.picks.service import best_available_odds
+
+    rows = [
+        {"home_odds": 1.20, "draw_odds": 6.50, "away_odds": 11.00},
+        {"home_odds": 1.22, "draw_odds": 6.20, "away_odds": 12.00},
+        {"home_odds": 1.19, "draw_odds": 6.80, "away_odds": 11.50},
+    ]
+    assert best_available_odds(rows)["away"] == 12.00
