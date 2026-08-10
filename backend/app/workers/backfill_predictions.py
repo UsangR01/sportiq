@@ -70,7 +70,7 @@ from app.models_ml.historical_key_players import (
     load_team_key_players_by_team_season,
 )
 from app.models_ml.runner import ModelRunner
-from app.predictions.models import Prediction
+from app.predictions.models import Prediction, PredictionKind
 from app.predictions.service import confidence_tier_for_probability, feature_completeness
 from app.sports.models import League, Sport
 from app.workers.celery import celery_app, run_task
@@ -322,6 +322,9 @@ async def _retrodict_league(sport: Sport, league: League) -> None:
                     away_prob=result.away_prob,
                     confidence_tier=confidence_tier_for_probability(probability),
                     feature_completeness=feature_completeness(features),
+                    # Produced after the result was known — legitimate for the feed,
+                    # never evidence of skill. See PredictionKind.
+                    kind=PredictionKind.RETRODICTION,
                     xg_home=result.xg_home,
                     xg_away=result.xg_away,
                     corners_xg_home=result.corners_xg_home,
