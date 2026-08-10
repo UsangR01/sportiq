@@ -82,11 +82,6 @@ from app.models_ml.football_features import (  # noqa: E402
     merge_corners_into_game_log,
     merge_xg_into_game_log,
 )
-from app.models_ml.historical_key_players import (  # noqa: E402
-    historical_key_player_availability,
-    index_played_names,
-    load_team_key_players_by_team_season,
-)
 from app.models_ml.league_baselines import compute_league_baselines  # noqa: E402
 from app.models_ml.markets import GOALS_LINES, over_under_probs  # noqa: E402
 from sklearn.isotonic import IsotonicRegression  # noqa: E402
@@ -190,17 +185,6 @@ CLASSES = FootballModel.CLASSES  # ("home", "draw", "away") — fixes the label 
 LABEL_BY_CLASS = {cls: i for i, cls in enumerate(CLASSES)}
 
 
-async def _load_team_key_players() -> dict[tuple[str, int], list[dict]]:
-    """Thin wrapper around the shared app/models_ml/historical_key_players.py loader — needs
-    its own async_session_factory() context since that module's function takes an already-open
-    db session (backfill_predictions.py already has one open when it calls it directly).
-    """
-    from app.core.database import async_session_factory
-
-    async with async_session_factory() as db:
-        return await load_team_key_players_by_team_season(db)
-
-
 def ranked_probability_score(probs: np.ndarray, actual_label: int, n_classes: int = 3) -> float:
     """Real RPS for an ordinal 3-way market (home/draw/away treated as ordered from
     home-favorable to away-favorable, matching FootballModel.CLASSES's own order) — the
@@ -215,9 +199,7 @@ def ranked_probability_score(probs: np.ndarray, actual_label: int, n_classes: in
 def build_training_examples(
     games: pd.DataFrame,
     odds: pd.DataFrame,
-    lineups: pd.DataFrame,
     corners: pd.DataFrame,
-    team_key_players_by_team_season: dict,
     team_codes: dict[str, str],
 ) -> pd.DataFrame:
     """One row per fixture (from the home team's perspective) — features via
@@ -250,7 +232,6 @@ def build_training_examples(
     odds_lookup = {
         (row.date, row.home_short, row.away_short): row.home_odds for row in best_odds.itertuples()
     }
-    played_names_index = index_played_names(lineups)
     elo_history = compute_elo_history(games)
     # Same "walk the pooled log once" contract as Elo — a running per-league state that no
     # individual fixture can re-derive without rescanning the whole log.
@@ -284,20 +265,27 @@ def build_training_examples(
         )
         moneyline_prob = (1 / home_odds) if home_odds else None
 
-        key_avail_home, key_per_home = historical_key_player_availability(
-            played_names_index,
-            team_key_players_by_team_season,
-            home_id,
-            season,
-            fixture_id,
-        )
-        key_avail_away, key_per_away = historical_key_player_availability(
-            played_names_index,
-            team_key_players_by_team_season,
-            away_id,
-            season,
-            fixture_id,
-        )
+        # Key-player availability is NOT computed here any more. It was dead work: d0a24d9
+        # pruned the four features it fed after measuring them worthless, and this loop kept
+        # deriving values that assemble_from_game_log then dropped.
+        #
+        # Re-measured 2026-08-10 before deleting, on a pool that had since doubled from nine
+        # leagues to eighteen — the earlier verdict was reached on different data and deserved
+        # a re-test rather than an assumption. Re-adding all four (identical splits, so the
+        # comparison is exact) reproduced it:
+        #
+        #     test accuracy      0.4857 -> 0.4870   (+0.13pp, ~7 of 5,487 — noise)
+        #     RPS                0.2144 -> 0.2151   worse
+        #     corners MAE        2.160  -> 2.166    worse
+        #     under-3.5 trend z  +5.92  -> +4.07    materially worse
+        #
+        # The bottom reliability bucket rose from .604 to .655 while the top barely moved, i.e.
+        # the model separated high- from low-scoring fixtures LESS well with the features than
+        # without them. Two independent measurements on different data now agree.
+        #
+        # Stage 1 (compute_football_key_players.py) is deliberately untouched: it still feeds
+        # the LIVE Stage 2 availability path and the mobile display. Only this training-time
+        # derivation is gone.
 
         # home_row, not a bare `row` — this loop iterates groupby groups, not itertuples.
         baseline = league_baselines.get(home_row.get("LEAGUE"), game_date)
@@ -311,10 +299,10 @@ def build_training_examples(
             home_id,
             away_id,
             moneyline_prob,
-            key_players_available_home=key_avail_home,
-            key_players_available_away=key_avail_away,
-            key_players_per_combined_home=key_per_home,
-            key_players_per_combined_away=key_per_away,
+            key_players_available_home=None,
+            key_players_available_away=None,
+            key_players_per_combined_home=None,
+            key_players_per_combined_away=None,
             elo_diff=elo_diff,
             league_avg_goals=(baseline.avg_goals if baseline else None),
             league_home_win_rate=(baseline.home_win_rate if baseline else None),
@@ -417,7 +405,11 @@ async def main_async() -> None:
                 print(f"  no {kind} collected for {league} yet — training without them")
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=columns)
 
-    lineups = _load_optional("lineups", ["FIXTURE_ID", "TEAM_ID", "PLAYER_NAME"])
+    # Lineups are no longer loaded. They fed only the key-player features, which d0a24d9
+    # pruned and a 2026-08-10 re-measurement confirmed worthless (see build_training_examples).
+    # Collecting them costs ~1 API call PER FIXTURE, so this also removes a standing incentive
+    # to spend thousands of calls on data nothing consumes — the mistake that cost ~10,500
+    # calls once already.
     corners = _load_optional("corners", ["FIXTURE_ID", "TEAM_ID", "CORNERS"])
     # Attaches CORNERS_FOR/CORNERS_AGAINST onto `games` for the new corners-rolling features
     # (app/models_ml/football_features.py:_corners_rolling) — `corners` itself stays the raw
@@ -458,16 +450,12 @@ async def main_async() -> None:
     )
 
     print("loading team_key_players (Stage 1 — run compute_football_key_players.py first)...")
-    team_key_players_by_team_season = await _load_team_key_players()
-    print(f"  {len(team_key_players_by_team_season)} (team, season) entries loaded")
 
     print(
         "assembling training examples "
         "(leakage-safe: every stat filtered to GAME_DATE < fixture date)..."
     )
-    examples = build_training_examples(
-        games, odds, lineups, corners, team_key_players_by_team_season, team_codes
-    )
+    examples = build_training_examples(games, odds, corners, team_codes)
     print(
         f"{len(examples)} examples, moneyline available for {examples['home_odds'].notna().sum()}"
     )

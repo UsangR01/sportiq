@@ -5,10 +5,8 @@ Stage 2 (shared with NBA — app/models_ml/key_player_availability.py) follows
 player_injury_status, not lineup/box-score presence.
 """
 
-import sys
 import uuid
 from datetime import UTC, datetime
-from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -17,16 +15,22 @@ from sqlalchemy import delete
 from app.core.database import async_session_factory
 from app.fixtures.models import InjurySource, InjuryStatus, PlayerInjuryStatus, Team, TeamKeyPlayer
 from app.models_ml.football_key_players import select_top5
+
+# Imported from its real home rather than through ml/training/train_football.py, which used to
+# re-export it. That import went away when the training-time key-player computation was deleted
+# as measured-worthless (see train_football.py:build_training_examples), and reaching through a
+# module that merely re-exported the function was always the more fragile route.
+#
+# The guard below is unaffected by that deletion and still matters: historical_key_player_-
+# availability remains live in app/workers/backfill_predictions.py, where retrodiction is
+# explicitly allowed to look at who actually played. What must never happen is that logic
+# leaking into the pre-game Stage 2 path, which is exactly what this test pins.
+from app.models_ml.historical_key_players import (  # noqa: E402
+    historical_key_player_availability,
+    index_played_names,
+)
 from app.models_ml.key_player_availability import get_key_player_availability
 from app.sports.models import League, Sport
-
-# ml/training/ isn't normally on backend's import path — inserted here (mirroring
-# test_nba_key_players.py's own precedent) specifically to reuse
-# historical_key_player_availability in the leakage-guard test below.
-ML_TRAINING_DIR = Path(__file__).resolve().parents[2] / "ml" / "training"
-if str(ML_TRAINING_DIR) not in sys.path:
-    sys.path.insert(0, str(ML_TRAINING_DIR))
-from train_football import historical_key_player_availability, index_played_names  # noqa: E402
 
 # --- Stage 1: pure functions -------------------------------------------------------------
 
