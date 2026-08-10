@@ -1105,14 +1105,33 @@ whole sport (Scottish Prem/MLS/CSL were served by an EPL/Brasileirão-trained mo
   established. Added cost ≈ 5k calls/day, ~6% of Ultra's 75,000 (odds runs every 6 hours, not
   every 5 minutes — check the real beat schedule before estimating this).
 
-**A third instance of the duplicate-process trap, and the worst so far**: found **2 uvicorn, 2
-Celery workers AND 2 Celery beats** running simultaneously. Duplicate *beat* is the dangerous
-one — every scheduled task fires twice against a metered API, with no error anywhere to notice
-it. It also poisons diagnosis: a background collection run saturating the per-minute limit made
-a live league probe return empty `response` lists, which reads exactly like "this league has no
-data" (the same false negative that nearly wrote off Liga I and the J1 League). Check the
-process count before diagnosing either quota burn or missing coverage:
-`Get-CimInstance Win32_Process -Filter "Name like '%python%'"`.
+**Counting `celery` processes does NOT tell you how many schedulers are running — a claim
+this document previously got wrong.** A `celery worker` or `celery beat` launched once shows up
+as **TWO** python PIDs on Windows: the `.venv` launcher and the child it spawns. Verified by
+starting exactly one of each and finding 4 PIDs, then checking `ParentProcessId` — each pair is
+parent→child. An earlier pass here asserted "2 beats are running, so every scheduled task fires
+twice against a metered API"; that was **wrong**, inferred from a raw process count without
+checking parentage, and it is corrected rather than deleted because the wrong inference is the
+part worth not repeating. Always check parentage before concluding anything from a count:
+
+    Get-CimInstance Win32_Process -Filter "Name like '%python%'" |
+      Where-Object { $_.CommandLine -match 'celery' } |
+      Select-Object ProcessId, ParentProcessId
+
+**The real trap, hit again the same session, is the stale worker.** Celery worker and beat were
+started at 00:11:00; `api_football.py` gained the nine new `LEAGUE_IDS` entries at 00:32:15.
+Every scheduled `ingest_odds`/`ingest_fixtures` run afterwards used the OLD nine-league map, so
+the new leagues silently got no odds at all — `LEAGUE_IDS.get(league)` returned `None`, raised
+`ValueError`, and the existing per-adapter isolation swallowed it as "no coverage". Calling
+`_ingest_odds_for_league` directly ingested 214 rows immediately; the scheduled path ingested
+zero. **Neither Celery nor `uvicorn --reload` reliably picks up code changes — restart both
+after touching an adapter, and be aware `--reload`'s child can outlive a killed parent and keep
+serving stale code from the port.**
+
+A saturated rate limit poisons diagnosis in the same way: a background collection run using the
+450/minute budget makes an unrelated probe return empty `response` lists, which reads exactly
+like "this league has no data" (the false negative that nearly wrote off Liga I and the J1
+League). Check for a running collection before believing an empty response.
 
 The Tier-1 leagues originally carried a game log and real xG but **no corners and no lineups** —
 `_load_optional` tolerates both absences (those rows score as missing, which XGBoost handles).
