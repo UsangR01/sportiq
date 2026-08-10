@@ -28,12 +28,30 @@ Real logic exists for: auth (`POST /auth/register|login|refresh`, Argon2id + JWT
 - **Stage 1** (season-level, backward-looking): `ml/training/compute_key_players.py` ranks each team's players by a trailing WS/48 approximation among a 26+ MPG pool (falling back to the 18-26 MPG band if fewer than 5 qualify), writing the Top 5 to `team_key_players` once per team/season. Re-runnable/idempotent (delete-then-insert per team+season). Run for real across all 6 seasons — e.g. Detroit Pistons 2025: Jalen Duren, Cade Cunningham, Tobias Harris, Ausar Thompson, Duncan Robinson.
 - **Stage 2** (pre-game, forward-looking, live production): `get_key_player_availability(db, team_id, season_year)` reads **only** `player_injury_status` (joined to `team_key_players` by player name, case-insensitive — the two tables share no ID space, same cross-provider mismatch pattern as fixtures/odds) and writes `TeamFeatures.key_players_available`/`.key_players_per_combined`. A player with zero injury-status rows at all counts as *available* (not on any injury report is itself informative); only a team with zero `team_key_players` rows for the season produces `(None, None)`. Computed at ingest time (`ingest_fixtures.py`) and again whenever the re-inference trigger fires.
 
-> **MEASURED 2026-08-10: that name join resolves 1% of the time, and the whole Stage 2 path is
-> effectively inert.** Only **27 of 2,609** top-5 player names ever match an injury row —
-> `player_injury_status` stores `"a. barboza"`-style abbreviations against rosters holding
-> `"a. adams"`, and 12,330 real injury rows attach to almost nothing. Consequence: where a
-> roster exists at all, **132 of 143** `TeamFeatures` rows (92%) report all five available, so
-> the live signal is near-constant and cannot move any model.
+> **MEASURED: the Stage 2 path is effectively inert — but the join is NOT the main reason.**
+> An earlier version of this note said the name join "resolves 1% of the time" and called it a
+> broken join. That framing was wrong and is corrected here rather than quietly edited.
+>
+> The 1% came from comparing 130 injured players against 2,609 top-5 names spanning **six
+> seasons**, when `player_injury_status` holds only CURRENT state — most of that denominator
+> could never match. Against the live 2026 rosters it is 7 of 250, i.e. **2.8%**. Low, but a
+> different number and a different problem.
+>
+> Joining by name costs little: matching on `player_id` instead gives **31 vs 27** players.
+> Both sides are API-Football ids for football, so the ID join is the correct one and worth
+> switching to — it just is not the fix.
+>
+> The real constraints are **coverage and duplication**:
+> - the injury feed holds **130 distinct players**, spanning only **2026-08-05 → 2026-08-10**,
+>   because `INJURY_LOOKAHEAD_DAYS = 3` queries only dates with fixtures in the next three days
+>   and most leagues are between seasons;
+> - **12,330 rows for those 130 players = 95 duplicate rows each**, since the fixture-scoped
+>   feed re-records the same injury every run instead of upserting;
+> - Stage 1 holds **250 rows for 2026** against ~700 per completed season, so most teams have no
+>   current roster to attach an injury to in the first place.
+>
+> Consequence is unchanged: where a roster exists, **132 of 143** `TeamFeatures` rows (92%)
+> report all five available, so the live signal is near-constant and cannot move any model.
 >
 > **This is the prerequisite for any future player-availability work.** An external review of
 > the dropped key-player feature correctly identified real derivation flaws — the top-5 was
