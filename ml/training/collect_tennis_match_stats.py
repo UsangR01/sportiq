@@ -161,14 +161,22 @@ async def main_async() -> None:
     frame.to_parquet(OUT_PATH, index=False)
 
     per_set = frame[frame.SET_NUMBER != 0]
-    print(f"\n  wrote {len(frame):,} rows -> {OUT_PATH.name}  ({before - len(frame):,} dupes dropped)")
-    print(f"  {frame.MATCH_ID.nunique():,} distinct matches, seasons "
-          f"{int(frame.SEASON.min())}-{int(frame.SEASON.max())}")
+    print(
+        f"\n  wrote {len(frame):,} rows -> {OUT_PATH.name}  ({before - len(frame):,} dupes dropped)"
+    )
+    print(
+        f"  {frame.MATCH_ID.nunique():,} distinct matches, seasons "
+        f"{int(frame.SEASON.min())}-{int(frame.SEASON.max())}"
+    )
     print(f"  aggregate (set 0) rows : {len(frame) - len(per_set):,}")
-    print(f"  per-set rows           : {len(per_set):,} "
-          f"(seasons {sorted(per_set.SEASON.dropna().unique().tolist())})")
+    print(
+        f"  per-set rows           : {len(per_set):,} "
+        f"(seasons {sorted(per_set.SEASON.dropna().unique().tolist())})"
+    )
     in_window = frame[frame.SEASON.between(min(SEASONS), max(SEASONS))]
-    print(f"  training window {min(SEASONS)}-{max(SEASONS)}: {in_window.MATCH_ID.nunique():,} matches")
+    print(
+        f"  training window {min(SEASONS)}-{max(SEASONS)}: {in_window.MATCH_ID.nunique():,} matches"
+    )
     if truncated:
         raise SystemExit(
             f"MAX_PAGES={MAX_PAGES} reached with a cursor still pending — data is TRUNCATED. "

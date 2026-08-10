@@ -584,7 +584,9 @@ def collect_league(league_slug: str, stages: tuple[str, ...] = STAGES) -> None:
         recent_dates = sorted(
             games.loc[games["SEASON"] == most_recent_season, "GAME_DATE"].astype(str).unique()
         )[-MAX_ODDS_DATES:]
-        print(f"pulling odds for {len(recent_dates)} dates from {league_slug} {most_recent_season}...")
+        print(
+            f"pulling odds for {len(recent_dates)} dates from {league_slug} {most_recent_season}..."
+        )
         odds = asyncio.run(collect_odds_sample(rundown_sport_id, recent_dates))
         odds.to_parquet(odds_path, index=False)
         print(f"saved {len(odds)} usable odds rows to {odds_path}")

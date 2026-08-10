@@ -36,8 +36,6 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 load_dotenv(BACKEND_DIR / ".env")  # see collect_nba_data.py for why this is needed explicitly
 
-from sqlalchemy import delete, select  # noqa: E402
-
 from app.adapters.api_football import BASE_URL, LEAGUE_IDS, _api_response  # noqa: E402
 from app.core.config import get_settings  # noqa: E402
 from app.core.database import async_session_factory  # noqa: E402
@@ -45,6 +43,7 @@ from app.fixtures.models import TeamKeyPlayer  # noqa: E402
 from app.fixtures.service import get_or_create_team  # noqa: E402
 from app.models_ml.football_key_players import select_top5  # noqa: E402
 from app.sports.models import League, Sport  # noqa: E402
+from sqlalchemy import delete, select  # noqa: E402
 
 # (league_slug, [seasons]) — see module docstring for why Brasileirão now matches EPL's
 # historical depth (plus its own current season on top).

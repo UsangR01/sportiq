@@ -64,7 +64,10 @@ def index_played_names(player_game_log: pd.DataFrame) -> dict[tuple[str, str], s
     played = player_game_log[player_game_log["MIN"] > 0]
     index: dict[tuple[str, str], set[str]] = {}
     for game_id, team_abbr, name in zip(
-        played["GAME_ID"], played["TEAM_ABBREVIATION"], played["PLAYER_NAME"].str.lower(), strict=False
+        played["GAME_ID"],
+        played["TEAM_ABBREVIATION"],
+        played["PLAYER_NAME"].str.lower(),
+        strict=False,
     ):
         index.setdefault((game_id, team_abbr), set()).add(name)
     return index
@@ -104,10 +107,9 @@ async def _load_team_key_players() -> dict[tuple[str, int], list[dict]]:
     """Real team_key_players rows (Stage 1, written by ml/training/compute_key_players.py),
     joined to the team's abbreviation so training can look them up the same way it looks up
     everything else — by TEAM_ABBREVIATION, matching nba_api's own game-log shape."""
-    from sqlalchemy import select
-
     from app.core.database import async_session_factory
     from app.fixtures.models import Team, TeamKeyPlayer
+    from sqlalchemy import select
 
     by_team_season: dict[tuple[str, int], list[dict]] = {}
     async with async_session_factory() as db:
@@ -276,7 +278,9 @@ async def main_async() -> None:
     print(f"  {len(team_key_players_by_team_season)} (team, season) entries loaded")
 
     print("assembling training examples (this walks every game with a leakage-safe filter)...")
-    examples = build_training_examples(games, odds, player_game_log, team_key_players_by_team_season)
+    examples = build_training_examples(
+        games, odds, player_game_log, team_key_players_by_team_season
+    )
     print(
         f"{len(examples)} examples, moneyline available for {examples['home_odds'].notna().sum()}"
     )

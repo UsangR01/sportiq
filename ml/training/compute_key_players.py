@@ -25,12 +25,15 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 load_dotenv(BACKEND_DIR / ".env")  # see collect_nba_data.py for why this is needed explicitly
 
-from nba_api.stats.endpoints import leaguedashplayerstats, leaguedashteamstats  # noqa: E402
-from sqlalchemy import delete, select  # noqa: E402
-
 from app.core.database import async_session_factory  # noqa: E402
 from app.fixtures.models import Team, TeamKeyPlayer  # noqa: E402
-from app.models_ml.nba_key_players import compute_uper, compute_ws48_approx, select_top5  # noqa: E402
+from app.models_ml.nba_key_players import (  # noqa: E402
+    compute_uper,
+    compute_ws48_approx,
+    select_top5,
+)
+from nba_api.stats.endpoints import leaguedashplayerstats, leaguedashteamstats  # noqa: E402
+from sqlalchemy import delete, select  # noqa: E402
 
 # Same 6 seasons as ml/training/collect_nba_data.py — Stage 1 needs its own ranking per
 # season, computed independently, not just for "the current" one.
@@ -51,7 +54,10 @@ def _fetch_season_player_rows(season: str) -> list[dict]:
         season=season, measure_type_detailed_defense="Base", per_mode_detailed="PerGame", timeout=30
     ).get_data_frames()[0]
     advanced = leaguedashplayerstats.LeagueDashPlayerStats(
-        season=season, measure_type_detailed_defense="Advanced", per_mode_detailed="PerGame", timeout=30
+        season=season,
+        measure_type_detailed_defense="Advanced",
+        per_mode_detailed="PerGame",
+        timeout=30,
     ).get_data_frames()[0]
     teams = leaguedashteamstats.LeagueDashTeamStats(
         season=season, measure_type_detailed_defense="Base", per_mode_detailed="PerGame", timeout=30
@@ -172,7 +178,10 @@ async def compute_and_store_season(season: str) -> None:
 
         await db.commit()
 
-    print(f"  {written} team_key_players rows written, {skipped_teams} teams skipped (no Team row yet)")
+    print(
+        f"  {written} team_key_players rows written, "
+        f"{skipped_teams} teams skipped (no Team row yet)"
+    )
 
 
 async def main_async() -> None:

@@ -68,6 +68,16 @@ jobs:
       - run: black --check .
       - run: pytest
 
+      # ml/ had never been linted: this job sets working-directory: backend, so the two steps
+      # above have only ever seen backend/. The gap was real rather than theoretical — 46 errors
+      # had accumulated, including unsorted imports, unused imports and stray semicolons.
+      # Uses backend's config so both trees share one style, and runs from the repo root because
+      # ml/ sits outside this job's working directory.
+      - run: ruff check --config backend/pyproject.toml ml/
+        working-directory: ${{ github.workspace }}
+      - run: black --check --config backend/pyproject.toml ml/
+        working-directory: ${{ github.workspace }}
+
   mobile:
     runs-on: ubuntu-latest
     defaults:

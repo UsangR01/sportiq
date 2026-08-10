@@ -28,7 +28,6 @@ Reported as MAE against predicting the mean, because that is what "is this worth
 actually reduces to -- R^2 near zero is easy to argue about, a MAE that does not move is not.
 """
 
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -45,9 +44,15 @@ for f in (counts, stats):
     f["MATCH_ID"] = f["MATCH_ID"].astype(str)
 
 SERVE = [
-    "ACES", "DOUBLE_FAULTS", "FIRST_SERVE_PCT", "FIRST_SERVE_POINTS_WON_PCT",
-    "SECOND_SERVE_POINTS_WON_PCT", "BREAK_POINTS_SAVED_PCT",
-    "BREAK_POINTS_CONVERTED_PCT", "SERVE_RATING", "RETURN_RATING",
+    "ACES",
+    "DOUBLE_FAULTS",
+    "FIRST_SERVE_PCT",
+    "FIRST_SERVE_POINTS_WON_PCT",
+    "SECOND_SERVE_POINTS_WON_PCT",
+    "BREAK_POINTS_SAVED_PCT",
+    "BREAK_POINTS_CONVERTED_PCT",
+    "SERVE_RATING",
+    "RETURN_RATING",
     "TOTAL_POINTS_WON_PCT",
 ]
 
@@ -88,10 +93,13 @@ for s in ("hard", "clay", "grass"):
 wide["RANK_GAP"] = (wide.HOME_RANK_POINTS - wide.AWAY_RANK_POINTS).abs()
 wide["RANK_AVG"] = (wide.HOME_RANK_POINTS + wide.AWAY_RANK_POINTS) / 2
 
-X_COLS = (
-    [c for c in wide.columns if c.startswith("R_")]
-    + ["IS_hard", "IS_clay", "IS_grass", "RANK_GAP", "RANK_AVG"]
-)
+X_COLS = [c for c in wide.columns if c.startswith("R_")] + [
+    "IS_hard",
+    "IS_clay",
+    "IS_grass",
+    "RANK_GAP",
+    "RANK_AVG",
+]
 wide = wide.dropna(subset=X_COLS + ["total_games"]).sort_values("GAME_DATE")
 print(f"  {len(wide):,} matches with a complete feature vector")
 
@@ -100,8 +108,8 @@ cut = int(len(wide) * 0.8)
 Xtr, Xte, ytr, yte = X.iloc[:cut], X.iloc[cut:], y.iloc[:cut], y.iloc[cut:]
 print(f"  train {len(Xtr):,} / test {len(Xte):,}  ({len(X_COLS)} features)\n")
 
-from sklearn.metrics import r2_score  # noqa: E402
 import xgboost as xgb  # noqa: E402
+from sklearn.metrics import r2_score  # noqa: E402
 
 baseline_mae = np.abs(yte - ytr.mean()).mean()
 print(f"  {'model':<34}{'R^2':>9}{'MAE':>9}{'vs baseline':>14}")
@@ -109,25 +117,52 @@ print(f"  {'predict the mean (baseline)':<34}{0.0:>9.4f}{baseline_mae:>9.3f}{'--
 
 for label, model in [
     ("Ridge (linear)", __import__("sklearn.linear_model", fromlist=["Ridge"]).Ridge(alpha=1.0)),
-    ("XGBoost (depth 4, 400 trees)",
-     xgb.XGBRegressor(max_depth=4, n_estimators=400, learning_rate=0.03,
-                      subsample=0.8, colsample_bytree=0.8, reg_lambda=2.0,
-                      objective="reg:squarederror", n_jobs=4, random_state=0)),
-    ("XGBoost Poisson (count model)",
-     xgb.XGBRegressor(max_depth=4, n_estimators=400, learning_rate=0.03,
-                      subsample=0.8, colsample_bytree=0.8, reg_lambda=2.0,
-                      objective="count:poisson", n_jobs=4, random_state=0)),
+    (
+        "XGBoost (depth 4, 400 trees)",
+        xgb.XGBRegressor(
+            max_depth=4,
+            n_estimators=400,
+            learning_rate=0.03,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_lambda=2.0,
+            objective="reg:squarederror",
+            n_jobs=4,
+            random_state=0,
+        ),
+    ),
+    (
+        "XGBoost Poisson (count model)",
+        xgb.XGBRegressor(
+            max_depth=4,
+            n_estimators=400,
+            learning_rate=0.03,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_lambda=2.0,
+            objective="count:poisson",
+            n_jobs=4,
+            random_state=0,
+        ),
+    ),
 ]:
     model.fit(Xtr, ytr)
     pred = model.predict(Xte)
     mae = np.abs(yte - pred).mean()
-    print(f"  {label:<34}{r2_score(yte, pred):>9.4f}{mae:>9.3f}"
-          f"{baseline_mae - mae:>+13.3f}g")
+    print(f"  {label:<34}{r2_score(yte, pred):>9.4f}{mae:>9.3f}" f"{baseline_mae - mae:>+13.3f}g")
 
 # The market question is not "predict the count" but "beat the line", so test that directly.
-best = xgb.XGBRegressor(max_depth=4, n_estimators=400, learning_rate=0.03, subsample=0.8,
-                        colsample_bytree=0.8, reg_lambda=2.0, objective="count:poisson",
-                        n_jobs=4, random_state=0).fit(Xtr, ytr)
+best = xgb.XGBRegressor(
+    max_depth=4,
+    n_estimators=400,
+    learning_rate=0.03,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    reg_lambda=2.0,
+    objective="count:poisson",
+    n_jobs=4,
+    random_state=0,
+).fit(Xtr, ytr)
 pred = best.predict(Xte)
 print("\n  === as an Over/Under classifier at the real market lines ===")
 for line in (21.5, 22.5, 23.5):
@@ -135,8 +170,12 @@ for line in (21.5, 22.5, 23.5):
     called_over = (pred > line).astype(int)
     base = max(actual_over.mean(), 1 - actual_over.mean())
     acc = (actual_over == called_over).mean()
-    print(f"  line {line}: accuracy {acc:.4f}  vs always-{'over' if actual_over.mean()>0.5 else 'under'} "
-          f"{base:.4f}   edge {acc-base:+.4f}   (n={len(yte):,}, called over {called_over.mean():.1%})")
+    always = "over" if actual_over.mean() > 0.5 else "under"
+    print(
+        f"  line {line}: accuracy {acc:.4f}  vs always-{always} {base:.4f}"
+        f"   edge {acc - base:+.4f}"
+        f"   (n={len(yte):,}, called over {called_over.mean():.1%})"
+    )
 
 print("\n  variance context:")
 print(f"    sd(total_games) = {y.std():.2f} games; a 1-game MAE gain would be a real result.")

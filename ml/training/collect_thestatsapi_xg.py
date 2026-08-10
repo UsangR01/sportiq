@@ -49,11 +49,10 @@ sys.path.insert(0, str(BACKEND_DIR))
 # silently loads a blank .env and every credential falls back to "" — see CLAUDE.md.
 load_dotenv(BACKEND_DIR / ".env")
 
-from sqlalchemy import select  # noqa: E402
-
 from app.core.database import async_session_factory, engine  # noqa: E402
 from app.fixtures.models import Team  # noqa: E402
 from app.sports.models import League  # noqa: E402
+from sqlalchemy import select  # noqa: E402
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 RAW_CACHE = DATA_DIR / "thestatsapi_xg_raw.json"
@@ -213,8 +212,7 @@ def _api_key() -> str:
     with zipfile.ZipFile(KEYS_DOCX) as archive:
         xml = archive.read("word/document.xml").decode("utf-8", "ignore")
     lines = [
-        re.sub(r"<[^>]+>", "", line).strip()
-        for line in re.sub(r"</w:p>", "\n", xml).split("\n")
+        re.sub(r"<[^>]+>", "", line).strip() for line in re.sub(r"</w:p>", "\n", xml).split("\n")
     ]
     lines = [line for line in lines if line]
     for i, line in enumerate(lines):
@@ -228,9 +226,7 @@ def _api_key() -> str:
 
 
 def _normalise(name: str) -> str:
-    ascii_name = (
-        unicodedata.normalize("NFKD", str(name or "")).encode("ascii", "ignore").decode()
-    )
+    ascii_name = unicodedata.normalize("NFKD", str(name or "")).encode("ascii", "ignore").decode()
     ascii_name = ascii_name.lower().replace("&", "and").replace("-", " ")
     return " ".join("".join(c for c in ascii_name if c.isalnum() or c == " ").split())
 
@@ -263,8 +259,10 @@ def fetch(client: httpx.Client, path: str, **params):
             # burns twenty minutes before the caller reports a misleading "season not found".
             body = response.text or ""
             if "USAGE_LIMIT_EXCEEDED" in body or "Monthly usage limit" in body:
-                print(f"    QUOTA EXHAUSTED (monthly) on {path} — stopping, retries cannot help",
-                      flush=True)
+                print(
+                    f"    QUOTA EXHAUSTED (monthly) on {path} — stopping, retries cannot help",
+                    flush=True,
+                )
                 return 429, None
             time.sleep(float(response.headers.get("Retry-After", 20)))
             continue
@@ -327,7 +325,10 @@ def collect_raw(leagues: list[str]) -> dict:
             page += 1
 
         todo = [m for m in matches if m["id"] not in rows]
-        print(f"\n{league} {label} (season {season}): {len(matches)} found, {len(todo)} to fetch", flush=True)
+        print(
+            f"\n{league} {label} (season {season}): {len(matches)} found, {len(todo)} to fetch",
+            flush=True,
+        )
         for i, match in enumerate(todo):
             status, body = fetch(client, f"/matches/{match['id']}/stats")
             overview = ((body or {}).get("data") or {}).get("overview") or {}
@@ -382,8 +383,10 @@ async def _team_names(league_slug: str) -> dict[str, str]:
         ).all()
     names.update({str(external_id): name for external_id, name in rows})
     if not names:
-        print(f"{league_slug}: WARNING no team names from DB or parquet — ambiguous fixtures "
-              f"will be dropped rather than resolved by name")
+        print(
+            f"{league_slug}: WARNING no team names from DB or parquet — ambiguous fixtures "
+            f"will be dropped rather than resolved by name"
+        )
     return names
 
 
@@ -412,9 +415,7 @@ def resolve(league: str, raw: dict, names: dict[str, str]) -> pd.DataFrame | Non
         found = []
         for offset in (0, -1, 1):  # kickoff can straddle midnight UTC between providers
             shifted = (pd.Timestamp(date) + pd.Timedelta(days=offset)).strftime("%Y-%m-%d")
-            found = by_date_and_score.get(
-                (shifted, int(score["home"]), int(score["away"])), []
-            )
+            found = by_date_and_score.get((shifted, int(score["home"]), int(score["away"])), [])
             if found:
                 break
         if not found:
@@ -441,7 +442,11 @@ def resolve(league: str, raw: dict, names: dict[str, str]) -> pd.DataFrame | Non
         else:
             best = found[0]
         resolved.append(
-            {"FIXTURE_ID": best.FIXTURE_ID, "TEAM_ID": best.TEAM_ID, "XG_FOR": float(expected["home"])}
+            {
+                "FIXTURE_ID": best.FIXTURE_ID,
+                "TEAM_ID": best.TEAM_ID,
+                "XG_FOR": float(expected["home"]),
+            }
         )
         resolved.append(
             {

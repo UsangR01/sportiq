@@ -94,9 +94,7 @@ from dotenv import load_dotenv
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
-load_dotenv(
-    BACKEND_DIR / ".env"
-)  # see collect_nba_data.py for why this is needed explicitly
+load_dotenv(BACKEND_DIR / ".env")  # see collect_nba_data.py for why this is needed explicitly
 
 from app.adapters.balldontlie_tennis import (  # noqa: E402
     _home_away_players,
@@ -129,9 +127,7 @@ RANK_REQUEST_DELAY_SECONDS = 1.1  # proactive pacing to stay under ALL-STAR's do
 # 60 req/min — see module docstring for why this, not just retry-after-429, is the real fix.
 
 
-async def _get_with_retry(
-    client: httpx.AsyncClient, path: str, params: dict
-) -> httpx.Response:
+async def _get_with_retry(client: httpx.AsyncClient, path: str, params: dict) -> httpx.Response:
     """Mirrors app/adapters/balldontlie_tennis.py:_get_with_retry — reimplemented here since
     this is a one-off script outside the adapter layer, matching collect_football_data.py's
     own precedent for not sharing HTTP helpers across the adapter/training boundary.
@@ -164,9 +160,7 @@ async def _get_with_retry(
     return response
 
 
-async def _fetch_all_pages(
-    client: httpx.AsyncClient, path: str, params: dict
-) -> list[dict]:
+async def _fetch_all_pages(client: httpx.AsyncClient, path: str, params: dict) -> list[dict]:
     results: list[dict] = []
     cursor = None
     for _ in range(MAX_PAGES):
@@ -184,9 +178,7 @@ async def _fetch_all_pages(
 
 def _client() -> httpx.AsyncClient:
     api_key = get_settings().balldontlie_api_key
-    return httpx.AsyncClient(
-        base_url=BASE_URL, headers={"Authorization": api_key}, timeout=20.0
-    )
+    return httpx.AsyncClient(base_url=BASE_URL, headers={"Authorization": api_key}, timeout=20.0)
 
 
 async def collect_game_log() -> pd.DataFrame:
@@ -260,9 +252,7 @@ def _chunk(items: list, size: int) -> list[list]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
-async def collect_rank_points(
-    games: pd.DataFrame, checkpoint_path: Path
-) -> pd.DataFrame:
+async def collect_rank_points(games: pd.DataFrame, checkpoint_path: Path) -> pd.DataFrame:
     """Real, point-in-time ranking points for every distinct (player, ISO week) combination
     that appears in the collected game log.
 
@@ -275,9 +265,7 @@ async def collect_rank_points(
     already-completed WEEKs are skipped entirely rather than re-queried."""
     distinct = games[["PLAYER_ID", "GAME_DATE"]].drop_duplicates().copy()
     distinct["WEEK"] = distinct["GAME_DATE"].apply(_iso_monday)
-    by_week = (
-        distinct.groupby("WEEK")["PLAYER_ID"].apply(lambda s: sorted(set(s))).to_dict()
-    )
+    by_week = distinct.groupby("WEEK")["PLAYER_ID"].apply(lambda s: sorted(set(s))).to_dict()
     weeks = sorted(by_week.keys())
 
     rows: list[dict] = []
@@ -326,9 +314,9 @@ async def collect_rank_points(
 
             if (i + 1) % 10 == 0 or (i + 1) == len(weeks):
                 print(f"  fetched {i + 1}/{len(weeks)} weeks")
-                pd.DataFrame(
-                    rows, columns=["PLAYER_ID", "WEEK", "RANK_POINTS"]
-                ).to_parquet(checkpoint_path, index=False)
+                pd.DataFrame(rows, columns=["PLAYER_ID", "WEEK", "RANK_POINTS"]).to_parquet(
+                    checkpoint_path, index=False
+                )
 
     return pd.DataFrame(rows, columns=["PLAYER_ID", "WEEK", "RANK_POINTS"])
 

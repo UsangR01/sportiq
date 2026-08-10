@@ -1,6 +1,11 @@
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# Notebooks are reference material and exported artefacts, not maintained source: the repo root
+# holds the user's own prior NBA project (kept for provenance, never imported or executed by any
+# pipeline — see CLAUDE.md) and ml/export/ holds notebooks generated for use outside this repo.
+# Linting them would churn files nobody edits here.
+extend-exclude = ["*.ipynb"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
@@ -8,6 +13,12 @@ ignore = [
     "B008",  # function-call-in-default-argument — idiomatic for FastAPI's Depends()/Query()
     "UP042", # replace-str-enum — (str, Enum) is intentional here, not a StrEnum migration
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# This file's body is a generated README held in a triple-quoted string, including a markdown
+# table whose rows are legitimately longer than 100 characters. A noqa cannot reach inside a
+# string literal, and wrapping the rows would break the table it renders.
+"**/export_for_notebook.py" = ["E501"]
 
 [tool.black]
 line-length = 100

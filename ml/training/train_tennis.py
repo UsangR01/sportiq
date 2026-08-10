@@ -30,23 +30,20 @@ from dotenv import load_dotenv
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
-load_dotenv(
-    BACKEND_DIR / ".env"
-)  # see collect_nba_data.py for why this is needed explicitly
+load_dotenv(BACKEND_DIR / ".env")  # see collect_nba_data.py for why this is needed explicitly
 
 import joblib  # noqa: E402
 import mlflow  # noqa: E402
 import optuna  # noqa: E402
 import pandas as pd  # noqa: E402
 import xgboost as xgb  # noqa: E402
-from collect_tennis_data import TOUR  # noqa: E402
-from sklearn.isotonic import IsotonicRegression  # noqa: E402
-from sklearn.metrics import accuracy_score, brier_score_loss, log_loss  # noqa: E402
-
 from app.models_ml.tennis_features import (  # noqa: E402
     FEATURE_NAMES,
     assemble_from_game_log,
 )
+from collect_tennis_data import TOUR  # noqa: E402
+from sklearn.isotonic import IsotonicRegression  # noqa: E402
+from sklearn.metrics import accuracy_score, brier_score_loss, log_loss  # noqa: E402
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 ML_DIR = Path(__file__).resolve().parent.parent
@@ -63,15 +60,11 @@ def _iso_monday(d):
     return d - timedelta(days=d.weekday())
 
 
-def build_training_examples(
-    games: pd.DataFrame, rank_points: pd.DataFrame
-) -> pd.DataFrame:
+def build_training_examples(games: pd.DataFrame, rank_points: pd.DataFrame) -> pd.DataFrame:
     """One row per match (from player1/"home"'s perspective) — features via
     assemble_from_game_log (the same function run_predictions.py's live path calls through
     assemble_from_live_db), label = 1 if the home-slot player won."""
-    rank_lookup = {
-        (row.PLAYER_ID, row.WEEK): row.RANK_POINTS for row in rank_points.itertuples()
-    }
+    rank_lookup = {(row.PLAYER_ID, row.WEEK): row.RANK_POINTS for row in rank_points.itertuples()}
 
     def rank_points_for(player_id: str, game_date) -> float | None:
         return rank_lookup.get((player_id, _iso_monday(game_date)))
@@ -124,16 +117,13 @@ def _optuna_objective(trial, X_train, y_train, X_val, y_val) -> float:
 
 
 async def _register_model(artefact_path: Path, rps: float, accuracy: float) -> None:
-    from sqlalchemy import select
-
     from app.core.database import async_session_factory
     from app.predictions.models import ModelRegistry
     from app.sports.models import Sport
+    from sqlalchemy import select
 
     async with async_session_factory() as db:
-        sport = (
-            await db.execute(select(Sport).where(Sport.slug == "tennis"))
-        ).scalar_one()
+        sport = (await db.execute(select(Sport).where(Sport.slug == "tennis"))).scalar_one()
 
         existing_active = (
             (
@@ -179,9 +169,7 @@ async def main_async() -> None:
     games = pd.read_parquet(DATA_DIR / f"tennis_game_log_{TOUR}.parquet")
     rank_points = pd.read_parquet(DATA_DIR / f"tennis_rank_points_{TOUR}.parquet")
 
-    print(
-        "assembling training examples (this walks every match with a leakage-safe filter)..."
-    )
+    print("assembling training examples (this walks every match with a leakage-safe filter)...")
     examples = build_training_examples(games, rank_points)
     print(f"{len(examples)} examples")
 
@@ -226,13 +214,9 @@ async def main_async() -> None:
     # equivalence as train_nba.py.
     rps = brier
 
-    baseline_accuracy = accuracy_score(
-        y_test, [1] * len(y_test)
-    )  # "always pick player1"
+    baseline_accuracy = accuracy_score(y_test, [1] * len(y_test))  # "always pick player1"
 
-    print(
-        f"test accuracy={accuracy:.4f} (baseline={baseline_accuracy:.4f}) brier/rps={brier:.4f}"
-    )
+    print(f"test accuracy={accuracy:.4f} (baseline={baseline_accuracy:.4f}) brier/rps={brier:.4f}")
 
     artefact_path = ARTIFACT_DIR / f"tennis_xgb_{datetime.now(UTC):%Y%m%d%H%M%S}.joblib"
     joblib.dump(

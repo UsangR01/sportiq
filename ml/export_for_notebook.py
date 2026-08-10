@@ -60,9 +60,16 @@ def export_key_players() -> pd.DataFrame:
     )
     out = subprocess.run(
         [
-            "docker", "exec", "sportiq-postgres-1",
-            "psql", "-U", "sportiq_user", "-d", "sportiq",
-            "-c", f"COPY ({query}) TO STDOUT WITH CSV HEADER",
+            "docker",
+            "exec",
+            "sportiq-postgres-1",
+            "psql",
+            "-U",
+            "sportiq_user",
+            "-d",
+            "sportiq",
+            "-c",
+            f"COPY ({query}) TO STDOUT WITH CSV HEADER",
         ],
         capture_output=True,
         text=True,
