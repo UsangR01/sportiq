@@ -1062,7 +1062,9 @@ backend/.venv/Scripts/python ml/training/train_football.py              # pools 
                                                                           # models_registry row
 ```
 
-**Current model: `football_xgb_v20260809224336`, pooled across 18 leagues** (the 9 original +
+**Current model: `football_xgb_v20260810070503`** (superseding `v20260809224336`, which had the
+identical 1X2 pipeline — only the corners regressors differ, see the corners note below).
+**Pooled across 18 leagues** (the 9 original +
 the 9 Tier-1 additions — `allsvenskan`, `eliteserien`, `veikkausliiga`, `ekstraklasa`,
 `denmark_superliga`, `liga_i`, `j1_league`, `czech_first`, `austria_bundesliga`). Temporal
 split train 2021-22..2023-24 / validate 2024-25 / test 2025-26, 27,232 examples (16,287 /
@@ -1112,12 +1114,27 @@ data" (the same false negative that nearly wrote off Liga I and the J1 League). 
 process count before diagnosing either quota burn or missing coverage:
 `Get-CimInstance Win32_Process -Filter "Name like '%python%'"`.
 
-The Tier-1 leagues carry a game log and real xG but **no corners and no lineups** —
+The Tier-1 leagues originally carried a game log and real xG but **no corners and no lineups** —
 `_load_optional` tolerates both absences (those rows score as missing, which XGBoost handles).
-A consequence worth knowing: the corners regressors are **byte-identical** across the 9- and
-18-league artefacts, verified by hashing the boosters, because those leagues contribute zero
-corners rows. An unchanged metric after adding data is the same signature as the pruned
-key-player features — benign here only because the cause is known and was checked.
+Their corners have **since been collected** (14,390 rows across 7,195 fixtures, 35-71% coverage
+per league — Veikkausliiga is genuinely thinnest at 35%, left as a real gap, not zero-filled).
+Lineups are still absent and deliberately so: the key-player features they would feed were
+pruned in `d0a24d9`, so collecting them would repeat the ~10,500-call mistake described above.
+
+**`football_xgb_v20260810070503` is the current model** — the first run whose corners regressors
+actually see those nine leagues. Before it, the corners boosters were **byte-identical** across
+the 9- and 18-league artefacts (verified by hashing them) because those leagues contributed
+zero corners rows. After it the hashes invert exactly as they should: `corners_home_model`/
+`corners_away_model` **changed**, `layer1_home_model`/`layer1_away_model`/`layer2_model` are
+**byte-identical**. That is the proof that 1X2 accuracy/RPS being unchanged (0.4857/0.2144) is
+correct scoping rather than a silently-broken run — the same "unchanged metric after adding
+data" signature as the pruned key-player features, but this time checked rather than assumed.
+
+**Do not read corners MAE 2.167 → 2.157 as an improvement.** The corners *test set* grew from
+2,291 to 3,731 rows (training 6,521 → 10,877) precisely because those leagues now contribute,
+so the two numbers score different exams — the identical trap as comparing headline accuracy
+across league pools. What genuinely improved is trustworthiness: the MAE is now measured on 63%
+more real fixtures and trained on 67% more.
 
 `ml/training/collect_football_data.py`'s lineup collection (`/fixtures/players`, 1 call per fixture — no bulk-by-league-and-date equivalent exists for lineups the way `/injuries` has) hit real `429`s under sustained load (roughly every ~100-150 calls, both for EPL originally and again for the new Brasileirão run); the same retry-with-backoff pattern as `collect_nba_data.py`'s odds pull handled these automatically. `ml/training/compute_football_key_players.py`'s own `/players` pagination calls hit the same real `429`s partway through Brasileirão's historical backfill (no retry logic existed there originally, unlike the fixtures/lineups script) — fixed by adding the same `_get_with_retry` backoff pattern; the run was resumed from where it stopped rather than restarted from scratch, since the underlying Stage 1 write is already idempotent (delete-then-insert per team+season).
 
