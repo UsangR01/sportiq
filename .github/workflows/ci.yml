@@ -56,6 +56,12 @@ jobs:
 
       - run: pip install -r requirements.txt
 
+      # Migrates the APPLICATION database (sportiq). Kept as its own step because it is a real
+      # check in its own right — that every migration still applies cleanly to an empty
+      # database. The suite does NOT use this one: tests/conftest.py redirects to sportiq_test,
+      # creating and migrating it itself, and refuses to start if the two ever resolve to the
+      # same database. No extra service is needed, since the postgres image makes POSTGRES_USER
+      # a superuser and so CREATE DATABASE succeeds.
       - run: alembic upgrade head
 
       - run: ruff check .

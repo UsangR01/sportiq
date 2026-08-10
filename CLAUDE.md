@@ -1198,6 +1198,27 @@ celery -A app.workers.celery beat --loglevel=info                 # separate pro
 
 Note the `PYTHONPATH=.` on the seed script — run directly (`python scripts/seed_sports.py`) it fails with `ModuleNotFoundError: No module named 'app'`, since a script's own directory (`scripts/`), not the cwd, becomes `sys.path[0]`.
 
+**The suite runs against a DEDICATED database, `sportiq_test`, created and migrated
+automatically.** It used to run against the dev database and left real damage there: 164 user
+rows carrying a fixture push token (a broad `notify_users` run would have fired 164 sends that
+could only fail), fake `Sport` rows that reached the app's own dropdown, and thousands of
+exploratory fixtures. Several tests still carry explicit teardown written solely because of
+that; it can go whenever someone touches them.
+- `tests/conftest.py` derives `<configured database>_test` and sets `DATABASE_URL` **before any
+  `app.` import**. That ordering is load-bearing: `app/core/database.py` builds its engine at
+  import time from an `lru_cache`d `get_settings()`, so the first call decides the database for
+  the entire session. Anything imported above the redirect pins the dev database permanently.
+- **It refuses to start if the test URL and the application URL resolve to the same database**,
+  which is the property that actually prevents recurrence. Override with `TEST_DATABASE_URL`.
+- The database is created via `asyncpg` (already a dependency, so no new one) on its own
+  connection, then migrated with `alembic upgrade head` **in a subprocess** so alembic's event
+  loop cannot collide with pytest-asyncio's. Migrations rather than `create_all`, because this
+  schema carries enum values added by `ALTER TYPE` in autocommit blocks (`FixtureStatus.
+  POSTPONED`, `InjurySource.API_FOOTBALL`) — `create_all` would build those from the current
+  Python definition and hide a migration that fails to reproduce them.
+- Verified by running the full suite twice: the dev database stayed at exactly 1,454 users
+  while the test database went 21 → 42.
+
 `tests/conftest.py` disposes `app.core.database`'s shared async engine after every test — without it, DB-touching tests fail intermittently (`AttributeError: 'NoneType' object has no attribute 'send'` on Windows, or `RuntimeError: ... attached to a different loop` elsewhere) because that engine is a module-level singleton bound to whichever event loop first used it, and pytest-asyncio gives each test its own loop by default. If a new DB-touching test starts failing this way, check that fixture is still wired up before assuming it's a real bug.
 
 **Celery worker/beat were never actually running in local dev — the exact same bug as the paragraph above, just never hit until this session**, found via the user's own report: a completed real fixture (Coritiba vs Cruzeiro) was still showing its pre-game prediction badge instead of a win/loss verdict hours after kickoff. `celery_app.conf.beat_schedule` (`app/workers/celery.py`) has always been complete and correct — `ingest_live_scores`/`ingest_odds` every 5 minutes, `ingest_injuries` every 30, `ingest_fixtures` daily — but no Celery worker or beat process had ever actually been started in this dev environment (confirmed live: zero `celery` processes running, and this section's own dev commands never listed them before now), so nothing had ever executed that schedule; every prior "verified live" ingestion in this document was a manual one-off script invocation, not the real scheduled path. Starting a real worker exposed a second, previously-latent bug: every task entrypoint (`ingest_fixtures`/`ingest_odds`/`ingest_live_scores`/`ingest_injuries`/`run_predictions`/`notify_users`/`backfill_predictions`) wrapped its async body in a bare `asyncio.run(...)` — harmless on Linux's default `prefork` pool (a fresh OS process per task), but Windows has no `prefork` at all, so `--pool=solo`/`--pool=threads` run every task in ONE long-lived process, and the SECOND task crashed with the identical `AttributeError: 'NoneType' object has no attribute 'send'` from the paragraph above — `app.core.database.engine` is a module-level singleton, and `asyncio.run()` tore down the first task's loop out from under its connections. Fixed with `app.workers.celery.run_task(coro)`, a shared helper every task now calls instead of `asyncio.run` directly — disposes `engine`/`app.core.redis._pool` on the same loop right before it closes, the identical fix `tests/conftest.py` already applies at the pytest boundary, just applied at the Celery task boundary instead. Regression-tested in `backend/tests/test_run_task.py` by calling the real synchronous `run_task` twice in one process (confirmed this fails with the exact live crash on the pre-fix bare-`asyncio.run` pattern). **Verified live end-to-end**: started a real worker + beat, manually enqueued `ingest_live_scores` through the actual Celery broker (not a direct function call), confirmed it settled the real Coritiba-Cruzeiro fixture (final score 0-1) and every other due fixture, and left both processes running so the 5-minute schedule now genuinely executes on its own going forward — this is a local-dev-process gap, not a deploy gap: Render.com's documented plan already includes a Celery worker and Celery beat as separate services (see "Intended architecture" above), so production was never at risk of this specific "nothing is running" failure mode, only this machine's dev setup.
