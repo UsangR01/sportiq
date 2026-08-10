@@ -67,6 +67,11 @@ from app.core.database import engine  # noqa: E402
 from app.core.redis import _pool as redis_pool  # noqa: E402
 
 
+def _plain_postgres_url(url: str) -> str:
+    """Strip SQLAlchemy's +asyncpg driver marker — asyncpg.connect wants a plain URL."""
+    return urlunparse(urlparse(url)._replace(scheme="postgresql"))
+
+
 def _server_url_for_admin(url: str) -> str:
     """Same server, but connected to `postgres` — CREATE DATABASE cannot run from inside the
     database being created."""
@@ -124,7 +129,47 @@ def _test_database():
             f"alembic upgrade head failed against the test database:\n"
             f"{result.stdout}\n{result.stderr}"
         )
+    _truncate_all_tables()
     yield
+
+
+def _truncate_all_tables() -> None:
+    """Empty every table at the START of a session.
+
+    Per-test teardown exists in several modules but does not cover everything: tests that
+    register users clean up nothing, and the count grew by 21 on every full run. Left alone the
+    database accumulates indefinitely, and accumulated rows are not inert — a query that scans a
+    table sees data no test put there, which is how cross-test coupling starts.
+
+    At the start rather than the end, deliberately: it leaves the last run's rows in place to
+    inspect when a test fails, which is exactly when someone wants to look.
+
+    alembic_version is excluded, or the next run would re-apply every migration onto a schema
+    that already has them.
+    """
+    import asyncio
+
+    import asyncpg
+
+    async def truncate() -> None:
+        conn = await asyncpg.connect(_plain_postgres_url(TEST_DATABASE_URL))
+        try:
+            tables = [
+                row["tablename"]
+                for row in await conn.fetch(
+                    "SELECT tablename FROM pg_tables WHERE schemaname = 'public' "
+                    "AND tablename <> 'alembic_version'"
+                )
+            ]
+            if tables:
+                quoted = ", ".join(f'"{t}"' for t in tables)
+                # One statement: CASCADE plus a single pass avoids FK-ordering problems that
+                # per-table deletes would otherwise hit.
+                await conn.execute(f"TRUNCATE TABLE {quoted} RESTART IDENTITY CASCADE")
+        finally:
+            await conn.close()
+
+    asyncio.run(truncate())
 
 
 @pytest.fixture(autouse=True)

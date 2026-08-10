@@ -30,9 +30,10 @@ from app.sports.models import League, Sport
 async def _cleanup_seeded_rows():
     """Remove everything these tests create.
 
-    The suite runs against the DEV database, and a leftover Sport row is not inert: fake
-    sports seeded by an earlier test file reached the app's own sport dropdown once already.
-    Mirrors tests/test_watchlist.py's own teardown.
+    Written when the suite ran against the DEV database, where a leftover Sport row was not
+    inert — fake sports from an earlier test file reached the app's own dropdown once. The
+    suite now has its own database (see conftest.py), so this is no longer about protecting
+    dev; it is ordinary per-test isolation. Mirrors tests/test_watchlist.py's own teardown.
     """
     yield
     from sqlalchemy import delete, select

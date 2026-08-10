@@ -27,8 +27,9 @@ from app.sports.models import League, Sport
 
 @pytest.fixture(autouse=True)
 async def _cleanup():
-    """The suite runs against the DEV database; a leftover Sport reaches the app's own
-    dropdown. Mirrors tests/test_watchlist.py's teardown."""
+    """Per-test isolation. Predates the dedicated test database (see conftest.py), when a
+    leftover Sport reached the app's own dropdown; kept because keeping each test independent
+    of its neighbours is worth having regardless. Mirrors tests/test_watchlist.py's teardown."""
     yield
     from sqlalchemy import delete, select
 

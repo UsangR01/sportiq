@@ -42,9 +42,12 @@ async def _register(client: AsyncClient) -> str:
 async def _clean_up_seeded_sports():
     """Delete every Sport this module seeded, after each test.
 
-    These tests run against the DEV database, like the rest of the suite, so anything they
-    leave behind shows up in the running app. Without this the sport dropdown filled with
-    "Watchlist Test Sport" entries — 24 of them, one per seeded fixture across several runs.
+    Originally written because the suite ran against the DEV database, where anything left
+    behind showed up in the running app — the sport dropdown filled with "Watchlist Test Sport"
+    entries, 24 of them across several runs. That hazard is gone: the suite now uses a
+    dedicated database (see conftest.py). Kept because per-test cleanup is worth having on its
+    own — it keeps each test independent of what its neighbours left, which conftest's
+    once-per-session truncation cannot do.
 
     Keyed on the wl-sport- slug prefix rather than ids captured during the test, so a test that
     fails part-way through still cleans up.
