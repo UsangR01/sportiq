@@ -26,7 +26,11 @@ from app.fixtures.schemas import (
 from app.models_ml.corners_reference import blend_probability, bulk_corners_reference
 from app.models_ml.markets import CORNERS_LINES, GOALS_LINES, double_chance_probs, over_under_probs
 from app.odds.models import Odds
-from app.picks.service import best_available_odds, best_totals_odds
+from app.picks.service import (
+    best_available_odds,
+    best_totals_odds,
+    latest_price_per_bookmaker,
+)
 from app.predictions.models import Prediction
 from app.sports.models import League, Sport
 
@@ -93,6 +97,28 @@ def _build_extra_markets(
             for line, (under, over) in corners_probs.items()
         ],
     )
+
+
+def _newest_odds_per_book(rows: list) -> list:
+    """One current row per bookmaker/market/line, for the ORM objects the odds endpoints return.
+
+    Same reason as latest_price_per_bookmaker, which does this for the dict form used by pick
+    selection: Odds rows are append-only snapshots, so a fixture accumulates 8.7 per bookmaker
+    on average and up to 47. Returning them all makes the odds list a price history rendered as
+    if every line were separately available.
+
+    Keyed case-insensitively, because TheRundown writes "draftkings" and API-Football
+    "Draftkings" for the same book."""
+    newest: dict[tuple, object] = {}
+    for row in rows:
+        key = ((row.bookmaker or "").strip().lower(), row.market, row.line)
+        seen = newest.get(key)
+        if seen is None or (
+            row.updated_at is not None
+            and (seen.updated_at is None or row.updated_at > seen.updated_at)
+        ):
+            newest[key] = row
+    return list(newest.values())
 
 
 def _fixture_query():
@@ -562,6 +588,8 @@ async def _bulk_best_picks(
     for o in odds_rows:
         odds_by_fixture_market.setdefault((o.fixture_id, o.market.value), []).append(
             {
+                "bookmaker": o.bookmaker,
+                "updated_at": o.updated_at,
                 "home_odds": o.home_odds,
                 "draw_odds": o.draw_odds,
                 "away_odds": o.away_odds,
@@ -570,6 +598,12 @@ async def _bulk_best_picks(
                 "under_odds": o.under_odds,
             }
         )
+    # Odds are append-only snapshots, so without this the "best" price is a high-water mark
+    # over the fixture's whole price history rather than one a user could still take. Measured
+    # on 119 real fixtures: 28% overstated, by 5.89% on average. See latest_price_per_bookmaker.
+    odds_by_fixture_market = {
+        key: latest_price_per_bookmaker(rows) for key, rows in odds_by_fixture_market.items()
+    }
 
     # Which sport each fixture belongs to, so the base-rate gate uses that sport's own rates
     # rather than football's (see BASE_RATES_BY_SPORT — tennis "home" wins 62% of the time,
@@ -818,7 +852,7 @@ async def get_fixture(fixture_id: uuid.UUID, db: AsyncSession = Depends(get_db))
         await db.execute(select(FixtureLiveState).where(FixtureLiveState.fixture_id == fixture_id))
     ).scalar_one_or_none()
 
-    odds_rows = (
+    odds_rows = _newest_odds_per_book(
         (await db.execute(select(Odds).where(Odds.fixture_id == fixture_id))).scalars().all()
     )
 
@@ -907,7 +941,7 @@ async def get_fixture_live(fixture_id: uuid.UUID, db: AsyncSession = Depends(get
 
 @router.get("/fixtures/{fixture_id}/odds", response_model=list[OddsLineResponse])
 async def get_fixture_odds(fixture_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    odds_rows = (
+    odds_rows = _newest_odds_per_book(
         (await db.execute(select(Odds).where(Odds.fixture_id == fixture_id))).scalars().all()
     )
     return [OddsLineResponse.model_validate(o, from_attributes=True) for o in odds_rows]
