@@ -524,7 +524,41 @@ def collect_league(league_slug: str, stages: tuple[str, ...] = STAGES) -> None:
         print(f"saved {len(lineups)} lineup-presence rows to {lineups_path}")
 
     corners_path = DATA_DIR / f"football_corners_{league_slug}.parquet"
-    if corners_path.exists():
+    if corners_path.exists() and "corners" in stages:
+        # Additive, for the same reason the game-log stage is: once a league gains a new
+        # season, "the parquet exists" stops meaning "the parquet is complete". Skipping
+        # outright left the newest and most relevant fixtures permanently without corners.
+        existing = pd.read_parquet(corners_path)
+        have = set(existing["FIXTURE_ID"].astype(str))
+        # Only fixtures NEWER than the newest one already covered. "Not in the parquet" is not
+        # the same as "not yet attempted": /fixtures/statistics genuinely returns no corner
+        # count for a real 26-45% of historical fixtures, and those misses are indistinguishable
+        # from never-tried, because the parquet only records successes. Treating every absence
+        # as a to-do meant 4,973 calls for these nine leagues, roughly 4,000 of them re-asking
+        # for data the provider has already said it does not have. Bounding by date targets the
+        # newly-collected seasons, which is the actual gap.
+        covered = games[games["FIXTURE_ID"].astype(str).isin(have)]
+        cutoff = pd.to_datetime(covered["GAME_DATE"]).max() if not covered.empty else None
+        candidates = games if cutoff is None else games[pd.to_datetime(games["GAME_DATE"]) > cutoff]
+        missing = [
+            fid
+            for fid in sorted(candidates["FIXTURE_ID"].unique().tolist())
+            if str(fid) not in have
+        ]
+        if cutoff is not None:
+            print(f"{league_slug}: corners covered through {cutoff.date()}")
+        if missing:
+            print(f"collecting corners for {len(missing)} new {league_slug} fixtures...")
+            fresh = asyncio.run(collect_corner_stats(missing))
+            if not fresh.empty:
+                combined = pd.concat([existing, fresh], ignore_index=True).drop_duplicates(
+                    subset=["FIXTURE_ID", "TEAM_ID"], keep="last"
+                )
+                combined.to_parquet(corners_path, index=False)
+                print(f"merged {len(fresh)} rows; corners now {len(combined)}")
+        else:
+            print(f"{corners_path} already covers every fixture in the game log")
+    elif corners_path.exists():
         print(f"{corners_path} already exists, skipping API-Football re-fetch")
     elif "corners" in stages:
         fixture_ids = sorted(games["FIXTURE_ID"].unique().tolist())
