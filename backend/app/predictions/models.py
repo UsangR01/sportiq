@@ -2,7 +2,17 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, String, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Index,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -111,3 +121,55 @@ class ModelRegistry(Base):
     roi_simulation: Mapped[float | None] = mapped_column(Float, nullable=True)
     trained_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
+class PickSnapshot(Base):
+    """The pick as it was actually SHOWN, captured once per fixture before kickoff.
+
+    Without this, product performance cannot be measured at all. best_pick is computed per
+    request from a prediction plus whatever odds existed at that moment, filtered by
+    MIN_EDGE_OVER_BASE_RATE, MAX_EDGE_OVER_MARKET, MIN_FEATURE_COMPLETENESS and the caller's own
+    thresholds — and none of it was stored. Recomputing it after the result would measure a
+    different product than users saw: odds move, and the guards themselves changed twice in the
+    month before this table existed.
+
+    So hit rate, flat-stake ROI and CLV over shown picks are only computable for fixtures
+    captured from here onward. See docs/history-metrics-spec.md §2b.
+
+    ONE ROW PER FIXTURE, enforced by a unique constraint. The task is idempotent and a re-run
+    must not double-count a pick in the ROI denominator.
+    """
+
+    __tablename__ = "pick_snapshots"
+    __table_args__ = (
+        UniqueConstraint("fixture_id", name="uq_pick_snapshots_fixture"),
+        Index("ix_pick_snapshots_captured", "captured_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    fixture_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("fixtures.id", ondelete="CASCADE"), nullable=False
+    )
+    # The prediction this pick was derived from — so a later model change cannot be mistaken
+    # for the model that actually made the call.
+    prediction_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("predictions.id", ondelete="CASCADE"), nullable=False
+    )
+    model_version: Mapped[str] = mapped_column(String(100), nullable=False)
+
+    market: Mapped[str] = mapped_column(String(32), nullable=False)
+    selection: Mapped[str] = mapped_column(String(32), nullable=False)
+    line: Mapped[float | None] = mapped_column(Float, nullable=True)
+    probability: Mapped[float] = mapped_column(Float, nullable=False)
+    # The price at the moment of display. NULL where the market had no real price yet, which is
+    # common and must stay distinguishable from "priced at zero" — a fixture with no odds can
+    # still be graded for hit rate, just not for ROI or CLV.
+    odds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    feature_completeness: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    # How long before kickoff the pick was taken. Recorded because CLV is only meaningful with
+    # a real gap between this price and the closing one — see snapshot_shown_picks.
+    hours_before_kickoff: Mapped[float] = mapped_column(Float, nullable=False)

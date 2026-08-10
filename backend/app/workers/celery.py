@@ -34,6 +34,7 @@ celery_app = Celery(
         # is called on it, defeating their own docstrings' "standalone entry point" promise.
         "app.workers.backfill_predictions",
         "app.workers.backfill_tennis_predictions",
+        "app.workers.snapshot_picks",
     ],
 )
 
@@ -126,6 +127,13 @@ celery_app.conf.beat_schedule = {
     "ingest-injuries-every-30-minutes": {
         "task": "app.workers.ingest_injuries.ingest_injuries",
         "schedule": 1800.0,
+    },
+    "snapshot-shown-picks-hourly": {
+        "task": "app.workers.snapshot_picks.snapshot_shown_picks",
+        # Hourly against a 4-hour window, so a fixture cannot slip through between runs.
+        # Makes no external API calls — it reads predictions and odds already stored — and
+        # returns immediately when nothing sits in the window.
+        "schedule": 3600.0,
     },
     "check-push-receipts-every-30-minutes": {
         "task": "app.workers.notify_users.check_push_receipts",
