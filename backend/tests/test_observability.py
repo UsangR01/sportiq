@@ -11,6 +11,7 @@ import weakref
 
 from celery.signals import beat_init, celeryd_init
 
+from app.core.config import get_settings
 from app.core.observability import API, BEAT, WORKER, init_sentry
 
 
@@ -31,10 +32,22 @@ def test_worker_and_beat_both_initialise_sentry():
     assert "_init_beat_sentry" in _receiver_names(beat_init)
 
 
-def test_no_dsn_is_a_supported_state_not_a_failure():
-    """Local development has no DSN. Returning False quietly matters because the alternative —
+def test_no_dsn_is_a_supported_state_not_a_failure(monkeypatch):
+    """A fresh clone has no DSN. Returning False quietly matters because the alternative —
     warning on every process start — trains people to ignore the startup logs, which is where
-    the staleness fingerprint is also printed."""
+    the staleness fingerprint is also printed.
+
+    The DSN is cleared EXPLICITLY rather than relying on the machine not having one. The first
+    version of this test asserted False with no setup and passed only because backend/.env had
+    an empty SENTRY_DSN_BACKEND; the moment the DSN was actually provisioned it failed locally
+    while still passing in CI, which is the worst of both — a test whose result depends on
+    ambient configuration is not testing the code."""
+    import app.core.observability as observability
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "sentry_dsn_backend", "", raising=False)
+    monkeypatch.setattr(observability, "get_settings", lambda: settings)
+
     assert init_sentry(WORKER) is False
 
 

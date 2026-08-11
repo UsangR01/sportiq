@@ -656,9 +656,35 @@ async def _fetch_matches_across_seasons(
     return matches
 
 
+# A tournament's advertised start_date is the MAIN DRAW; qualifying is played before it, and
+# those matches are real, ingested, and shown in the feed. Measured across five real ATP events
+# — the provider's own dates against the earliest match we hold for each:
+#
+#     Cincinnati Open            advertised 08-13   first match 08-11   2 days early
+#     National Bank Open         advertised 08-02   first match 08-01   1
+#     Mifel Tennis Open          advertised 07-27   first match 07-25   2
+#     Mubadala Citi DC Open      advertised 07-27   first match 07-25   2
+#     Millennium Estoril Open    advertised 07-20   first match 07-18   2
+#
+# Three clears the observed maximum with margin. Padding the END too, since a rain-delayed
+# event can finish after its advertised close and the cost of being generous is one extra
+# tournament's matches per poll.
+TOURNAMENT_WINDOW_PAD_DAYS = 3
+
+
 def _tournament_overlaps_window(tournament: dict, window_start: date, window_end: date) -> bool:
-    t_start = date.fromisoformat(str(tournament["start_date"])[:10])
-    t_end = date.fromisoformat(str(tournament["end_date"])[:10])
+    """Whether this tournament could have matches inside the window.
+
+    THE PAD IS LOAD-BEARING, not defensive tidiness. Cincinnati Open advertises 08-13..08-23
+    while playing qualifying from 08-11. ingest_fixtures looks 7 days ahead so it ingested
+    those 24 matches happily; ingest_live_scores looks only +/-1 day, so the tournament fell
+    outside its window and every one of those fixtures was frozen as SCHEDULED with no score
+    for the entire day they were actually played. The fixtures were live on the provider the
+    whole time — nothing was ever asked for them.
+    """
+    pad = timedelta(days=TOURNAMENT_WINDOW_PAD_DAYS)
+    t_start = date.fromisoformat(str(tournament["start_date"])[:10]) - pad
+    t_end = date.fromisoformat(str(tournament["end_date"])[:10]) + pad
     return t_start <= window_end and t_end >= window_start
 
 
