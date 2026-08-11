@@ -630,6 +630,64 @@ the per-match `set_scores` array, which the live payload does carry.
 
 ---
 
+## An external critique of the model — checked, and largely right
+
+Reviewed 2026-08-11. Two claims, both verified against the code rather than accepted: the
+pooled model has no league feature and reports pooled metrics only, and its hyperparameters are
+XGBoost defaults reached by omission. Both were true. Worked through in the order below; the
+standing "no retrains" hold was lifted deliberately by the user rather than drifting.
+
+**Current model: `football_xgb_v20260811235459`.** Test accuracy **0.5052** against a 0.4443
+always-home baseline (**+6.09pp**, from +4.14pp), RPS **0.2104** (from 0.2144).
+
+**1. Per-league metrics** (`train_football.py:per_league_metrics`). Every headline this project
+had ever reported was pooled, and a pooled number can be carried by one league. Each league is
+now scored against ITS OWN always-home baseline — home advantage differs by league, so a single
+pooled baseline flatters some and punishes others. The pooled +4.14pp turned out to span
+**-3.3pp to +14.0pp**, with four of eighteen leagues WORSE than picking home every time.
+
+> **This also killed a per-league table I had produced hours earlier off live settled
+> predictions**, which had Brasileirão at +26pp and the CSL at -26.7pp. On the proper test set
+> both signs FLIP (-1.6pp and +11.3pp). Those live samples were n=12-96. They were noise, and
+> the lesson is the one already written into MIN_REPORTABLE_N: a per-league cut of live data is
+> nowhere near reportable yet.
+
+**2. Seed and explicit hyperparameters** (`RANDOM_SEED`, `XGB_COMMON`). Pinned at the values
+already in effect, so the retrain reproduced the served model exactly and the new artefact's
+boosters came out byte-identical to the previously-active one — hygiene with no behavioural
+change. Verified rather than asserted: two consecutive runs, 5/5 byte-identical boosters.
+- **This walked back something I had overstated.** I said past run-to-run differences could not
+  be separated from seed noise. With `subsample`/`colsample` at their 1.0 defaults there was no
+  stochasticity to seed, so those fits were already deterministic and the earlier comparisons
+  stand. Pinning makes it a guarantee instead of a side effect of two other unpinned defaults —
+  which stopped being academic at step 4, where tuning enabled subsampling.
+
+**3. League baselines — re-enabled after a re-test, and it is a small effect.**
+`app/models_ml/league_baselines.py` already existed and had been measured clearly WORSE
+(accuracy 0.4775→0.4634, under-3.5 trend z +1.86→-0.03) at 5,188 training rows, disabled with
+the condition "re-enable only alongside more training data". The pool had since tripled to
+16,287 and nobody retested. Criteria fixed before the run: pooled gap ≥+3.5pp (+4.14→+4.16),
+under-3.5 buckets monotonic (held), leagues worse than baseline ≤4 (4→3). All passed.
+- **Honest size**: accuracy moved by one fixture in 5,487, and **RPS regressed 0.2144→0.2152**.
+  RPS was not among the pre-registered criteria and was NOT added afterwards to flip the
+  verdict. "No longer harmful" is the accurate description, not "helpful". Kept for something
+  the test set cannot measure: the features encode WHAT differs (scoring level, home advantage)
+  rather than WHICH league, so leagues opening in late August get a real prior on day one.
+
+**4. Optuna for Layer 2 — the biggest win, and it validates the critique.** NBA and tennis had
+always tuned; football never had. 50 trials against VALIDATION RPS (never accuracy, never
+test): accuracy **0.4859 → 0.5052**, RPS **0.2152 → 0.2104**, and leagues worse than always-home
+**3 → 1** (only ekstraklasa, at -0.3pp). The defaults were genuinely wrong, not merely unstated
+— the search chose **depth 2** where the default path used 4 and **lr 0.034** where the default
+is 0.3, with subsampling 0.88 and column sampling 0.63. A far more regularised model.
+- **Scoped to Layer 2 on purpose.** Layer 1's Poisson regressors feed it and also drive
+  Over/Under, so they need a Poisson objective rather than 1X2 RPS. The O/U reliability buckets
+  came back unchanged, exactly as that scoping predicts. Tuning Layer 1 is the open follow-up.
+- Reproducibility re-verified with stochasticity now enabled: two runs, identical best params
+  and identical test metrics.
+
+---
+
 ## Measuring whether the predictions work
 
 Spec: `docs/history-metrics-spec.md`, written **before** the endpoint was touched so its shape
