@@ -696,6 +696,30 @@ honest options are better goal-predictive features, or not surfacing it as a con
 NOT another distributional or calibration layer, both of which would only relabel the same
 absent signal.
 
+**Resolved 2026-08-11: goals_total no longer wins the headline pick**
+(`app/fixtures/router.py:NO_DEMONSTRATED_SIGNAL_MARKETS`). Re-measured on real settled
+fixtures, predicted total against actual total:
+
+    goals_total     n=242   r=+0.049   0.2% of variance explained   <- barred
+    corners_total   n=234   r=+0.288   8.3% of variance explained   <- kept
+
+**Corners was assumed to be the same case and is NOT** — the assumption was about to be stated
+before it was measured. At n=234, r=+0.288 is roughly 4.4 standard errors from zero: a real if
+modest signal, and it keeps its place. Goals confirms the earlier r=+0.030 finding on a much
+larger sample (n=242 vs n=66), which is why this was decidable without waiting for the CLV
+read — no amount of closing-line data makes a market explaining 0.2% of variance informative.
+
+This is a bar on the MARKET, distinct from `MIN_EDGE_OVER_BASE_RATE` and
+`MIN_FEATURE_COMPLETENESS`, which both judge an individual pick. Goals still appears in
+`all_market_picks` and the fixture detail's Other Markets, and an explicit `market=goals_total`
+request is still honoured — asking for it differs from it winning by default.
+
+Real effect on the live feed: 130 → 123 fixtures keep a headline pick (7 lost it entirely),
+and the mix went `goals 30% / h2h 30% / corners 29% / DC 11%` → `corners 50% / h2h 33% /
+DC 18%`. **Corners at 50% is worth watching**: single-market concentration is the exact shape
+of the original "every card shows UNDER 3.5" complaint, now with a market that has measured
+signal rather than none.
+
 **`scripts/purge_tennis_test_pollution.py`** removed 2,729 pre-2021 tennis fixtures left by
 exploratory ingest runs during the tennis build-out (6,277 → 3,548). Conservative by design:
 only fixtures predating the 2021-2025 training window, and Teams (players) are deliberately

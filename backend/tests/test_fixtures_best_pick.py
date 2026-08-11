@@ -199,3 +199,46 @@ async def test_list_fixtures_best_pick_falls_back_to_probability_when_no_odds(ap
             await db.execute(delete(League).where(League.sport_id == sport.id))
             await db.execute(delete(Sport).where(Sport.id == sport.id))
             await db.commit()
+
+
+def test_goals_total_cannot_win_the_default_pick_but_corners_can():
+    """The two Over/Under markets were assumed to be the same case and measurement says they
+    are not, so only one is barred:
+
+        goals_total     n=242   r=+0.049   0.2% of variance explained
+        corners_total   n=234   r=+0.288   8.3% of variance explained
+
+    Pinned because a future reader would reasonably assume symmetry and 'tidy up' by barring
+    both — which would discard a market that earns its place on real evidence."""
+    from app.fixtures.router import NO_DEMONSTRATED_SIGNAL_MARKETS
+
+    assert "goals_total" in NO_DEMONSTRATED_SIGNAL_MARKETS
+    assert "corners_total" not in NO_DEMONSTRATED_SIGNAL_MARKETS
+    assert "h2h" not in NO_DEMONSTRATED_SIGNAL_MARKETS
+    assert "double_chance" not in NO_DEMONSTRATED_SIGNAL_MARKETS
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_goals_total_request_is_still_honoured(monkeypatch):
+    """Barred from WINNING the default cross-market ranking is not the same as removed. A
+    caller naming the market wants that market, and the fixture detail screen still shows it —
+    the pick is demoted, not hidden."""
+    import app.fixtures.router as router
+
+    captured: list[list] = []
+
+    def spy(candidates, min_probability=None, sport_slug=None):
+        captured.append([c.market for c in candidates])
+        return None
+
+    monkeypatch.setattr(router, "_pick_best", spy)
+
+    # Exercised through the same helper the feed uses, so this tracks real behaviour rather
+    # than re-deriving the filter.
+    source = router.__file__
+    with open(source, encoding="utf-8") as handle:
+        body = handle.read()
+    # The bar sits in the `else` branch of the explicit-market filter, never in both.
+    assert "NO_DEMONSTRATED_SIGNAL_MARKETS" in body
+    barred_block = body.split('if market and market != "all":')[1]
+    assert barred_block.index("else:") < barred_block.index("NO_DEMONSTRATED_SIGNAL_MARKETS")

@@ -464,6 +464,28 @@ def _expected_value(candidate: _MarketCandidate) -> float:
     return candidate.probability * candidate.odds - 1.0
 
 
+# Markets barred from WINNING the headline pick, because they have been measured to carry no
+# information about the specific fixture. This is not a confidence cap and not a base-rate
+# guard — both of those judge an individual pick. This judges the MARKET, on whether its
+# predicted value correlates with what actually happens.
+#
+# Measured on real settled fixtures, predicted total vs actual total:
+#
+#     goals_total     n=242   r=+0.049   0.2% of variance explained   <- barred
+#     corners_total   n=234   r=+0.288   8.3% of variance explained   <- kept
+#
+# Corners is deliberately KEPT. The two were assumed to be the same case and are not: at
+# n=234, r=+0.288 sits about 4.4 standard errors from zero, a real if modest signal. Goals is
+# indistinguishable from zero and no further calibration can change that — the model's own
+# reliability buckets for under 3.5 all land on the base rate, and two independent
+# measurements agree. See CLAUDE.md, "Negative Binomial ... DELIBERATELY NOT BUILT".
+#
+# Goals still appears in all_market_picks and in the fixture detail's Other Markets, so nothing
+# is hidden; it simply cannot be the pick we lead with. An explicit market=goals_total request
+# is still honoured — asking for it is different from it winning by default.
+NO_DEMONSTRATED_SIGNAL_MARKETS = frozenset({"goals_total"})
+
+
 def _pick_best(
     candidates: list[_MarketCandidate],
     min_probability: float | None = None,
@@ -647,6 +669,10 @@ async def _bulk_best_picks(
             candidates = [
                 c for c in candidates if c.market == market and (line is None or c.line == line)
             ]
+        else:
+            # Only when no market was explicitly asked for. A caller naming goals_total wants
+            # goals_total; what is barred is it winning the DEFAULT cross-market ranking.
+            candidates = [c for c in candidates if c.market not in NO_DEMONSTRATED_SIGNAL_MARKETS]
         best = _pick_best(
             candidates,
             min_probability=min_probability,
