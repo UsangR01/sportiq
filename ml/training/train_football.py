@@ -70,8 +70,8 @@ load_dotenv(BACKEND_DIR / ".env")
 
 import joblib  # noqa: E402
 import mlflow  # noqa: E402
-import optuna  # noqa: E402
 import numpy as np  # noqa: E402
+import optuna  # noqa: E402
 import pandas as pd  # noqa: E402
 import xgboost as xgb  # noqa: E402
 from app.models_ml.elo import compute_elo_history  # noqa: E402
