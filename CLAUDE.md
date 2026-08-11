@@ -1083,7 +1083,15 @@ npx expo start --android          # Android emulator/device, via Expo Go (auto-i
 npx tsc --noEmit                  # typecheck — no ESLint/Jest configured yet, see "Not yet configured"
 ```
 
-The backend must be running (`docker compose up -d && cd backend && uvicorn app.main:app`). For the web target, `CORS_ORIGINS` must include the Expo web dev server's origin (`http://localhost:8081` by default) — `backend/.env.example` doesn't ship this by default since it's a mobile-dev-only concern, add it to your local `backend/.env`; native targets (Android/iOS) aren't subject to CORS at all (that's a browser-only mechanism), so no CORS change is needed for them. iOS Simulator/device and a real (non-emulator) Android device are both untested so far — this machine has no Mac, and no physical device was connected.
+The backend must be running (`docker compose up -d && cd backend && uvicorn app.main:app`).
+**If `mobile/.env`'s `EXPO_PUBLIC_API_URL` is a LAN IP rather than `localhost`, uvicorn MUST be
+started with `--host 0.0.0.0`** — the default binds 127.0.0.1 only, so nothing listens on the
+LAN interface and every request from the app fails with "Couldn't reach the SportIQ API" while
+`curl http://localhost:8000/health` returns a perfectly healthy 200. Confirmed by breaking it:
+restarting uvicorn without the flag took the app down while the API itself was fine, and the
+give-away is that the uvicorn access log shows NO requests from the app at all — the client
+never reached it. Check `EXPO_PUBLIC_API_URL` and the bind address before investigating CORS,
+which is the more obvious suspect and was not the cause. For the web target, `CORS_ORIGINS` must include the Expo web dev server's origin (`http://localhost:8081` by default) — `backend/.env.example` doesn't ship this by default since it's a mobile-dev-only concern, add it to your local `backend/.env`; native targets (Android/iOS) aren't subject to CORS at all (that's a browser-only mechanism), so no CORS change is needed for them. iOS Simulator/device and a real (non-emulator) Android device are both untested so far — this machine has no Mac, and no physical device was connected.
 
 ## External API research findings — ground truth, not TDD assumptions
 
@@ -1363,7 +1371,8 @@ docker compose up -d                 # Postgres 16 + Redis 7
 cd backend && alembic upgrade head    # apply migrations
 PYTHONPATH=. python scripts/seed_sports.py   # one-time: inserts nba + football Sport/League rows
 
-uvicorn app.main:app --reload         # then GET /health, /docs
+uvicorn app.main:app --reload         # then GET /health, /docs — LOOPBACK ONLY
+uvicorn app.main:app --reload --host 0.0.0.0   # required if mobile/.env points at a LAN IP
 pytest
 ruff check . && black --check .
 
