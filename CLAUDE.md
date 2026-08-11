@@ -1221,6 +1221,34 @@ Live-tested against the real keys in `keys.docx` (minimal, quota-conscious calls
 - **TheRundown rate limiting escalates oddly under load**: a burst of ~60 requests with no delay produced a sustained run of `429`s that then escalated into `401`s on retry — manually confirmed seconds later (plain `curl`, no code involved) that the key was completely fine, so the `401`s were a transient RapidAPI-gateway artifact of the burst, not a real auth or account problem. 5 seconds between requests was confirmed reliably under the threshold; don't reflexively read a `401` from this provider as "key revoked" without checking via a slow, isolated request first.
 - **Silent-wrong-`.env` trap for any one-off script outside `backend/`**: `pydantic-settings`'s `env_file=".env"` resolves against the process's **current working directory**, not the importing file's location. A script in `ml/training/` run from the repo root (rather than from `backend/`) silently loads a blank `.env` and every setting falls back to its default (e.g. `therundown_api_key=""`) — no error, just a confusing downstream `401` that looks exactly like a real auth/rate-limit failure. Fix: `load_dotenv(BACKEND_DIR / ".env")` explicitly before importing anything that calls `get_settings()` — see `ml/training/collect_nba_data.py`/`train_nba.py` for the pattern. If a script outside `backend/` ever gets a mysterious blank-credential failure, check this first.
 
+## Firebase is here ONLY for Android push — the API key is restricted accordingly
+
+`mobile/google-services.json` and `GoogleService-Info.plist` are committed (the repo is public),
+and both exist for exactly one reason: `expo-notifications` needs FCM credentials for Android
+push. **There is no Firebase SDK in the app at all** — no `firebase`, no
+`@react-native-firebase/*` — so nothing else in the project reads them.
+
+Google treats Firebase Android keys as identifiers rather than secrets (they are designed to
+ship inside the app), so committing them is not a leak; the real control is key restriction.
+Restricted 2026-08-11 in project `sportpiq-10b64`:
+- **Application restriction**: Android apps, package `com.sportpiq.app` + the EAS keystore SHA-1.
+- **API restriction**: only **Firebase Installations API** (FCM needs an installation ID first)
+  and **FCM Registration API** (mints the device token). Everything Firebase auto-selected —
+  Firestore, Datastore, ML Kit, Cloud SQL Admin, App Hosting, App Distribution, Remote Config,
+  Identity Toolkit — is for products this app does not use.
+
+Two that look like omissions and are not: **Firebase Cloud Messaging API** stays off because
+that is the *send* API, called by Expo's servers with a service account rather than by this
+key; and **Identity Toolkit API** stays off because auth is our own Argon2id + JWT, not Firebase.
+
+**If Android push ever fails with `API_KEY_SERVICE_BLOCKED` or a 403, this is the first place to
+look** — add whichever API the error names. The restriction cannot be exercised yet: no
+`EXPO_ACCESS_TOKEN` is provisioned and Expo Go blocks Android push, so the first real test is an
+EAS build. Adding any Firebase product later (Analytics, Auth, Firestore) means revisiting this
+list.
+
+---
+
 ## Secrets handling
 
 - Real credentials live only in `keys.docx` (gitignored) and, once services exist, in environment variables (`.env`, Render/AWS secrets manager — see TDD §4.3, §7).
