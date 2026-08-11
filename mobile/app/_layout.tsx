@@ -7,6 +7,7 @@ import { useEffect } from "react";
 import "react-native-reanimated";
 
 import "../global.css";
+import { initErrorReporting } from "@/lib/errorReporting";
 import { useColorScheme } from "@/components/useColorScheme";
 import { addNotificationTapListener } from "@/lib/notifications";
 import { getPreferences } from "@/lib/api/users";
@@ -25,6 +26,11 @@ export const unstable_settings = {
 };
 
 SplashScreen.preventAutoHideAsync();
+
+// Before any component renders. An error thrown during the first render — the class of bug
+// that shows a user a blank screen — happens before any useEffect could have installed a
+// handler, so initialising here is what makes those reportable at all.
+initErrorReporting();
 
 export default function RootLayout() {
   const [loaded, error] = useFonts({

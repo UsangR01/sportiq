@@ -55,7 +55,8 @@
         {
           "faceIDPermission": "Use Face ID to log in to SportPIQ faster."
         }
-      ]
+      ],
+      "@sentry/react-native"
     ],
     "experiments": {
       "typedRoutes": true
