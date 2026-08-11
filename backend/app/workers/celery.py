@@ -6,7 +6,7 @@ from typing import Any
 
 from celery import Celery
 from celery.schedules import crontab
-from celery.signals import worker_ready
+from celery.signals import beat_init, worker_ready
 
 from app.core.config import get_settings
 
@@ -156,13 +156,24 @@ celery_app.conf.beat_schedule = {
 # giving scripts/check_stale.py a single place to compare every process against disk.
 WORKER_VERSION_KEY = "sportiq:worker:code_version"
 
+# Beat is a SEPARATE long-lived process with its own import of this module, and it was the
+# blind spot: the worker published its version while beat published nothing, so check_stale.py
+# reported "ok" for a scheduler running a schedule that predated the code.
+#
+# That is not hypothetical. snapshot_picks.py and its beat_schedule entry were written three
+# hours AFTER beat was launched, so the running scheduler held a schedule with no snapshot
+# entry at all. Nothing errored; the task simply never ran, and a measurement meant to
+# accumulate for five weeks collected one row in twenty-four hours. A stale WORKER applies old
+# logic to work it receives; a stale BEAT never dispatches the work at all, which is quieter
+# and worse.
+BEAT_VERSION_KEY = "sportiq:beat:code_version"
 
-@worker_ready.connect
-def _publish_code_version(sender=None, **_kwargs) -> None:
-    """Record this worker's loaded code version, best-effort.
 
-    Never allowed to stop a worker starting: a diagnostic that can take the queue down is
-    worse than the staleness it reports."""
+def _publish_code_version_to(key: str, role: str, sender=None) -> None:
+    """Record a process's loaded code version, best-effort.
+
+    Never allowed to stop the process starting: a diagnostic that can take the queue or the
+    schedule down is worse than the staleness it reports."""
     import json
 
     from redis import Redis
@@ -177,13 +188,23 @@ def _publish_code_version(sender=None, **_kwargs) -> None:
     }
     try:
         client = Redis.from_url(get_settings().redis_url)
-        client.set(WORKER_VERSION_KEY, json.dumps(payload))
+        client.set(key, json.dumps(payload))
         client.close()
     except Exception:  # noqa: BLE001 - diagnostics must never break startup
-        logger.warning("could not publish worker code version to Redis", exc_info=True)
+        logger.warning("could not publish %s code version to Redis", role, exc_info=True)
     logger.info(
-        "celery worker code version: fingerprint=%s git=%s dirty=%s",
+        "celery " + role + " code version: fingerprint=%s git=%s dirty=%s",
         version.fingerprint,
         version.git_sha,
         version.git_dirty,
     )
+
+
+@worker_ready.connect
+def _publish_worker_code_version(sender=None, **_kwargs) -> None:
+    _publish_code_version_to(WORKER_VERSION_KEY, "worker", sender)
+
+
+@beat_init.connect
+def _publish_beat_code_version(sender=None, **_kwargs) -> None:
+    _publish_code_version_to(BEAT_VERSION_KEY, "beat", sender)

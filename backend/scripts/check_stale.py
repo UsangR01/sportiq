@@ -25,7 +25,7 @@ from redis import Redis  # noqa: E402
 
 from app.core.code_version import current_code_version  # noqa: E402
 from app.core.config import get_settings  # noqa: E402
-from app.workers.celery import WORKER_VERSION_KEY  # noqa: E402
+from app.workers.celery import BEAT_VERSION_KEY, WORKER_VERSION_KEY  # noqa: E402
 
 API_URL = "http://localhost:8000/health"
 
@@ -71,18 +71,23 @@ def main() -> int:
         else:
             stale_any |= _report("uvicorn (API)", loaded, current.fingerprint)
 
-    # --- Celery worker ---
-    try:
-        client = Redis.from_url(get_settings().redis_url)
-        raw = client.get(WORKER_VERSION_KEY)
-        client.close()
-        payload = json.loads(raw) if raw else {}
-        loaded = payload.get("fingerprint")
-        started = (payload.get("started_at") or "")[:19]
-    except Exception as exc:  # noqa: BLE001
-        loaded, started = None, f"({type(exc).__name__})"
-        down_any = True
-    stale_any |= _report("celery worker", loaded, current.fingerprint, f"started={started}")
+    # --- Celery worker and beat ---
+    # Beat is checked separately because it is a separate process with its own import, and it
+    # was the blind spot this script previously had. A stale WORKER applies old logic to work
+    # it receives; a stale BEAT never dispatches the work at all — quieter, and worse. That is
+    # exactly how snapshot_picks silently collected nothing for a day.
+    for label, key in (("celery worker", WORKER_VERSION_KEY), ("celery beat", BEAT_VERSION_KEY)):
+        try:
+            client = Redis.from_url(get_settings().redis_url)
+            raw = client.get(key)
+            client.close()
+            payload = json.loads(raw) if raw else {}
+            loaded = payload.get("fingerprint")
+            started = (payload.get("started_at") or "")[:19]
+        except Exception as exc:  # noqa: BLE001
+            loaded, started = None, f"({type(exc).__name__})"
+            down_any = True
+        stale_any |= _report(label, loaded, current.fingerprint, f"started={started}")
 
     print()
     if down_any and not stale_any:
@@ -91,6 +96,7 @@ def main() -> int:
     if stale_any:
         print("STALE PROCESS DETECTED — restart it before trusting anything it produced.")
         print("  worker:  python scripts/dev_worker.py")
+        print("  beat:    python scripts/dev_worker.py --beat")
         print("  API:     restart uvicorn (its --reload watcher cannot be trusted to recover)")
         return 1
     print("all reporting processes are running current code.")
