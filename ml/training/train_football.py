@@ -161,6 +161,31 @@ LEAGUES = [
 # fold order; 5 is the standard choice and keeps each fold at ~1,000 training fixtures.
 OOF_FOLDS = 5
 
+# Every estimator's seed. Previously random_state was left unset on all five.
+#
+# In practice these fits were ALREADY deterministic — with subsample and colsample at their
+# 1.0 defaults there is no sampling to randomise, which is why the league-baseline negative
+# result recorded in football_features.py could legitimately be attributed to the features.
+# Setting it explicitly is still worth doing: it makes that property a guarantee rather than a
+# consequence of two other defaults nobody is pinning, and it survives someone later enabling
+# subsampling — at which point every unlabelled before/after comparison silently becomes
+# unreliable without anything appearing to change.
+RANDOM_SEED = 20260811
+
+# Stated rather than inherited. These were the XGBoost defaults reached by omission, and the
+# defaults are not obviously right here: learning_rate 0.3 with 200 trees and no subsampling
+# is an aggressive configuration for ~16k rows. They are pinned at their current effective
+# values so this retrain is a like-for-like reproduction of the served model rather than a
+# silent change, and so a tuning pass has an explicit starting point to move FROM.
+XGB_COMMON = {
+    "n_estimators": 200,
+    "max_depth": 4,
+    "learning_rate": 0.3,
+    "subsample": 1.0,
+    "colsample_bytree": 1.0,
+    "random_state": RANDOM_SEED,
+}
+
 # The temporal split. NOTE THAT ANY SEASON OUTSIDE THESE THREE WINDOWS IS SILENTLY DROPPED:
 # examples are assembled for it and then matched by no split, so it trains and tests nothing.
 #
@@ -194,6 +219,60 @@ def ranked_probability_score(probs: np.ndarray, actual_label: int, n_classes: in
     cum_forecast = np.cumsum(probs)
     cum_actual = np.cumsum([1.0 if i == actual_label else 0.0 for i in range(n_classes)])
     return float(np.sum((cum_forecast - cum_actual) ** 2) / (n_classes - 1))
+
+
+# Below this, a per-league accuracy is noise wearing a decimal point. Kept low deliberately —
+# this table is a DIAGNOSTIC for spotting leagues the pooled model serves badly, not a claim
+# about any one of them, and suppressing small leagues entirely would hide exactly the ones
+# most likely to be mis-served. Every row prints its own n so the reader can discount it.
+MIN_LEAGUE_ROWS_TO_REPORT = 30
+
+
+def per_league_metrics(
+    test_df: pd.DataFrame,
+    y_test: pd.Series,
+    test_calibrated: np.ndarray,
+    test_pred_label: np.ndarray,
+) -> list[dict]:
+    """1X2 accuracy per league, each against ITS OWN always-home baseline.
+
+    WHY THIS EXISTS: every headline this project has reported is pooled, and a pooled number
+    can be carried entirely by one league. Measured on real settled predictions before this
+    was written, the SERVED model ran +26.0pp over baseline in Brasileirao while sitting
+    -26.7pp in the CSL and -16.7pp in the Scottish Premiership — worse than picking home every
+    time in two of the four leagues with any settled sample. The pooled +4pp said none of that.
+
+    Comparing each league against ITS OWN baseline is the whole point. Home-win rates differ
+    materially between leagues, so one pooled baseline would flatter leagues with strong home
+    advantage and punish those without — the same error as comparing headline accuracy across
+    different league pools.
+    """
+    leagues = test_df["LEAGUE"].to_numpy()
+    y = y_test.to_numpy()
+    home_label = LABEL_BY_CLASS["home"]
+    rows: list[dict] = []
+    for league in sorted(set(leagues)):
+        mask = leagues == league
+        n = int(mask.sum())
+        if n == 0:
+            continue
+        idx = np.flatnonzero(mask)
+        accuracy = float((test_pred_label[mask] == y[mask]).mean())
+        baseline = float((y[mask] == home_label).mean())
+        rows.append(
+            {
+                "league": str(league),
+                "n": n,
+                "accuracy": accuracy,
+                "baseline": baseline,
+                "gap": accuracy - baseline,
+                "rps": float(
+                    np.mean([ranked_probability_score(test_calibrated[i], int(y[i])) for i in idx])
+                ),
+                "reportable": n >= MIN_LEAGUE_ROWS_TO_REPORT,
+            }
+        )
+    return rows
 
 
 def build_training_examples(
@@ -312,6 +391,11 @@ def build_training_examples(
         ]
         features["season"] = season
         features["fixture_id"] = fixture_id
+        # Carried through purely so metrics can be reported per league (per_league_metrics).
+        # NOT a model input — the feature selection is by FEATURE_NAMES, so an extra column
+        # here is inert, and league identity as a feature was measured and regressed (see
+        # app/models_ml/football_features.py's MEASURED NEGATIVE RESULT note).
+        features["LEAGUE"] = home_row.get("LEAGUE")
         features["home_goals"] = home_row["GF"]
         features["away_goals"] = home_row["GA"]
         features["home_odds"] = home_odds  # ROI metric only, not a model input
@@ -471,9 +555,9 @@ async def main_async() -> None:
     X_test = test_df[feature_cols].astype(float)
 
     # --- Layer 1: Poisson expected-goals regressors ---------------------------------------
-    layer1_home_model = xgb.XGBRegressor(objective="count:poisson", n_estimators=200, max_depth=4)
+    layer1_home_model = xgb.XGBRegressor(objective="count:poisson", **XGB_COMMON)
     layer1_home_model.fit(X_train, train_df["home_goals"].astype(float))
-    layer1_away_model = xgb.XGBRegressor(objective="count:poisson", n_estimators=200, max_depth=4)
+    layer1_away_model = xgb.XGBRegressor(objective="count:poisson", **XGB_COMMON)
     layer1_away_model.fit(X_train, train_df["away_goals"].astype(float))
 
     # --- Corners-Poisson-regressors (Over/Under corners market, app/models_ml/markets.py) ---
@@ -495,12 +579,12 @@ async def main_async() -> None:
         f"corners training rows: {corners_train_mask.sum()}/{len(train_df)} "
         f"(test rows with real corner counts: {corners_test_mask.sum()}/{len(test_df)})"
     )
-    corners_home_model = xgb.XGBRegressor(objective="count:poisson", n_estimators=200, max_depth=4)
+    corners_home_model = xgb.XGBRegressor(objective="count:poisson", **XGB_COMMON)
     corners_home_model.fit(
         X_train_corners[corners_train_mask],
         train_df.loc[corners_train_mask, "home_corners"].astype(float),
     )
-    corners_away_model = xgb.XGBRegressor(objective="count:poisson", n_estimators=200, max_depth=4)
+    corners_away_model = xgb.XGBRegressor(objective="count:poisson", **XGB_COMMON)
     corners_away_model.fit(
         X_train_corners[corners_train_mask],
         train_df.loc[corners_train_mask, "away_corners"].astype(float),
@@ -548,8 +632,8 @@ async def main_async() -> None:
         home_oof = np.zeros(len(X))
         away_oof = np.zeros(len(X))
         for fit_idx, held_idx in KFold(n_splits=OOF_FOLDS, shuffle=False).split(X):
-            fold_home = xgb.XGBRegressor(objective="count:poisson", n_estimators=200, max_depth=4)
-            fold_away = xgb.XGBRegressor(objective="count:poisson", n_estimators=200, max_depth=4)
+            fold_home = xgb.XGBRegressor(objective="count:poisson", **XGB_COMMON)
+            fold_away = xgb.XGBRegressor(objective="count:poisson", **XGB_COMMON)
             fold_home.fit(X.iloc[fit_idx], y_home.iloc[fit_idx])
             fold_away.fit(X.iloc[fit_idx], y_away.iloc[fit_idx])
             home_oof[held_idx] = fold_home.predict(X.iloc[held_idx]).clip(min=0)
@@ -604,9 +688,7 @@ async def main_async() -> None:
     y_test = test_df["label"]
 
     # --- Layer 2: 1X2 classifier ------------------------------------------------------------
-    layer2_model = xgb.XGBClassifier(
-        objective="multi:softprob", num_class=3, n_estimators=200, max_depth=4
-    )
+    layer2_model = xgb.XGBClassifier(objective="multi:softprob", num_class=3, **XGB_COMMON)
     layer2_model.fit(X_train_l2, y_train)
 
     val_raw = layer2_model.predict_proba(X_val_l2)
@@ -656,6 +738,23 @@ async def main_async() -> None:
         flat_stake_roi = None
 
     print(f"test accuracy={accuracy:.4f} (baseline={baseline_accuracy:.4f}) RPS={rps:.4f}")
+
+    league_rows = per_league_metrics(test_df, y_test, test_calibrated, test_pred_label)
+    print()
+    print("PER-LEAGUE (each against its OWN always-home baseline):")
+    print(f"  {'league':22} {'n':>5} {'acc':>7} {'baseline':>9} {'gap':>8} {'RPS':>7}")
+    for row in sorted(league_rows, key=lambda r: r["gap"]):
+        flag = "" if row["reportable"] else "   (small n)"
+        print(
+            f"  {row['league']:22} {row['n']:5} {row['accuracy']:7.3f} "
+            f"{row['baseline']:9.3f} {row['gap']:+8.3f} {row['rps']:7.4f}{flag}"
+        )
+    losing = [r for r in league_rows if r["reportable"] and r["gap"] <= 0]
+    if losing:
+        print(
+            "  WORSE THAN ALWAYS-HOME in: "
+            + ", ".join(f"{r['league']} ({r['gap']:+.3f})" for r in losing)
+        )
     print(f"flat-stake ROI (home picks with real odds, n={len(roi_rows)}): {flat_stake_roi}")
 
     # Honest before/after check on the real test set — same "report it straight, not spun
@@ -743,6 +842,13 @@ async def main_async() -> None:
         mlflow.log_metric("test_accuracy", accuracy)
         mlflow.log_metric("test_rps", rps)
         mlflow.log_metric("baseline_accuracy", baseline_accuracy)
+        # Per league, so a pooled headline can never again hide a league the model serves
+        # worse than always-picking-home. Logged with n alongside, because the gap alone
+        # invites reading a 12-row league as a result.
+        for row in league_rows:
+            mlflow.log_metric(f"acc__{row['league']}", row["accuracy"])
+            mlflow.log_metric(f"gap__{row['league']}", row["gap"])
+            mlflow.log_metric(f"n__{row['league']}", row["n"])
         mlflow.log_metric("val_log_loss", val_log_loss)
         if flat_stake_roi is not None:
             mlflow.log_metric("flat_stake_roi_home_picks", flat_stake_roi)
