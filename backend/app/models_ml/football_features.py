@@ -102,12 +102,40 @@ FEATURE_NAMES = (
     "xg_against_home",
     "xg_for_away",
     "xg_against_away",
+    # RE-ENABLED 2026-08-11 after a re-test — see the note below for the original negative
+    # result, the pre-registered criteria, and the honest read on how small the gain is.
+    "league_avg_goals",
+    "league_home_win_rate",
 )
 
-# MEASURED NEGATIVE RESULT — league_avg_goals / league_home_win_rate are deliberately NOT in
-# FEATURE_NAMES above, though app/models_ml/league_baselines.py still computes them and
-# assemble_from_game_log still returns them (unused keys are ignored, since the model selects
-# by FEATURE_NAMES).
+# RE-ENABLED 2026-08-11, AFTER a clear negative result at a third of the training data. The
+# original finding and its stated re-enable condition are kept below verbatim, because the
+# condition being met is the entire reason this was retried rather than left alone.
+#
+# The note said: "re-enable only alongside more training data or fewer correlated features."
+# The pool has since gone 5 leagues/5,188 training rows -> 18 leagues/16,287. Nobody retested.
+#
+# Criteria were fixed BEFORE the run so the verdict could not be fitted to it:
+#   (1) pooled gap over baseline >= +3.5pp      +4.14 -> +4.16   pass
+#   (2) under-3.5 reliability buckets monotonic .621 .664 .723 .753   pass (this is what
+#                                                collapsed last time)
+#   (3) leagues worse than always-home <= 4      4 -> 3            pass (j1_league -0.3 -> +3.9)
+#
+# HOW SMALL THIS IS, stated plainly: accuracy moved 0.4857 -> 0.4859, which is one fixture in
+# 5,487. Over/Under Brier improved on all three lines (0.1811->0.1804, 0.2478->0.2469,
+# 0.2140->0.2126). RPS moved the WRONG way, 0.2144 -> 0.2152 — and RPS is the metric this
+# project considers preferable to accuracy for a 3-way market. RPS was not among the
+# pre-registered criteria and was NOT added afterwards to change the verdict; it is recorded
+# here because burying it would be the same failure as fitting the criteria.
+#
+# So the honest description is "no longer harmful", not "helpful". Kept for a reason the test
+# set cannot measure: the features encode WHAT differs (scoring level, home advantage) rather
+# than WHICH league, so the four European leagues opening in late August get a sensible prior
+# on day one instead of the pooled blend. Trivially reverted — delete the two names above.
+#
+# ORIGINAL NEGATIVE RESULT (5 leagues, 5,188 training rows) follows.
+# app/models_ml/league_baselines.py computes these; assemble_from_game_log returns them
+# (unused keys are ignored, since the model selects by FEATURE_NAMES).
 #
 # The reasoning for adding them was sound: the model pools five leagues with nothing telling
 # it which one a fixture belongs to, and those leagues genuinely differ (Brasileirao 2.411
