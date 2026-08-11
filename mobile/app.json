@@ -56,7 +56,13 @@
           "faceIDPermission": "Use Face ID to log in to SportPIQ faster."
         }
       ],
-      "@sentry/react-native"
+      [
+        "@sentry/react-native",
+        {
+          "organization": "sportpiq",
+          "project": "sportiq-mobile"
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true
