@@ -35,8 +35,19 @@ def _predicted_outcome(prediction: Prediction) -> str:
     return max(candidates, key=lambda pair: pair[1])[0]
 
 
-# Below this, an accuracy is noise dressed as a result and is reported as "not enough data".
-MIN_REPORTABLE_N = 30
+# Pre-registered in docs/history-metrics-spec.md §9.4, anchored to INTERVAL WIDTH rather than
+# to any result this project has measured: 93 is the smallest n whose 95% Wilson interval is
+# narrower than 20 percentage points at p=0.5. Raised from a placeholder 30, at which an
+# interval spans roughly 35 points and a percentage says almost nothing.
+#
+# At this bar football (n=139) is reportable today and tennis (n=77) is not. The threshold
+# excluding real current data is the point — it was set by the rule, not to fit what exists.
+MIN_REPORTABLE_N = 93
+
+# The §9.2 edge threshold for 1X2 accuracy: +3pp over that population's own baseline. A metric
+# whose detectable effect is larger than this cannot settle the question either way, however
+# many rows it has, so `conclusive` reports that separately from `sufficient_sample`.
+ACCURACY_EDGE_THRESHOLD = 0.03
 # Standard normal quantiles for a one-sided alpha=0.05 test at 80% power, used for the
 # minimum detectable effect. Hard-coded rather than pulled from scipy, which is not a
 # dependency of the serving path.
@@ -242,6 +253,10 @@ async def get_history_summary(
                 accuracy_ci_high=ci_high,
                 detectable_effect=_detectable_effect(accuracy, n),
                 sufficient_sample=n >= MIN_REPORTABLE_N,
+                # Reportable and conclusive are different questions, and conflating them was
+                # ambiguous in the dangerous direction — a single flag read as "trustworthy"
+                # when it only meant "big enough to print". See spec §9.5.
+                conclusive=_detectable_effect(accuracy, n) <= ACCURACY_EDGE_THRESHOLD,
                 excluded_unknown_provenance=counts["excluded_kind"],
             )
         )

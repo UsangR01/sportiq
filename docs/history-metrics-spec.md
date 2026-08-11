@@ -1,7 +1,8 @@
 # `GET /history` — metrics specification
 
-**Status:** draft, pre-registered. Written *before* the endpoint exists, deliberately, so its
-shape is not chosen after seeing which cut of the data looks best.
+**Status:** §1-8 written before the endpoint was touched; **§9 pre-registered and SETTLED
+2026-08-11**, before the data it judges exists. Neither was shaped by seeing which cut of the
+numbers looked best.
 
 **Date:** 2026-08-10
 
@@ -180,13 +181,103 @@ Stated explicitly so it can be checked against:
 
 ---
 
-## 9. Open, for P2 pre-registration
+## 9. Pre-registration — SETTLED 2026-08-11
 
-To be decided **before** the first read, not after:
+Fixed here **before** the numbers they will judge exist. Every threshold is anchored to an
+**external** reference — bookmaker margin, standard statistical power, interval width — and
+**none** is derived from a result this project has measured. That distinction is the whole
+value of the section: I had already seen football at 56.1%, tennis at 63.6%, and CLV at −3.47%
+when writing it, so any bar reverse-engineered from those would be worthless.
 
-1. The primary metric and population.
-2. `MIN_REPORTABLE_N` and `MIN_BUCKET_N`.
-3. What result counts as an edge, what counts as none, and what happens in each case —
-   including the possibility that the answer is "stop surfacing Over/Under as a confident
-   pick", which the r=+0.030 correlation already points at.
-4. The re-read date, given both sports need months of accumulation.
+### 9.1 Primary metric: **CLV on snapshotted picks**
+
+Not accuracy, and the reason is sample size rather than preference:
+
+```
+detect +3pp of 1X2 accuracy over baseline   n ≈ 1,650
+detect +1.0% mean CLV (per-pick SD 6-8%)    n ≈ 223-396
+```
+
+CLV needs roughly **a fifth** of the sample to detect an effect worth having, because it scores
+every pick against a sharp reference price instead of waiting for a binary result. It is also a
+leading indicator: it needs prices, not outcomes.
+
+**RPS is the primary MODEL-skill metric** in the meantime, since it is computable today from
+stored probabilities and does not depend on snapshots.
+
+Accuracy is reported but is **never** primary. It discards the probability and the price, which
+are the two things a betting product actually sells.
+
+### 9.2 What counts as an edge
+
+| Metric | Edge | No edge | Anchor |
+|---|---|---|---|
+| **CLV** (primary) | mean > 0, 95% CI excluding 0 | CI wholly ≤ 0 | Beating the closing line is the standard professional test of whether a bettor has information the market lacks. |
+| **Flat-stake ROI** | CI excluding 0 | CI wholly ≤ 0 | Break-even is 0 by construction; the bookmaker margin is already inside the prices. |
+| **1X2 accuracy** | ≥ +3pp over that population's own baseline | < +3pp | A modest but genuine improvement; below this the pick ordering is not worth acting on. |
+
+**A CI spanning zero is "not yet known", not "no edge".** Reporting an inconclusive result as a
+negative is the same error as reporting it as a positive.
+
+### 9.3 If there is no edge
+
+Pre-committed, so the response is not negotiated after seeing the answer:
+
+1. **Stop presenting picks as advice.** The feed becomes predictions-with-context, not
+   recommendations, and the copy says so.
+2. **Do not retrain to chase it.** Three retrains in two days moved the headline by noise; a
+   fourth after a bad read would be fitting to the test set.
+3. **Do not add leagues or markets.** Both widen coverage of something unproven.
+4. Retain the measurement pipeline. A negative result that is *known* is worth more than the
+   positive one that was assumed.
+
+### 9.4 Reporting thresholds
+
+**`MIN_REPORTABLE_N = 93`**, raised from 30. Anchored to interval width, not to any result: 93
+is the smallest n whose 95% Wilson interval is narrower than 20 percentage points at p=0.5.
+Below it, a percentage says almost nothing and should render as "not enough data".
+
+```
+interval width ≤ 20%  →  n ≥  93     ← chosen
+interval width ≤ 15%  →  n ≥ 167
+interval width ≤ 10%  →  n ≥ 381
+```
+
+At this bar, football (n=139) is reportable today and tennis (n=77) is not. That the threshold
+excludes real current data is the point — it was set by the rule, not to fit what exists.
+
+**`MIN_BUCKET_N = 30`** for reliability buckets. Lower deliberately: a bucket is one point in a
+trend, read together with its neighbours, not a standalone claim.
+
+### 9.5 `sufficient_sample` — split in two
+
+The single flag was ambiguous, and ambiguous in the dangerous direction: it read as "this number
+is trustworthy" when it only meant "big enough to print".
+
+- **`sufficient_sample`** — `n >= MIN_REPORTABLE_N`. Safe to display.
+- **`conclusive`** — `detectable_effect <= the §9.2 threshold for this metric`. Safe to *act*
+  on.
+
+A metric may be reportable and inconclusive at once. That is the normal state today and the UI
+must be able to say so.
+
+### 9.6 `MIN_FEATURE_COMPLETENESS` stays at 0.25
+
+Correctness evidence points to 0.35 (below 0.25: 33.3%, 0.25-0.35: 37.5%, above 0.35: 69.9%),
+but the middle band is **n=16**.
+
+**Pre-committed rule: move the floor to 0.35 when that band reaches n ≥ 93** and still
+underperforms the band above it. Not before, and not on judgement — otherwise this is the same
+over-fitting refused for the confidence tiers on n=69.
+
+### 9.7 Re-read date: **2026-09-15**
+
+Snapshots began 2026-08-10, so the CLV sample starts from zero regardless of the 2,250 settled
+outcomes already stored. Football settles ~87 fixtures/week; not all are snapshotted, so a
+conservative ~45/week reaches the §9.1 sample of ~223 in **roughly five weeks**.
+
+Deliberately **one week before the 22 September API-Football renewal decision**, so the first
+real CLV read informs it rather than arriving after the money is spent.
+
+**Interim reads are for instrumentation only.** Any figure before 2026-09-15 is a pipeline
+check, not evidence, and must not be quoted as a track record in either direction.

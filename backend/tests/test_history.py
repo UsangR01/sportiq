@@ -220,3 +220,39 @@ async def test_asking_for_retrodictions_is_possible_but_never_the_default(
 
     assert default[0]["kind"] == "pre_match"
     assert explicit == [] or explicit[0]["kind"] == "retrodiction"
+
+
+@pytest.mark.asyncio
+async def test_reportable_and_conclusive_are_separate_questions(api_client, settled_fixtures):
+    """Pre-registered in spec §9.5, after the single flag proved ambiguous in the dangerous
+    direction: it read as "this number is trustworthy" when it only meant "big enough to print".
+
+    A metric is routinely reportable AND inconclusive at once — that is the normal state for
+    this product today, and a UI that cannot express it will imply a verdict that the sample
+    does not support."""
+    summary = (await api_client.get("/history/summary")).json()[0]
+
+    assert "sufficient_sample" in summary  # safe to DISPLAY
+    assert "conclusive" in summary  # safe to ACT on
+    # The seeded sample is tiny, so it must fail both rather than either.
+    assert summary["sufficient_sample"] is False
+    assert summary["conclusive"] is False
+
+
+def test_the_reportable_threshold_matches_the_pre_registration():
+    """MIN_REPORTABLE_N is anchored to interval width (§9.4), not to any measured result: 93 is
+    the smallest n whose 95% Wilson interval is narrower than 20 points at p=0.5.
+
+    Pinned because the value is meaningful, not arbitrary — someone lowering it to make a
+    sparse league reportable would be reintroducing exactly the failure the spec forbids."""
+    import math
+
+    from app.history.router import MIN_REPORTABLE_N
+
+    def width(n, p=0.5, z=1.96):
+        d = 1 + z * z / n
+        return 2 * z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+
+    assert MIN_REPORTABLE_N == 93
+    assert width(MIN_REPORTABLE_N) <= 0.20
+    assert width(MIN_REPORTABLE_N - 1) > 0.20  # genuinely the smallest such n

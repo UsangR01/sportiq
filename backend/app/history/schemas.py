@@ -67,8 +67,12 @@ class HistorySummary(BaseModel):
     # being claimed, the number cannot settle the question either way.
     detectable_effect: float
     # False when settled_fixtures < MIN_REPORTABLE_N. Consumers should render "not enough data"
-    # rather than a percentage.
+    # rather than a percentage. Safe to DISPLAY.
     sufficient_sample: bool
+    # Safe to ACT on: the sample can detect the pre-registered edge threshold (spec §9.2).
+    # A metric is routinely reportable AND inconclusive at the same time — that is the normal
+    # state today, and the UI must be able to say so rather than implying a verdict.
+    conclusive: bool
     # Predictions excluded because their provenance could not be established — see
     # PredictionKind.UNKNOWN. Reported rather than hidden so the denominator stays auditable.
     excluded_unknown_provenance: int
