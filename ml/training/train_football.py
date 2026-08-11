@@ -70,6 +70,7 @@ load_dotenv(BACKEND_DIR / ".env")
 
 import joblib  # noqa: E402
 import mlflow  # noqa: E402
+import optuna  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import xgboost as xgb  # noqa: E402
@@ -177,6 +178,44 @@ RANDOM_SEED = 20260811
 # is an aggressive configuration for ~16k rows. They are pinned at their current effective
 # values so this retrain is a like-for-like reproduction of the served model rather than a
 # silent change, and so a tuning pass has an explicit starting point to move FROM.
+# Optuna trials for Layer 2. Matches train_nba.py/train_tennis.py, which have always tuned
+# while football — the flagship 18-league model — never did. 50 is cheap here because the
+# expensive part of a run is assembling features from the game log, not fitting: the search
+# reuses one already-built training matrix, so a trial is a few seconds.
+#
+# SCOPED TO LAYER 2 ON PURPOSE. It is the estimator that accuracy and RPS actually measure.
+# Layer 1's Poisson regressors feed it and also drive the Over/Under market, so they need a
+# different objective (Poisson deviance, not 1X2 RPS) and are a separate follow-up rather than
+# something to fold in silently here.
+N_OPTUNA_TRIALS = 50
+
+
+# Tuned against VALIDATION RPS, never accuracy and never the test split.
+#   - RPS over accuracy because this project already holds RPS to be the better 3-way metric
+#     (it rewards being close, and a home/draw miss is not a home/away miss), and because
+#     accuracy on a 3-way market moves in coarse single-fixture steps.
+#   - Validation, because the test season is the honest read and tuning against it would make
+#     every number downstream self-graded.
+def _optuna_objective(trial, X_train, y_train, X_val, y_val) -> float:
+    params = {
+        "n_estimators": trial.suggest_int("n_estimators", 50, 400),
+        "max_depth": trial.suggest_int("max_depth", 2, 6),
+        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+        "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+        "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
+        "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
+    }
+    model = xgb.XGBClassifier(
+        objective="multi:softprob", num_class=3, random_state=RANDOM_SEED, **params
+    )
+    model.fit(X_train, y_train)
+    probs = model.predict_proba(X_val)
+    return float(
+        np.mean([ranked_probability_score(probs[i], int(y_val.iloc[i])) for i in range(len(y_val))])
+    )
+
+
 XGB_COMMON = {
     "n_estimators": 200,
     "max_depth": 4,
@@ -688,7 +727,24 @@ async def main_async() -> None:
     y_test = test_df["label"]
 
     # --- Layer 2: 1X2 classifier ------------------------------------------------------------
-    layer2_model = xgb.XGBClassifier(objective="multi:softprob", num_class=3, **XGB_COMMON)
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    # Seeded sampler: without it the search itself is the unreproducible step, which would
+    # undo the point of pinning every estimator's seed.
+    study = optuna.create_study(
+        direction="minimize", sampler=optuna.samplers.TPESampler(seed=RANDOM_SEED)
+    )
+    study.optimize(
+        lambda trial: _optuna_objective(trial, X_train_l2, y_train, X_val_l2, y_val),
+        n_trials=N_OPTUNA_TRIALS,
+    )
+    print(f"Optuna best validation RPS={study.best_value:.4f} params={study.best_params}")
+
+    layer2_model = xgb.XGBClassifier(
+        objective="multi:softprob",
+        num_class=3,
+        random_state=RANDOM_SEED,
+        **study.best_params,
+    )
     layer2_model.fit(X_train_l2, y_train)
 
     val_raw = layer2_model.predict_proba(X_val_l2)
@@ -839,6 +895,10 @@ async def main_async() -> None:
         mlflow.log_param("train_seasons", ",".join(str(s) for s in TRAIN_SEASONS))
         mlflow.log_param("val_season", VAL_SEASON)
         mlflow.log_param("test_season", TEST_SEASON)
+        mlflow.log_param("n_optuna_trials", N_OPTUNA_TRIALS)
+        mlflow.log_param("random_seed", RANDOM_SEED)
+        for key, value in study.best_params.items():
+            mlflow.log_param(f"layer2_{key}", value)
         mlflow.log_metric("test_accuracy", accuracy)
         mlflow.log_metric("test_rps", rps)
         mlflow.log_metric("baseline_accuracy", baseline_accuracy)
