@@ -58,3 +58,24 @@ def test_the_snapshot_task_is_actually_scheduled():
     entry existing. It is asserted by name because its absence is silent."""
     scheduled = {entry["task"] for entry in celery_app.conf.beat_schedule.values()}
     assert "app.workers.snapshot_picks.snapshot_shown_picks" in scheduled
+
+
+def test_tennis_has_two_odds_schedules_at_different_cadences():
+    """The two tennis odds providers cost completely different things, so they cannot share a
+    schedule:
+
+        BallDontLie   free (600 req/MINUTE) but prices few matches   -> hourly
+        TheRundown    metered (5,000 req/MONTH) but far broader      -> 2-hourly
+
+    Collapsing them onto one entry would either drag the free, hourly refresh down to the
+    metered cadence — the six-hour staleness gap this closes — or push the metered one to
+    ~1,440 calls/month, which does not fit alongside football's expected ~3,600.
+    """
+    schedule = celery_app.conf.beat_schedule
+    free = schedule["ingest-tennis-odds-hourly"]
+    metered = schedule["ingest-tennis-rundown-odds-every-2-hours"]
+
+    assert free["task"] != metered["task"]
+    assert float(metered["schedule"]) == 2 * 60 * 60.0
+    # The metered job must never run more often than the free one.
+    assert float(metered["schedule"]) > float(free["schedule"])

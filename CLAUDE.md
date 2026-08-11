@@ -473,6 +473,50 @@ code changes without a restart**, and the symptom is never an error — it looks
 didn't take". Restart both after any worker/adapter change before concluding anything from live
 data.
 
+## Why a card shows no odds — two different causes, neither a bug
+
+Diagnosed 2026-08-11 from a real report ("why are there no odds in most of the cards?").
+
+**Football: the 3-day odds lookahead.** `ODDS_LOOKAHEAD_DAYS = 3` fetches odds only for
+fixtures within three days, because querying the whole calendar once exhausted TheRundown's
+monthly quota in about 90 minutes. Measured at the time of the report, every priced upcoming
+football fixture sat in the day 3-4 band (9 of 12) and everything beyond had none — and there
+were **no** football fixtures inside three days at all, the leagues being between rounds. Cards
+fill as fixtures come into range; nothing is broken.
+
+**Tennis: a refresh-cadence gap between two providers with very different economics.**
+
+    BallDontLie   free (600 req/MINUTE, it is also the fixtures provider)   4 matches priced
+    TheRundown    metered (5,000 req/MONTH)                                31 ATP events, all
+                                                                           31 unmasked
+
+Both figures measured live on the same day, against 60 of our fixtures in window. The hourly
+tennis job deliberately used BallDontLie only, so TheRundown's much broader coverage arrived
+solely on the shared **6-hourly** run — leaving a fixture that appeared or got priced in
+between showing no odds for up to six hours. Fixed by giving TheRundown its own **2-hourly**
+tennis job (`ingest_tennis_rundown_odds`) rather than folding it into the hourly one: at ~2
+calls per run that is ~720 calls/month, where hourly would be ~1,440 and would not fit
+alongside football's expected ~3,600 once the European seasons open. A manual refresh took one
+day's coverage from **4 of 28 fixtures to 24 of 28**.
+
+**Adding odds makes the feed SMALLER, and that is correct.** The same day's feed went 8
+fixtures to 4, because `min_odds` can only apply where a price exists. The model's tennis
+favourites sit around 0.70 and price near 1.35-1.45, below a 1.50 floor — so before, those
+cards showed precisely *because* the filter silently could not apply.
+
+**Three confident theories died on measurement here, which is the point of writing it down:**
+- "Tennis was never mapped to TheRundown" — **wrong**, `atp: 38`/`wta: 39` were already in
+  `_RUNDOWN_SPORT_IDS`. Caught by `ruff` as a duplicate dict key when the mapping was added
+  again; the 4→24 gain came from running the ingest, not from any code change.
+- "Cross-provider matching is broken for tennis" — **wrong**. Both providers use full player
+  names, 24 of 31 events matched on the exact player pair, and the 24-hour tolerance absorbs
+  the placeholder midnight kickoff many tennis fixtures carry. The misses are doubles, which
+  are not ingested as fixtures.
+- "Beat lost its schedule state across restarts" — **wrong**. `celerybeat-schedule` persists
+  `last_run_at`, and every entry had run recently.
+
+---
+
 ## Measuring whether the predictions work
 
 Spec: `docs/history-metrics-spec.md`, written **before** the endpoint was touched so its shape

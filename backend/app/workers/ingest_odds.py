@@ -278,25 +278,33 @@ async def _ingest_odds() -> None:
             await _ingest_odds_for_league(sport, league)
 
 
-async def _ingest_tennis_odds() -> None:
-    """Refresh tennis odds from BallDontLie ONLY, which costs nothing against the odds quota.
+async def _ingest_tennis_odds(adapters: list | None = None) -> None:
+    """Refresh tennis odds ahead of the shared 6-hourly run, which is too slow for this sport.
 
-    The main odds job is pinned to 6 hours by TheRundown's monthly allowance (see
-    celery.py). That cadence is wrong for tennis specifically: books price a match close to
-    its start and new fixtures appear daily, so a six-hour gap routinely left genuinely
-    priced matches showing no odds at all on the card — the symptom that prompted this.
+    Books price a tennis match close to its start and new fixtures appear daily, so a six-hour
+    gap routinely left genuinely priced matches showing no odds on the card. Two jobs feed this
+    function, deliberately at different cadences, because the two providers have very different
+    costs and very different coverage:
 
-    BallDontLie is not subject to that constraint. It is the tennis fixtures provider too, so
-    its GOAT allowance is 600 requests/MINUTE rather than 5,000/month, and one refresh costs a
-    couple of calls. Hourly here is therefore free in the only sense that matters.
+      BallDontLie (hourly)      free — it is also the tennis fixtures provider, so its GOAT
+                                allowance is 600 requests/MINUTE, and one refresh costs a
+                                couple of calls. But it prices FEW matches: measured on a real
+                                day, 4 distinct matches against 60 of our fixtures in window.
 
-    TheRundown is deliberately NOT included: it still supplies tennis prices (and more books),
-    but on the shared 6-hourly run where its quota is accounted for. This job only adds
-    freshness it costs nothing to add.
+      TheRundown (2-hourly)     quota-metered at 5,000/MONTH, and far broader: 31 real ATP
+                                events that same day, ALL 31 with an unmasked moneyline —
+                                unusually good for this subscription.
+
+    THE CADENCE IS A QUOTA DECISION, NOT A DEFAULT. Tennis costs ~2 calls per run (one per
+    date with fixtures), so 2-hourly is ~720 calls/month. Hourly would be ~1,440, which does
+    not fit: football is expected to reach ~3,600/month once the European seasons open, and
+    5,040 would breach the cap. Two hours cuts the staleness window from six to two while
+    leaving real headroom. Revisit only with the football figure re-measured, not by feel.
     """
-    from app.adapters.balldontlie_tennis import BallDontLieTennisAdapter
+    if adapters is None:
+        from app.adapters.balldontlie_tennis import BallDontLieTennisAdapter
 
-    adapters = [BallDontLieTennisAdapter()]
+        adapters = [BallDontLieTennisAdapter()]
     async with async_session_factory() as db:
         sport = (
             await db.execute(select(Sport).where(Sport.slug == "tennis", Sport.active.is_(True)))
@@ -402,8 +410,23 @@ def capture_closing_odds() -> None:
 
 @celery_app.task(name="app.workers.ingest_odds.ingest_tennis_odds")
 def ingest_tennis_odds() -> None:
-    """Hourly, quota-free tennis odds refresh — see _ingest_tennis_odds."""
+    """Hourly, quota-free tennis odds refresh from BallDontLie — see _ingest_tennis_odds."""
     run_task(_ingest_tennis_odds())
+
+
+@celery_app.task(name="app.workers.ingest_odds.ingest_tennis_rundown_odds")
+def ingest_tennis_rundown_odds() -> None:
+    """2-hourly tennis odds from TheRundown, which carries far more matches than BallDontLie.
+
+    Separate from the task above because the two providers cost completely different things:
+    one is effectively free and the other is metered at 5,000 requests/month. Running them on
+    one schedule would force the cheap, broad-coverage refresh down to the expensive one's
+    cadence, which is exactly the gap this closes — see _ingest_tennis_odds for the arithmetic
+    behind two hours rather than one.
+    """
+    from app.adapters.therundown import TheRundownAdapter
+
+    run_task(_ingest_tennis_odds([TheRundownAdapter()]))
 
 
 @celery_app.task(name="app.workers.ingest_odds.ingest_odds")

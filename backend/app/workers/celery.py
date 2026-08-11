@@ -108,6 +108,13 @@ celery_app.conf.beat_schedule = {
         # just backs short favourites.
         "schedule": 900.0,
     },
+    # TheRundown's tennis coverage is far broader than BallDontLie's (31 priced ATP events
+    # against 4 on a measured day), but it is metered, so it gets its own slower schedule
+    # rather than riding the hourly free one. See _ingest_tennis_odds for the quota maths.
+    "ingest-tennis-rundown-odds-every-2-hours": {
+        "task": "app.workers.ingest_odds.ingest_tennis_rundown_odds",
+        "schedule": 2 * 60 * 60.0,
+    },
     "ingest-tennis-odds-hourly": {
         "task": "app.workers.ingest_odds.ingest_tennis_odds",
         # Tennis only, BallDontLie only. Exempt from the 6-hourly cadence above because it
