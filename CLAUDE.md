@@ -590,6 +590,46 @@ correctly left SCHEDULED**, and both reported fixtures now serve `status: postpo
 
 ---
 
+## A tennis tournament plays QUALIFYING before its advertised start date
+
+Found 2026-08-11 from "the app is not updating — completed games and live games".
+
+`/tournaments` gives `start_date` for the MAIN DRAW. Qualifying runs before it, those matches
+are real and get ingested, and the two workers disagreed about the window in a way that trapped
+them one-way:
+- `ingest_fixtures` looks **7 days** ahead → Cincinnati Open (advertised 08-13..08-23) is in
+  range → its 24 same-day qualifying matches were ingested.
+- `ingest_live_scores` looks **±1 day** → the tournament is NOT in range → not one of those
+  fixtures could ever be refreshed.
+
+Nothing errored and nothing was logged, because no request was ever made for them.
+
+`TOURNAMENT_WINDOW_PAD_DAYS = 3` in `balldontlie_tennis.py`, **measured rather than guessed** —
+the provider's own dates against the earliest match we hold:
+
+    Cincinnati Open          advertised 08-13   first match 08-11   2 days early
+    National Bank Open       advertised 08-02   first match 08-01   1
+    Mifel Tennis Open        advertised 07-27   first match 07-25   2
+    Mubadala Citi DC Open    advertised 07-27   first match 07-25   2
+    Millennium Estoril Open  advertised 07-20   first match 07-18   2
+
+Three clears the observed maximum with margin; the end is padded too, since a rain-delayed
+event can finish after its advertised close. Effect on the live API: payloads **108 → 133**,
+overlap with our own still-scheduled fixtures **4 → 19**.
+
+**Scope, because the fix is narrower than the report:** audited straight afterwards, all 28 of
+that day's tennis fixtures matched the provider exactly. The cards still showing no score were
+ones BallDontLie itself reported as `scheduled` with no sets. What this fixes is the class of
+failure where a finished qualifying match could never have been picked up at all — not provider
+lag, which we cannot do anything about.
+
+**Open, related gap**: a tennis fixture in `live` status shows `None-None` rather than a score,
+because `Outcome.home_score`/`away_score` are SETS WON and a match inside its first set has no
+completed set yet. Correct but unhelpful on the card; showing games-in-current-set would need
+the per-match `set_scores` array, which the live payload does carry.
+
+---
+
 ## Measuring whether the predictions work
 
 Spec: `docs/history-metrics-spec.md`, written **before** the endpoint was touched so its shape
