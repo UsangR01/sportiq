@@ -1275,6 +1275,37 @@ zero. **Neither Celery nor `uvicorn --reload` reliably picks up code changes —
 after touching an adapter, and be aware `--reload`'s child can outlive a killed parent and keep
 serving stale code from the port.**
 
+**Tooling now exists for this, and it should be used rather than rediscovered** — the failure
+above recurred twice more after being documented, so documentation alone demonstrably does not
+prevent it:
+- `scripts/dev_worker.py` (and `--beat`) runs the worker/beat with restart-on-change. Start
+  them this way rather than with a bare `celery` command; a hand-started process has nothing
+  protecting it.
+- `scripts/check_stale.py` compares every long-lived process against the files on disk and
+  exits non-zero if any is stale, so it can gate a verification step instead of being read by
+  eye. **It covers beat as of 2026-08-11** — previously only the worker published a
+  fingerprint, so a stale SCHEDULER reported "ok". That blind spot was where the damage was:
+  `snapshot_picks.py` and its `beat_schedule` entry were written three hours after beat was
+  launched, so the running scheduler held a schedule with no snapshot entry and never
+  dispatched it. Nothing errored. A stale WORKER applies old logic to work it receives; a
+  stale BEAT never dispatches the work at all, which is quieter and worse. Immediately after
+  it was wired, this same check caught `uvicorn --reload` silently stale again.
+- `backend/tests/test_beat_liveness.py` asserts every scheduled task belongs to a module the
+  worker actually imports (checked against `include`, since `celery_app.tasks` is empty in a
+  plain pytest process), and pins the snapshot entry by name.
+
+**Sentry now covers the worker and beat, not just the API** (`app/core/observability.py`,
+2026-08-11). It had only ever been initialised in `create_app()`, which is backwards for this
+project: the API fails loudly in front of a user, while every silent failure listed above
+happened in a worker and was unreportable. `monitor_beat_tasks=True` (beat only) registers each
+`beat_schedule` entry as a Sentry cron monitor, so a scheduled task that *stops arriving* is
+alerted on — the one failure ordinary error reporting cannot catch, since it produces no
+exception, no failed task and no log line. Events carry `component` and the loaded
+`code_fingerprint`, so a stack trace that cannot be reproduced from current source is
+identifiable as a stale process at a glance. **No `SENTRY_DSN_BACKEND` is provisioned yet**, so
+this is real and inert locally — same "correct code, no live credential" status as
+RotoWire/Expo push.
+
 A saturated rate limit poisons diagnosis in the same way: a background collection run using the
 450/minute budget makes an unrelated probe return empty `response` lists, which reads exactly
 like "this league has no data" (the false negative that nearly wrote off Liga I and the J1
