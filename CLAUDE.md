@@ -548,6 +548,48 @@ orientation fault would sit near zero).
 
 ---
 
+## Fixtures that vanish: neither provider ever says "cancelled"
+
+Reported 2026-08-11 ("one tennis game cancelled on Thursday and a football game cancelled
+yesterday ... still active on past days"). Both cards still showed a live-looking pick, with a
+probability and a price, on matches that were never played.
+
+**The providers do not mark these — the row simply DISAPPEARS.** Verified against both live
+APIs, which is what rules out the obvious fix of ingesting a status:
+- BallDontLie `/atp/v1/matches/{id}` returns **HTTP 404** for the cancelled ATP match
+  (Auger-Aliassime v Droguet, 2026-08-05). A second, older one behaves identically.
+- API-Football's fixture list for 2026-08-10 **omits** CFR Cluj v Universitatea Cluj entirely
+  while still returning the two Liga I matches that did happen.
+
+Ingest only ever updates fixtures it can still SEE, so a vanished one keeps `SCHEDULED`
+forever. Fixed with `ingest_live_scores._mark_abandoned_fixtures`, a DB-only sweep (no API
+calls) on the existing 5-minute beat. It moves them to **POSTPONED**, which `FixtureStatus`
+already documents as the shared bucket for postponed/cancelled/abandoned/suspended and which
+already suppresses `best_pick`/`all_market_picks` and renders a neutral badge — so no new enum
+value, no migration, and no mobile change was needed.
+
+**Two thresholds, and the second one is the whole difficulty.** A tennis fixture whose provider
+gives no `scheduled_time` is stored at midnight with `kickoff_is_estimated`, so "the kickoff has
+passed" is true from the first second of the day for a match that may not start until late
+evening. One clock for both would retire most of a live tournament every morning — removing real
+picks users could act on, which is worse than the bug being fixed.
+
+    ABANDONED_AFTER_HOURS            = 12   real kickoff time known
+    ABANDONED_AFTER_HOURS_ESTIMATED  = 48   placeholder midnight
+
+12 rather than 24 because live scores are polled every 5 minutes and a played match records a
+`FixtureLiveState` within minutes, so an evening fixture that never happened is corrected by the
+next morning. The risk accepted — mislabelling a match we failed to poll for 12 straight hours —
+is self-correcting: `ingest_fixtures` backfills 7 days, so the fixture is re-seen and its real
+status restored. Guarded further by requiring no `FixtureLiveState` (never observed underway)
+and no `Outcome` (never settled).
+
+Live result: 3 tennis + 1 football fixture retired, **21 of 21 of that day's Time-TBC fixtures
+correctly left SCHEDULED**, and both reported fixtures now serve `status: postponed` with
+`best_pick: null`.
+
+---
+
 ## Measuring whether the predictions work
 
 Spec: `docs/history-metrics-spec.md`, written **before** the endpoint was touched so its shape

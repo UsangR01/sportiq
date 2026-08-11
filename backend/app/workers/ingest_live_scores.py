@@ -9,15 +9,16 @@ adapter method at all.
 """
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 
 from app.adapters.base import FixturePayload
 from app.adapters.factory import AdapterFactory
 from app.core.database import async_session_factory
-from app.fixtures.models import Fixture, FixtureStatus, Team
+from app.fixtures.models import Fixture, FixtureLiveState, FixtureStatus, Team
+from app.history.models import Outcome
 from app.sports.models import League, Sport
 from app.workers.celery import celery_app, run_task
 from app.workers.ingest_fixtures import _maybe_settle_outcome, _upsert_live_state
@@ -102,6 +103,90 @@ async def _ingest_live_scores_for_league(sport: Sport, league: League) -> None:
         await db.commit()
 
 
+# How long after kickoff a still-SCHEDULED fixture is treated as never having been played.
+#
+# Two thresholds because a placeholder kickoff carries no information about the real start.
+# Tennis fixtures whose provider gives no scheduled_time are stored at midnight and flagged
+# kickoff_is_estimated, so "the kickoff has passed" is true from the first second of the day
+# for a match that may not begin until late evening. Sweeping those on the same clock as a
+# real kickoff would mark most of a tournament abandoned every morning.
+# 12 hours, not 24: live scores are polled every 5 minutes and a played match records a
+# FixtureLiveState within minutes, so half a day of silence is already far beyond normal. It
+# also means an evening fixture that never happened is corrected by the next morning rather
+# than still showing an active pick a full day later, which is the symptom that was reported.
+# The risk it accepts — mislabelling a match we simply failed to poll for 12 straight hours —
+# is both unlikely and self-correcting: ingest_fixtures backfills 7 days of history, so the
+# fixture is re-seen and its real status restored.
+ABANDONED_AFTER_HOURS = 12
+ABANDONED_AFTER_HOURS_ESTIMATED = 48
+
+
+async def _mark_abandoned_fixtures() -> None:
+    """Retire fixtures that were scheduled, never played, and have quietly vanished.
+
+    NEITHER PROVIDER EMITS A CANCELLED STATUS FOR THESE — the row simply disappears, which is
+    why nothing caught them before. Verified against both live APIs: an ATP match cancelled on
+    2026-08-05 returns HTTP 404 from BallDontLie's /matches/{id}, and a Liga I fixture that
+    never happened on 2026-08-10 is absent from API-Football's list for that date, which still
+    returns the two matches that did. Ingest only ever updates fixtures it can still see, so a
+    vanished one keeps its SCHEDULED status forever.
+
+    The user-visible symptom is the reason this matters: days later the card still showed an
+    active pick with a probability and a price, on a match that was never played. FixtureStatus
+    already documents POSTPONED as the shared bucket for every non-live/non-scheduled provider
+    status (postponed/cancelled/abandoned/suspended), and it already suppresses best_pick and
+    renders a neutral badge, so these belong in it — no new status, no migration, and the
+    display behaviour the report asked for comes for free.
+
+    Deliberately conservative, because wrongly retiring a real upcoming fixture removes a pick
+    a user could have acted on:
+      - only SCHEDULED fixtures, so nothing that reached LIVE or COMPLETED is touched;
+      - only with no FixtureLiveState row, i.e. never observed underway;
+      - only with no Outcome row, i.e. never settled;
+      - only well past kickoff, on the two thresholds above.
+
+    Reversible by design. If the fixture reappears in the provider's feed — a postponement that
+    gets rescheduled — ingest_fixtures upserts it by external_id and sets its status from the
+    payload again, which moves it straight back out of POSTPONED.
+    """
+    now = datetime.now(UTC)
+    async with async_session_factory() as db:
+        stale = (
+            (
+                await db.execute(
+                    select(Fixture).where(
+                        Fixture.status == FixtureStatus.SCHEDULED,
+                        ~select(FixtureLiveState.fixture_id)
+                        .where(FixtureLiveState.fixture_id == Fixture.id)
+                        .exists(),
+                        ~select(Outcome.id).where(Outcome.fixture_id == Fixture.id).exists(),
+                        or_(
+                            and_(
+                                Fixture.kickoff_is_estimated.is_(True),
+                                Fixture.kickoff_utc
+                                < now - timedelta(hours=ABANDONED_AFTER_HOURS_ESTIMATED),
+                            ),
+                            and_(
+                                Fixture.kickoff_is_estimated.is_(False),
+                                Fixture.kickoff_utc < now - timedelta(hours=ABANDONED_AFTER_HOURS),
+                            ),
+                        ),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not stale:
+            return
+        for fixture in stale:
+            fixture.status = FixtureStatus.POSTPONED
+        await db.commit()
+        logger.info(
+            "Marked %d fixture(s) POSTPONED: scheduled, never played, past kickoff", len(stale)
+        )
+
+
 async def _ingest_live_scores() -> None:
     async with async_session_factory() as db:
         sports = (await db.execute(select(Sport).where(Sport.active.is_(True)))).scalars().all()
@@ -139,6 +224,10 @@ async def _ingest_live_scores() -> None:
                     league.slug,
                     exc,
                 )
+
+    # After the polling pass, so a fixture that just reported a score this cycle is already
+    # LIVE/COMPLETED and can never be swept. Costs one query and no API calls.
+    await _mark_abandoned_fixtures()
 
 
 @celery_app.task(name="app.workers.ingest_live_scores.ingest_live_scores")
