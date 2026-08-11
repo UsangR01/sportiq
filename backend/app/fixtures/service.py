@@ -37,6 +37,52 @@ async def get_or_create_team(
     return team
 
 
+def name_tokens(value: str) -> frozenset[str]:
+    """Lowercased word set, so ordering and capitalisation stop mattering."""
+    return frozenset(part for part in value.casefold().replace("-", " ").split() if part)
+
+
+async def _find_team_by_name_variant(db: AsyncSession, base_query, name: str) -> Team | None:
+    """Resolve a PERSON whose name the two providers spell differently.
+
+    Only used for tennis, and only after an exact match has already failed. Clubs do not have
+    these problems; people do. All four cases below are real, measured on one ATP day where
+    every one of them cost a fixture its odds even though the price was sitting in the feed:
+
+        Soonwoo Kwon      vs  SoonWoo Kwon              capitalisation
+        Yibing Wu         vs  Wu Yibing                 family name first
+        Yunchaokete Bu    vs  Bu Yunchaokete            family name first
+        Coleman Wong      vs  Chak Lam Coleman Wong     extra given names
+
+    The rule is a token SET comparison — equal sets, or one contained in the other — which
+    handles ordering and extra given names together. It requires at least TWO shared tokens,
+    which is what keeps it from being reckless: a bare surname would otherwise match every
+    player who shares it, and "Alexander Zverev" against "Mischa Zverev" shares only one token
+    and is correctly refused.
+
+    Ambiguity returns None, never a guess. Attaching one player's price to another is far worse
+    than showing no price — the failure this codebase already hit once, showing a 1.17 favourite
+    at 8.00."""
+    wanted = name_tokens(name)
+    if len(wanted) < 2:
+        return None  # a single token cannot clear the two-shared-token bar
+
+    # Narrowed in SQL by the longest token before comparing sets in Python, so this never
+    # loads the whole player table — tennis has thousands of Team rows.
+    longest = max(wanted, key=len)
+    candidates = (
+        (await db.execute(base_query.where(Team.short_name.ilike(f"%{longest}%")))).scalars().all()
+    )
+
+    matches = []
+    for team in candidates:
+        theirs = name_tokens(team.short_name or team.name or "")
+        shared = wanted & theirs
+        if len(shared) >= 2 and (wanted <= theirs or theirs <= wanted):
+            matches.append(team)
+    return matches[0] if len(matches) == 1 else None
+
+
 async def find_fixture_by_abbreviations_and_time(
     db: AsyncSession,
     sport_id,
@@ -45,6 +91,7 @@ async def find_fixture_by_abbreviations_and_time(
     kickoff_utc: datetime,
     tolerance_hours: int = 24,
     league_id=None,
+    allow_name_variants: bool = False,
 ) -> Fixture | None:
     """Matches an odds-provider event to one of our existing fixtures by team short_name
     (abbreviation) plus a kickoff-time window — the odds provider (always TheRundown, per
@@ -76,9 +123,22 @@ async def find_fixture_by_abbreviations_and_time(
 
     home_teams = (await db.execute(home_query)).scalars().all()
     away_teams = (await db.execute(away_query)).scalars().all()
-    if len(home_teams) != 1 or len(away_teams) != 1:
+    home_team = home_teams[0] if len(home_teams) == 1 else None
+    away_team = away_teams[0] if len(away_teams) == 1 else None
+
+    if allow_name_variants and (home_team is None or away_team is None):
+        # Opt-in, and off for football/NBA on purpose: those match fine today, and a looser
+        # rule could only make them worse. See _find_team_by_name_variant.
+        base = select(Team).where(Team.sport_id == sport_id)
+        if league_id is not None:
+            base = base.where(Team.league_id == league_id)
+        if home_team is None:
+            home_team = await _find_team_by_name_variant(db, base, home_abbreviation)
+        if away_team is None:
+            away_team = await _find_team_by_name_variant(db, base, away_abbreviation)
+
+    if home_team is None or away_team is None:
         return None
-    home_team, away_team = home_teams[0], away_teams[0]
 
     window = timedelta(hours=tolerance_hours)
     matches = (

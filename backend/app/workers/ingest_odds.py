@@ -10,7 +10,7 @@ from app.adapters.factory import AdapterFactory
 from app.core.database import async_session_factory
 from app.core.redis import get_redis
 from app.fixtures.models import Fixture, FixtureStatus, Team
-from app.fixtures.service import find_fixture_by_abbreviations_and_time
+from app.fixtures.service import find_fixture_by_abbreviations_and_time, name_tokens
 from app.odds.models import Odds
 from app.sports.models import League, Sport
 from app.workers.celery import celery_app, run_task
@@ -25,7 +25,7 @@ ODDS_LOOKAHEAD_DAYS = 3
 
 
 async def _resolve_fixture(
-    db, sport_id, league_id, payload: OddsPayload
+    db, sport_id, league_id, payload: OddsPayload, sport_slug: str | None = None
 ) -> tuple[Fixture | None, OddsPayload]:
     """Three fast paths in order, then a last-resort fuzzy fallback:
     1. This odds-provider event was already matched to a fixture on a previous run
@@ -63,6 +63,11 @@ async def _resolve_fixture(
     if payload.kickoff_utc is None:
         return None, payload
 
+    # Tennis competitors are PEOPLE, and the two providers spell their names differently
+    # (order reversed, extra given names, capitalisation). Clubs do not have that problem, so
+    # the tolerance is opt-in per sport rather than loosened for everyone.
+    name_variants = sport_slug == "tennis"
+
     fixture = await find_fixture_by_abbreviations_and_time(
         db,
         sport_id,
@@ -70,6 +75,7 @@ async def _resolve_fixture(
         payload.away_team_short_name,
         payload.kickoff_utc,
         league_id=league_id,
+        allow_name_variants=name_variants,
     )
     if fixture is None:
         # Try the SAME pairing with the sides swapped.
@@ -86,6 +92,7 @@ async def _resolve_fixture(
             payload.home_team_short_name,
             payload.kickoff_utc,
             league_id=league_id,
+            allow_name_variants=name_variants,
         )
 
     if fixture is not None and fixture.odds_provider_external_id is None:
@@ -115,13 +122,30 @@ async def _orient_payload(db, fixture: Fixture, payload: OddsPayload) -> OddsPay
     if home_team is None:
         return payload
 
-    ours = (home_team.short_name or home_team.name or "").strip().casefold()
+    ours_raw = (home_team.short_name or home_team.name or "").strip()
+    ours = ours_raw.casefold()
     theirs_home = payload.home_team_short_name.strip().casefold()
     theirs_away = payload.away_team_short_name.strip().casefold()
     if not ours or theirs_home == theirs_away:
         return payload
+
+    # Compared as token SETS as well as literally, because the matcher now resolves fixtures
+    # whose names differ by ordering or extra given names ("Wu Yibing" for "Yibing Wu"). Those
+    # would fail a literal comparison here and silently keep the provider's orientation, which
+    # is the exact bug that once showed a 1.17 favourite at 8.00 — matching a fixture and then
+    # mis-orienting it is worse than never matching it.
+    ours_tokens = name_tokens(ours_raw)
+    home_tokens = name_tokens(payload.home_team_short_name)
+    away_tokens = name_tokens(payload.away_team_short_name)
+
+    def same_person(a: frozenset[str], b: frozenset[str]) -> bool:
+        return bool(a) and bool(b) and len(a & b) >= 2 and (a <= b or b <= a)
+
+    is_their_home = ours == theirs_home or same_person(ours_tokens, home_tokens)
+    is_their_away = ours == theirs_away or same_person(ours_tokens, away_tokens)
+
     # Only flip on a positive match for the AWAY side; an unrecognised name changes nothing.
-    if ours == theirs_home or ours != theirs_away:
+    if is_their_home or not is_their_away:
         return payload
     return replace(
         payload,
@@ -230,7 +254,7 @@ async def _ingest_odds_for_league(
         for payload in payloads:
             # Events for a game we haven't ingested fixtures for yet (or can't match) are
             # skipped rather than guessed — matches ingest_fixtures.py's dedupe philosophy.
-            fixture, payload = await _resolve_fixture(db, sport.id, league.id, payload)
+            fixture, payload = await _resolve_fixture(db, sport.id, league.id, payload, sport.slug)
             if fixture is None:
                 continue
             payload = await _orient_payload(db, fixture, payload)

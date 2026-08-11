@@ -504,6 +504,37 @@ fixtures to 4, because `min_odds` can only apply where a price exists. The model
 favourites sit around 0.70 and price near 1.35-1.45, below a 1.50 floor — so before, those
 cards showed precisely *because* the filter silently could not apply.
 
+**The last four fixtures needed PERSON-name matching** (`app/fixtures/service.py:name_tokens`,
+`_find_team_by_name_variant`). After the cadence fix, 24 of 28 were priced; the remaining four
+had prices in the feed and failed to match on spelling alone:
+
+    Soonwoo Kwon      vs  SoonWoo Kwon              capitalisation
+    Yibing Wu         vs  Wu Yibing                 family name first
+    Yunchaokete Bu    vs  Bu Yunchaokete            family name first
+    Coleman Wong      vs  Chak Lam Coleman Wong     extra given names
+
+The lookup was exact and case-sensitive (`Team.short_name == abbreviation`). It now falls back
+to a token-SET comparison — equal sets, or one contained in the other — which handles ordering
+and extra given names at once. **At least TWO shared tokens are required**, which is what stops
+it being reckless: a bare surname would otherwise match every player who shares it, and
+"Alexander Zverev" vs "Mischa Zverev" shares one token and is correctly refused. Ambiguity
+returns `None`, never a guess.
+
+**Opt-in per sport (`allow_name_variants`, default False), and that is deliberate** — these are
+person-name phenomena. Clubs do not reverse their word order or gain given names, football and
+NBA match fine today, and a looser rule could only make them worse. `_orient_payload` got the
+same tolerance, because a fixture that now MATCHES but is then mis-oriented is worse than one
+that never matched — that is the bug that once showed a 1.17 favourite at 8.00. Result: 28 of
+28 fixtures priced, with model and market agreeing on the favourite in 21 of 28 (a systematic
+orientation fault would sit near zero).
+
+> **TheRundown's `teams_normalized` array ORDER IS NOT home/away — read `is_home`.** Recorded
+> because it produced a false alarm that nearly became a "fix": comparing our stored prices
+> against `teams_normalized[0]` "showed" the favourite's price on the underdog. The real event
+> had `[0] = Francesco Maestrelli, is_home=False` and `[1] = Bu Yunchaokete, is_home=True`, so
+> `moneyline_home` belonged to Bu and the pipeline was right all along. The adapter reads the
+> flag; the verification script did not.
+
 **Three confident theories died on measurement here, which is the point of writing it down:**
 - "Tennis was never mapped to TheRundown" — **wrong**, `atp: 38`/`wta: 39` were already in
   `_RUNDOWN_SPORT_IDS`. Caught by `ruff` as a duplicate dict key when the mapping was added
