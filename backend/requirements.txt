@@ -45,7 +45,7 @@ requests>=2.32    # RotoWire calls (synchronous, run inside Celery worker)
 exponent-server-sdk>=2.1
 
 # Observability (TDD §11)
-sentry-sdk[fastapi]>=2.14
+sentry-sdk[fastapi,celery]>=2.14
 
 # Dev / test / lint
 pytest>=8.3

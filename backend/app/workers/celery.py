@@ -6,7 +6,7 @@ from typing import Any
 
 from celery import Celery
 from celery.schedules import crontab
-from celery.signals import beat_init, worker_ready
+from celery.signals import beat_init, celeryd_init, worker_ready
 
 from app.core.config import get_settings
 
@@ -208,3 +208,24 @@ def _publish_worker_code_version(sender=None, **_kwargs) -> None:
 @beat_init.connect
 def _publish_beat_code_version(sender=None, **_kwargs) -> None:
     _publish_code_version_to(BEAT_VERSION_KEY, "beat", sender)
+
+
+# Sentry is initialised from celeryd_init/beat_init rather than at module import, because this
+# module is also imported by the API, by tests and by one-off scripts — none of which should
+# register a worker's error reporter as a side effect of importing a task.
+#
+# celeryd_init fires in the worker's main process before it starts consuming, which is Sentry's
+# own documented hook for Celery and covers prefork children on Linux as well as the --pool=solo
+# worker used on Windows here.
+@celeryd_init.connect
+def _init_worker_sentry(**_kwargs) -> None:
+    from app.core.observability import WORKER, init_sentry
+
+    init_sentry(WORKER)
+
+
+@beat_init.connect
+def _init_beat_sentry(**_kwargs) -> None:
+    from app.core.observability import BEAT, init_sentry
+
+    init_sentry(BEAT)

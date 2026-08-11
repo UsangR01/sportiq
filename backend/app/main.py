@@ -7,6 +7,7 @@ from app.auth.router import router as auth_router
 from app.core.code_version import current_code_version, loaded_code_version
 from app.core.config import get_settings
 from app.core.limiter import limiter
+from app.core.observability import API, init_sentry
 from app.fixtures.router import router as fixtures_router
 from app.history.router import router as history_router
 from app.picks.router import router as picks_router
@@ -17,10 +18,7 @@ from app.users.router import router as users_router
 def create_app() -> FastAPI:
     settings = get_settings()
 
-    if settings.sentry_dsn_backend:
-        import sentry_sdk
-
-        sentry_sdk.init(dsn=settings.sentry_dsn_backend)
+    init_sentry(API)
 
     app = FastAPI(title="SportIQ API")
 
