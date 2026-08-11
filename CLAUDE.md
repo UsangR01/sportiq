@@ -1464,9 +1464,36 @@ Two things worth knowing about verifying this:
   absence is NOT evidence Sentry is off — check `init_sentry(...)` directly, or capture a test
   event, rather than grepping the log.
 - **`keys.docx` holds TWO DSNs**: `SENTRY_DSN_BACKEND` (project 4511809720352849) and
-  `SENTRY_DSN_MOBILE` (project 4511809738440784, "sportiq-mobile"). **Mobile has no Sentry
-  wiring at all** — zero references in `mobile/package.json` or the app source — so that DSN is
-  currently unused. Real, unclosed gap, not a bug.
+  `SENTRY_DSN_MOBILE` (project 4511809738440784, "sportpiq-mobile"). **Mobile is now wired too**
+  — see below.
+
+**Mobile crash reporting** (`mobile/lib/errorReporting.ts`, 2026-08-11): `@sentry/react-native`
+initialised at MODULE level in `app/_layout.tsx`, not in a `useEffect` — an error thrown during
+the first render is exactly the blank-screen class worth reporting, and it happens before any
+effect could install a handler. Tracing off (`tracesSampleRate: 0`), `sendDefaultPii: false`,
+tagged with `component`/`app_version` and split by `environment` so development noise stays
+distinguishable from real crashes (both still send — a dev-only filter would let the wiring rot
+unnoticed).
+- **No Expo Go guard, deliberately unlike `lib/notifications.ts`.** `expo-notifications` throws
+  on IMPORT under Expo Go on Android, reaching RN's uncaught-error overlay even from inside a
+  try/catch, so it must be skipped entirely. `@sentry/react-native` detects Expo Go itself
+  (`utils/environment.ts:isExpoGo`) and degrades, logging "Offline caching, native errors
+  features are not available in Expo Go" while still capturing JS errors. Confirmed by reading
+  the installed SDK, not assumed.
+- **Under Expo Go this reports JS errors ONLY** — native crashes need a development/EAS build,
+  which this project has never set up.
+- **The DSN ships in the bundle via `EXPO_PUBLIC_SENTRY_DSN`, and that is correct.** A Sentry
+  DSN is write-only: it can submit events to one project and read nothing, which is why client
+  DSNs ship inside every web and mobile app that uses one. It is not a secret in the sense the
+  API keys are. Only the empty placeholder is committed; the value lives in gitignored
+  `mobile/.env`.
+- **Verified in a real browser, not by inspection**: the app renders with live data and zero
+  page errors; **no** Sentry traffic occurs while nothing is wrong (so "zero requests" proves
+  nothing on its own); forcing one unhandled error produces exactly one envelope to
+  `.../api/4511809738440784/envelope/`.
+- **Known gap**: the Expo config plugin warns `organization`/`project` are unset, so production
+  source maps will not upload and release stack traces would be minified. Moot until an EAS
+  build exists.
 
 A saturated rate limit poisons diagnosis in the same way: a background collection run using the
 450/minute budget makes an unrelated probe return empty `response` lists, which reads exactly
