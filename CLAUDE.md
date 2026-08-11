@@ -1419,6 +1419,28 @@ prevent it:
   worker actually imports (checked against `include`, since `celery_app.tasks` is empty in a
   plain pytest process), and pins the snapshot entry by name.
 
+**KILLING uvicorn BY COMMAND LINE DOES NOT WORK, and this is the mechanism behind the
+"`--reload`'s child can outlive a killed parent" warning above.** A reload child is spawned via
+multiprocessing, so its command line is
+
+    python.exe -c "from multiprocessing.spawn import spawn_main; spawn_main(parent_pid=...)"
+
+with **no `uvicorn` string in it**. Every `Where-Object { $_.CommandLine -like '*uvicorn*' }`
+kill therefore leaves the actual server running, holding port 8000 and serving whatever code it
+loaded. Measured 2026-08-11: two orphans (created 08:12 and 08:24, both parents long dead) kept
+answering `/health` with a fingerprint and git SHA from hours earlier, through four separate
+"restarts". `netstat` compounds the confusion by attributing the socket to the DEAD parent PIDs,
+so the owner list is a dead end. Find them by parent instead:
+
+```powershell
+Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'spawn_main' } |
+  Select-Object ProcessId, ParentProcessId, CreationDate
+```
+
+then kill by PID and confirm with `curl /health` that `stale` is false BEFORE trusting anything
+served from that port. `scripts/check_stale.py` catches this — it reported STALE correctly
+throughout — so run it after any restart rather than assuming the restart took.
+
 **Sentry now covers the worker and beat, not just the API** (`app/core/observability.py`,
 2026-08-11). It had only ever been initialised in `create_app()`, which is backwards for this
 project: the API fails loudly in front of a user, while every silent failure listed above
@@ -1428,8 +1450,23 @@ alerted on — the one failure ordinary error reporting cannot catch, since it p
 exception, no failed task and no log line. Events carry `component` and the loaded
 `code_fingerprint`, so a stack trace that cannot be reproduced from current source is
 identifiable as a stale process at a glance. **No `SENTRY_DSN_BACKEND` is provisioned yet**, so
-this is real and inert locally — same "correct code, no live credential" status as
-RotoWire/Expo push.
+this was real but inert until the DSN was provisioned.
+
+**`SENTRY_DSN_BACKEND` is now populated in `backend/.env` (2026-08-11).** The DSN had existed in
+`keys.docx` from the start — the gap was only that it had never been copied into the environment
+the app actually reads, so `backend/.env` carried the key with an empty value and
+`init_sentry` returned False. Verified end to end: `init_sentry` returns True, a labelled test
+event was accepted (`event_id` returned, transport flushed cleanly).
+
+Two things worth knowing about verifying this:
+- **The "Sentry initialised" INFO line does not appear in the uvicorn or celery logs**, because
+  both configure their own logging and our logger does not propagate to their handlers. Its
+  absence is NOT evidence Sentry is off — check `init_sentry(...)` directly, or capture a test
+  event, rather than grepping the log.
+- **`keys.docx` holds TWO DSNs**: `SENTRY_DSN_BACKEND` (project 4511809720352849) and
+  `SENTRY_DSN_MOBILE` (project 4511809738440784, "sportiq-mobile"). **Mobile has no Sentry
+  wiring at all** — zero references in `mobile/package.json` or the app source — so that DSN is
+  currently unused. Real, unclosed gap, not a bug.
 
 A saturated rate limit poisons diagnosis in the same way: a background collection run using the
 450/minute budget makes an unrelated probe return empty `response` lists, which reads exactly
