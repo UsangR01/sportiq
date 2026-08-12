@@ -35,6 +35,7 @@ celery_app = Celery(
         "app.workers.backfill_predictions",
         "app.workers.backfill_tennis_predictions",
         "app.workers.snapshot_picks",
+        "app.workers.check_market_signal",
     ],
 )
 
@@ -134,6 +135,12 @@ celery_app.conf.beat_schedule = {
     "ingest-injuries-every-30-minutes": {
         "task": "app.workers.ingest_injuries.ingest_injuries",
         "schedule": 1800.0,
+    },
+    # Weekly, because settled fixtures accumulate at roughly 90/week: more often re-reports the
+    # same number, less often sits on a met trigger. See check_market_signal.py.
+    "check-market-signal-triggers-weekly": {
+        "task": "app.workers.check_market_signal.check_market_signals",
+        "schedule": 7 * 24 * 60 * 60.0,
     },
     "snapshot-shown-picks-hourly": {
         "task": "app.workers.snapshot_picks.snapshot_shown_picks",

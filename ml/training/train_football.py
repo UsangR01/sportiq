@@ -85,6 +85,12 @@ from app.models_ml.football_features import (  # noqa: E402
 )
 from app.models_ml.league_baselines import compute_league_baselines  # noqa: E402
 from app.models_ml.markets import GOALS_LINES, over_under_probs  # noqa: E402
+from app.predictions.market_signal import (  # noqa: E402
+    MIN_CI_LOW,
+    MIN_N,
+    MIN_R,
+    pearson_with_ci,
+)
 from sklearn.isotonic import IsotonicRegression  # noqa: E402
 from sklearn.metrics import (  # noqa: E402
     accuracy_score,
@@ -882,6 +888,26 @@ async def main_async() -> None:
 
     # Honest before/after check on the real test set — same "report it straight, not spun
     # positively" convention as the corners-rolling-features MAE result already in CLAUDE.md.
+    # The SAME statistic the live trigger uses (app/predictions/market_signal.py), computed on
+    # the test set and reported every run. Deliberately the same function, not a reimplementation
+    # — a training-side and a serving-side correlation that drift apart is how a market gets
+    # re-admitted on evidence that does not match the bar that barred it.
+    #
+    # This is the test-set READ. It does NOT satisfy the trigger, which is defined on live
+    # settled predictions: the test split is a completed season with full feature vectors, while
+    # the live feed runs on far thinner ones, so the two are not interchangeable.
+    goals_r, goals_lo, goals_hi = pearson_with_ci(
+        (test_df["xg_home"] + test_df["xg_away"]).tolist(),
+        (test_df["home_goals"] + test_df["away_goals"]).astype(float).tolist(),
+    )
+    if goals_r is not None:
+        print(
+            f"goals_total signal (TEST SET): n={len(test_df)} r={goals_r:+.3f} "
+            f"95% CI [{goals_lo:+.3f}, {goals_hi:+.3f}] "
+            f"({goals_r**2:.1%} of variance) — live trigger needs n>={MIN_N}, "
+            f"r>={MIN_R}, CI low>{MIN_CI_LOW} on SETTLED predictions"
+        )
+
     xg_home_raw_mae = float(np.mean(np.abs(test_df["xg_home"] - test_df["home_goals"])))
     xg_home_calibrated_mae = float(
         np.mean(np.abs(xg_home_calibrator.predict(test_df["xg_home"]) - test_df["home_goals"]))
@@ -985,6 +1011,8 @@ async def main_async() -> None:
             mlflow.log_metric("flat_stake_roi_home_picks", flat_stake_roi)
         if corners_mae is not None:
             mlflow.log_metric("corners_test_mae", corners_mae)
+        if goals_r is not None:
+            mlflow.log_metric("goals_total_signal_r_test", goals_r)
         mlflow.log_metric("xg_home_raw_mae", xg_home_raw_mae)
         mlflow.log_metric("xg_home_calibrated_mae", xg_home_calibrated_mae)
         mlflow.log_metric("xg_away_raw_mae", xg_away_raw_mae)
