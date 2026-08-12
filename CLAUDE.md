@@ -575,7 +575,27 @@ evening. One clock for both would retire most of a live tournament every morning
 picks users could act on, which is worse than the bug being fixed.
 
     ABANDONED_AFTER_HOURS            = 12   real kickoff time known
-    ABANDONED_AFTER_HOURS_ESTIMATED  = 48   placeholder midnight
+    ABANDONED_AFTER_HOURS_ESTIMATED  = 30   placeholder midnight (24 + 6)
+
+**The estimated threshold was 48 and that was wrong three separate times**, each found by a
+user seeing a cancelled match still carrying a live-looking pick — most recently Toby Samuel v
+J.J. Wolf, dated 08-11 with a Time-TBC placeholder and still showing HOME 69% at 12:02 on the
+12th, 36 hours later.
+
+**48 was a guess; 30 is derived.** A placeholder is stored at midnight and means "some time on
+day D", so the last moment a real match could still be underway is the end of that day (24h)
+plus a late finish (6h). 48 allowed a full extra day AFTER the day had already ended, which is
+exactly the reported symptom: yesterday's cancelled game alive all through today.
+
+**The provider is no help here, which is why a time rule is unavoidable.** Checked live for
+that fixture: BallDontLie still reports it `scheduled` with no sets, 36 hours on. Unlike the
+earlier cases it does NOT 404, so "ask the provider" would have been a fix that fixed nothing.
+
+**`_warn_if_stale_fixtures_remain` now counts what the sweep leaves behind** and logs a WARNING
+(so it reaches Sentry). Every one of the three recurrences was invisible to us — nothing errors,
+nothing logs, the fixture just sits there looking normal, and a too-generous threshold is
+indistinguishable from a working sweep unless something counts the leftovers. Deliberately set
+a full day beyond the threshold so it flags a broken RULE rather than the grace period itself.
 
 12 rather than 24 because live scores are polled every 5 minutes and a played match records a
 `FixtureLiveState` within minutes, so an evening fixture that never happened is corrected by the

@@ -12,7 +12,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 import httpx
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 
 from app.adapters.base import FixturePayload
 from app.adapters.factory import AdapterFactory
@@ -118,7 +118,24 @@ async def _ingest_live_scores_for_league(sport: Sport, league: League) -> None:
 # is both unlikely and self-correcting: ingest_fixtures backfills 7 days of history, so the
 # fixture is re-seen and its real status restored.
 ABANDONED_AFTER_HOURS = 12
-ABANDONED_AFTER_HOURS_ESTIMATED = 48
+
+# 30, and it is DERIVED rather than picked. A placeholder kickoff is stored at midnight and
+# means "some time on day D", so the last moment a real match could still be underway is the
+# end of day D (24h) plus a late finish (6h). Anything still SCHEDULED after that was not
+# played on the day it claims.
+#
+# It was 48, which is 24 hours of slack AFTER the day already ended, and that is exactly the
+# bug reported three times: a Time-TBC fixture from yesterday sitting in the feed all through
+# today with a live-looking pick. The old value was a guess; this one follows from what the
+# placeholder represents.
+#
+# Safe because a revised estimate resets the clock: ingest accepts a corrected kickoff even
+# when the new one is also an estimate, so a fixture the provider moves to a later day is
+# re-dated rather than retired. And ingest_fixtures backfills 7 days, so a match we merely
+# failed to poll is re-seen and restored.
+ABANDONED_DAY_HOURS = 24
+ABANDONED_LATE_FINISH_GRACE_HOURS = 6
+ABANDONED_AFTER_HOURS_ESTIMATED = ABANDONED_DAY_HOURS + ABANDONED_LATE_FINISH_GRACE_HOURS
 
 
 async def _mark_abandoned_fixtures() -> None:
@@ -184,6 +201,47 @@ async def _mark_abandoned_fixtures() -> None:
         await db.commit()
         logger.info(
             "Marked %d fixture(s) POSTPONED: scheduled, never played, past kickoff", len(stale)
+        )
+
+    await _warn_if_stale_fixtures_remain()
+
+
+async def _warn_if_stale_fixtures_remain() -> None:
+    """Report fixtures the sweep should have caught and did not.
+
+    This exists because the sweep has now been wrong three times, each found by a user noticing
+    a cancelled match still carrying a live-looking pick. Every one of those was invisible to
+    us: nothing errors, nothing logs, the fixture simply sits there looking normal. A threshold
+    that is too generous is indistinguishable from a working sweep unless something counts what
+    is left over.
+
+    Deliberately generous — a full day beyond the estimated threshold — so this flags a broken
+    rule rather than re-flagging the grace period it is built on.
+    """
+    cutoff_hours = ABANDONED_AFTER_HOURS_ESTIMATED + 24
+    now = datetime.now(UTC)
+    async with async_session_factory() as db:
+        leftover = (
+            await db.execute(
+                select(func.count())
+                .select_from(Fixture)
+                .where(
+                    Fixture.status == FixtureStatus.SCHEDULED,
+                    Fixture.kickoff_utc < now - timedelta(hours=cutoff_hours),
+                    ~select(FixtureLiveState.fixture_id)
+                    .where(FixtureLiveState.fixture_id == Fixture.id)
+                    .exists(),
+                    ~select(Outcome.id).where(Outcome.fixture_id == Fixture.id).exists(),
+                )
+            )
+        ).scalar_one()
+    if leftover:
+        logger.warning(
+            "%d fixture(s) are still SCHEDULED more than %dh after kickoff with no live state "
+            "and no outcome — the abandoned-fixture sweep is not catching them. These show a "
+            "live pick on a match that was never played.",
+            leftover,
+            cutoff_hours,
         )
 
 

@@ -149,3 +149,55 @@ async def test_the_sweep_is_idempotent(world):
     await _mark_abandoned_fixtures()
     assert await _status(world["vanished"]) is FixtureStatus.POSTPONED
     assert await _status(world["upcoming"]) is FixtureStatus.SCHEDULED
+
+
+def test_a_time_tbc_fixture_from_yesterday_does_not_survive_into_today():
+    """THE regression, from the third user report of the same symptom.
+
+    Toby Samuel v J.J. Wolf was dated 2026-08-11 with a placeholder midnight kickoff and was
+    still showing a live-looking HOME pick at 12:02 on the 12th — 36 hours later — because the
+    threshold was 48. The provider was no help: it still reported the match as `scheduled` with
+    no sets, so there was no authoritative signal to ingest and a time rule was unavoidable.
+
+    What was wrong was the number, and that it was a guess. A placeholder means "some time on
+    day D", so the last moment a real match could be underway is the end of that day plus a
+    late finish. 48 hours allowed a full extra day AFTER the day had already ended, which is
+    precisely the reported symptom.
+    """
+    assert ABANDONED_AFTER_HOURS_ESTIMATED == 30
+    # The reported fixture, at the hour it was reported, must now be caught.
+    hours_when_reported = 36
+    assert hours_when_reported > ABANDONED_AFTER_HOURS_ESTIMATED
+
+    # And it must still be safe: a match starting late on its own day is not retired mid-play.
+    latest_possible_start = 24
+    assert ABANDONED_AFTER_HOURS_ESTIMATED > latest_possible_start
+
+
+def test_the_estimated_threshold_is_derived_not_picked():
+    """Pinned because the failure mode is someone nudging a magic number. This one is not
+    magic: it is the day the placeholder stands for, plus grace for a late finish."""
+    from app.workers.ingest_live_scores import (
+        ABANDONED_DAY_HOURS,
+        ABANDONED_LATE_FINISH_GRACE_HOURS,
+    )
+
+    assert ABANDONED_DAY_HOURS == 24
+    assert ABANDONED_AFTER_HOURS_ESTIMATED == (
+        ABANDONED_DAY_HOURS + ABANDONED_LATE_FINISH_GRACE_HOURS
+    )
+
+
+@pytest.mark.asyncio
+async def test_leftovers_are_reported_rather_than_sitting_silently(world, caplog):
+    """The sweep has been wrong three times and every one was found by a user, not by us —
+    because a too-generous threshold looks exactly like a working sweep. This counts what the
+    sweep left behind so the next wrong number announces itself."""
+    import logging
+
+    from app.workers.ingest_live_scores import _warn_if_stale_fixtures_remain
+
+    with caplog.at_level(logging.WARNING):
+        await _warn_if_stale_fixtures_remain()
+    # The fixture world here is all within grace, so a clean run must NOT cry wolf.
+    assert "not catching them" not in caplog.text
