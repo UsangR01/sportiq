@@ -650,6 +650,68 @@ the per-match `set_scores` array, which the live payload does carry.
 
 ---
 
+## "No odds on most tennis cards" was not an odds problem — the MATCHES did not exist
+
+Reported 2026-08-12 from a screenshot of ~30 Cincinnati cards showing a bare "HOME 84%" with no
+price. Every obvious suspect (cadence, quota, name matching, a stale worker) was wrong.
+
+**Odds coverage on real fixtures was 100%.** Measured against the live APIs:
+
+    upcoming SCHEDULED ATP fixtures    53
+      HTTP 200 from BallDontLie        20    <- 20 of 20 priced
+      HTTP 404 — the match is GONE     33    <- all carried a prediction
+
+The 33 were a provisional Cincinnati Round-of-128 draw the provider **published, withdrew and
+replaced**. Their ids form one contiguous block, and several pairings were simply wrong: we held
+Baez v Goffin, Moutet v McDonald and Ugo Carabelli v Nishikori, while the real matches are Baez v
+Dimitrov, Moutet v Hurkacz and Ugo Carabelli v Kecmanovic. No book had priced them because they
+were never going to be played.
+
+**`_mark_abandoned_fixtures` was structurally blind to this, which is why it is the fourth
+recurrence of a bug already "fixed" three times.** That sweep infers absence from ELAPSED TIME —
+12 hours past kickoff, 30 for a Time-TBC placeholder. These vanished while their kickoff was
+still in the FUTURE, so it would not have touched them until ~30 hours after a kickoff that never
+came, by which point they had already been the majority of a day's feed. Nudging the threshold
+again could never have fixed it; the clock is the wrong instrument.
+
+**`ingest_fixtures._reconcile_vanished_fixtures` uses the provider's own current list as POSITIVE
+evidence instead**, so it fires on the same ingest rather than waiting out a timer. It costs zero
+extra API calls — the payload is already in hand — and runs BEFORE the feature/prediction loop, so
+a withdrawn fixture never gets features computed or a prediction queued. Three guards, because the
+opposite error (retiring real upcoming fixtures) destroys picks users could act on:
+1. **An empty payload retires nothing.** A rate-limited fetch returns `[]`, which reads exactly
+   like "this league has no fixtures" — the same false negative that nearly wrote off Liga I and
+   the J1 League. There is no partial-payload case underneath: neither adapter swallows a
+   per-tournament or per-date error, so a failure propagates out of `fetch_fixtures` and this is
+   never reached.
+2. **Only kickoff DATES the provider actually reported on.** A date it returned nothing for is
+   not evidence of absence, and stays with the time-based sweep.
+3. Unchanged conservatism: SCHEDULED only, no `FixtureLiveState`, no `Outcome`.
+
+Reversible, like the time-based sweep — the update branch sets status straight from the payload,
+so a republished fixture leaves POSTPONED on the next ingest. Live result: **33 retired, 19 left,
+19 of 19 priced.**
+
+**The remaining feed is thin for a legitimate reason, and it is not this bug.** Of the 19 real
+fixtures only 2 survive to a headline pick: `MIN_EDGE_OVER_BASE_RATE = 0.05` against tennis's
+0.6217 home base rate means a home pick must clear ~0.672, and the model's favourites here sit at
+0.56-0.69. That guard working is what the near-uniform 82-96% wall of phantom cards was hiding.
+
+**Two things deliberately NOT done:**
+- **33 grey POSTPONED cards is arguably its own clutter.** A withdrawn draw entry is not the same
+  as a match a user cares about being called off, but `FixtureStatus` has one shared bucket by
+  design and inventing a second is a product decision, not a bug fix. Flagged, not taken.
+- **64 tennis fixtures carry 2 identical `Prediction` rows** (same version, same kind; 541 carry
+  one). Harmless today — confirmed nothing calls `scalar_one` on `Prediction`, so this is not the
+  `MultipleResultsFound` class that bit `TeamFeatures` — but it is real and unexplained.
+
+**A false negative nearly derailed this diagnosis, exactly as documented.** Three rapid probes at
+TheRundown returned `HTTP 200` with zero events for two of three dates, which reads as "the
+provider has no data for tomorrow". Re-run with 6-second pacing, the same dates returned 20 and 26
+events, all priced. Pace probes against this provider before believing an empty list.
+
+---
+
 ## An external critique of the model — checked, and largely right
 
 Reviewed 2026-08-11. Two claims, both verified against the code rather than accepted: the

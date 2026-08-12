@@ -1,5 +1,5 @@
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import httpx
 from sqlalchemy import delete, select
@@ -166,6 +166,94 @@ async def _maybe_settle_outcome(
             live_state.away_corners = away_corners
 
 
+def _utc_date(moment: datetime) -> date:
+    """The UTC calendar date of a kickoff, tolerating a naive value.
+
+    Rows written before the column was consistently tz-aware come back naive; treating those as
+    UTC matches how every writer here stores them.
+    """
+    if moment.tzinfo is None:
+        return moment.date()
+    return moment.astimezone(UTC).date()
+
+
+async def _reconcile_vanished_fixtures(
+    db: AsyncSession, sport: Sport, league: League, payloads: list[FixturePayload]
+) -> int:
+    """Retire fixtures the provider has STOPPED returning, using its own current list as proof.
+
+    THIS IS THE SAME FAILURE ingest_live_scores._mark_abandoned_fixtures exists for, caught by
+    the opposite kind of evidence, because that sweep structurally cannot see this case. It
+    infers absence from ELAPSED TIME — a fixture is retired once its kickoff is 12 hours past
+    (30 for a Time-TBC placeholder). A fixture that vanishes while its kickoff is still in the
+    FUTURE is therefore invisible to it, and stays a live-looking pick until the clock catches
+    up. Measured 2026-08-12: 33 of the 53 upcoming ATP fixtures returned HTTP 404 from
+    BallDontLie, every one of them carrying a prediction, all dated the following day. They
+    were a provisional Cincinnati Round-of-128 draw the provider withdrew and replaced — the
+    ids form one contiguous block, and several pairings were simply wrong (we held Baez v
+    Goffin; the real match is Baez v Dimitrov). The time-based sweep would not have touched
+    them until ~30 hours after a kickoff that had not happened yet, by which point they had
+    already been the majority of a day's feed.
+
+    Absence from the payload is a POSITIVE signal, not an inference, so it fires immediately.
+    Three guards keep it from becoming the more dangerous opposite error — retiring real
+    upcoming fixtures, which deletes picks a user could have acted on:
+
+      1. An EMPTY payload retires nothing. A rate-limited or failed fetch returns an empty
+         list that reads exactly like "this league has no fixtures", and CLAUDE.md already
+         records that false negative poisoning a diagnosis. There is no partial-payload case
+         to worry about underneath this: neither adapter swallows a per-tournament or per-date
+         error, so a failure propagates out of fetch_fixtures and this is never reached.
+      2. Only kickoff DATES the provider demonstrably reported on. A date it returned nothing
+         for is not evidence of absence, and is left to the time-based sweep as before.
+      3. The same conservative conditions as that sweep — SCHEDULED only, never observed
+         underway (no FixtureLiveState), never settled (no Outcome).
+
+    Reversible, like the time-based sweep: the update branch above sets status straight from
+    the payload, so a fixture that reappears moves back out of POSTPONED on the next ingest.
+    """
+    seen = {payload.external_id for payload in payloads}
+    if not seen:
+        return 0
+    covered_dates = {_utc_date(payload.kickoff_utc) for payload in payloads}
+
+    candidates = (
+        (
+            await db.execute(
+                select(Fixture).where(
+                    Fixture.sport_id == sport.id,
+                    Fixture.league_id == league.id,
+                    Fixture.status == FixtureStatus.SCHEDULED,
+                    Fixture.external_id.notin_(seen),
+                    ~select(FixtureLiveState.fixture_id)
+                    .where(FixtureLiveState.fixture_id == Fixture.id)
+                    .exists(),
+                    ~select(Outcome.id).where(Outcome.fixture_id == Fixture.id).exists(),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    gone = [f for f in candidates if _utc_date(f.kickoff_utc) in covered_dates]
+    if not gone:
+        return 0
+
+    for fixture in gone:
+        fixture.status = FixtureStatus.POSTPONED
+    await db.commit()
+    # WARNING, not INFO, so it reaches Sentry. Every previous instance of this class of bug was
+    # found by a user rather than by us, because nothing errors and nothing logs — the fixture
+    # simply sits there looking normal.
+    logger.warning(
+        "Retired %d fixture(s) for league=%s: still SCHEDULED but no longer in the provider's "
+        "own list for a date it did report on",
+        len(gone),
+        league.slug,
+    )
+    return len(gone)
+
+
 async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
     # NOTE: TDD §6.2 references a sports.data_source_slug column that isn't in the §2.1 schema
     # listing. Using sport.slug directly as the AdapterFactory key until that's reconciled.
@@ -271,6 +359,11 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
             await _upsert_live_state(db, fixture.id, payload)
             await _maybe_settle_outcome(db, fixture.id, payload, home_team, away_team, sport.slug)
         await db.commit()
+
+        # Runs BEFORE the feature/prediction loop below so a fixture that no longer exists is
+        # already POSTPONED by the time that loop selects its work — no features computed and
+        # no prediction queued for a match that is not going to be played.
+        await _reconcile_vanished_fixtures(db, sport, league, fixture_payloads)
 
         # Team feature vectors, computed at ingest time for not-yet-played fixtures (TDD
         # §2.3) — last 10 matches, xG, H2H via the stats adapter. Completed fixtures (now
