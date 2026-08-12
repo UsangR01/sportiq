@@ -697,13 +697,33 @@ fixtures only 2 survive to a headline pick: `MIN_EDGE_OVER_BASE_RATE = 0.05` aga
 0.6217 home base rate means a home pick must clear ~0.672, and the model's favourites here sit at
 0.56-0.69. That guard working is what the near-uniform 82-96% wall of phantom cards was hiding.
 
-**Two things deliberately NOT done:**
-- **33 grey POSTPONED cards is arguably its own clutter.** A withdrawn draw entry is not the same
-  as a match a user cares about being called off, but `FixtureStatus` has one shared bucket by
-  design and inventing a second is a product decision, not a bug fix. Flagged, not taken.
-- **64 tennis fixtures carry 2 identical `Prediction` rows** (same version, same kind; 541 carry
-  one). Harmless today — confirmed nothing calls `scalar_one` on `Prediction`, so this is not the
-  `MultipleResultsFound` class that bit `TeamFeatures` — but it is real and unexplained.
+**`fixtures.withdrawn` (Alembic `faa1ecc4c1ac`) then hid them, because correct was not the same
+as usable.** Screenshotting the fixed feed showed the real cost: 33 grey POSTPONED cards sitting
+ABOVE the day's two genuine picks. `FixtureStatus.POSTPONED` is deliberately one shared bucket,
+but it conflates two things a user experiences differently — a provider reporting PST/CANC means a
+REAL match was called off and is worth showing (users asked for exactly that), while a fixture
+that silently disappeared before kickoff was never a scheduled match at all. Only
+`_reconcile_vanished_fixtures` sets the flag; the provider-stated path never does, so hiding is
+scoped to the phantom case and `test_withdrawn_fixtures_hidden.py`'s second test guards precisely
+that (hiding on `status == POSTPONED` instead would silently undo a feature users asked for).
+- **The clearing half is the trap, and it lives in a different function.** A flag that can be set
+  but never cleared hides a fixture forever, and a withdrawn draw genuinely can be republished.
+  Ingest's update branch clears it whenever the provider lists the fixture again;
+  `test_ingest_fixtures.py::test_a_withdrawn_fixture_is_flagged_and_unflagged_by_the_real_ingest_path`
+  runs the full set → withdraw → republish round trip through the real worker rather than the
+  reconciliation in isolation.
+- **Hidden from the feed, not deleted** — `GET /fixtures/{id}` still serves them, so an existing
+  deep link or watchlist entry does not start 404ing because a provider reshuffled a draw.
+- **Tomorrow then rendered EMPTY at the default 1.50 odds floor, and that is correct.** The two
+  surviving picks price at 1.24 and 1.42 — short-priced favourites below the floor. The reporting
+  screenshot had the slider at 1.01, which is why they were visible there. An empty day is the
+  honest state of a card that previously looked full only because it was full of matches that did
+  not exist.
+
+**One thing deliberately NOT done: 64 tennis fixtures carry 2 identical `Prediction` rows** (same
+version, same kind; 541 carry one). Harmless today — confirmed nothing calls `scalar_one` on
+`Prediction`, so this is not the `MultipleResultsFound` class that bit `TeamFeatures` — but it is
+real and unexplained.
 
 **A false negative nearly derailed this diagnosis, exactly as documented.** Three rapid probes at
 TheRundown returned `HTTP 200` with zero events for two of three dates, which reads as "the

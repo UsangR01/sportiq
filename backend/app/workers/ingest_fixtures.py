@@ -241,6 +241,9 @@ async def _reconcile_vanished_fixtures(
 
     for fixture in gone:
         fixture.status = FixtureStatus.POSTPONED
+        # Distinct from a provider-stated postponement, which stays visible: this one was
+        # never a real scheduled match, so the feed hides it. See Fixture.withdrawn.
+        fixture.withdrawn = True
     await db.commit()
     # WARNING, not INFO, so it reaches Sentry. Every previous instance of this class of bug was
     # found by a user rather than by us, because nothing errors and nothing logs — the fixture
@@ -323,6 +326,11 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
                 new_status = FixtureStatus(payload.status)
                 if existing.status != new_status:
                     existing.status = new_status
+                # The provider is listing it again, so whatever caused it to be treated as
+                # withdrawn no longer holds. Clearing here is what makes _reconcile_vanished_
+                # fixtures reversible — a withdrawn draw CAN be republished, and a fixture that
+                # could never lose this flag would stay hidden from the feed forever.
+                existing.withdrawn = False
                 # Backfills tournament metadata onto fixtures ingested before these columns
                 # existed, without clobbering real values if a later payload omits them.
                 if payload.tournament_name is not None:

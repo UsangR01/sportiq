@@ -716,6 +716,13 @@ async def list_fixtures(
         raise HTTPException(422, detail=f"`line` is not applicable to market={market!r}")
 
     stmt = _fixture_query()
+    # A fixture the provider WITHDREW is hidden; one it explicitly called off is not. Both are
+    # POSTPONED, but they mean different things to a user: a called-off match was real and is
+    # worth telling them about, while a withdrawn one was never a scheduled match at all. The
+    # case this was built for produced 33 grey cards for a provisional tennis draw that never
+    # existed, burying the day's two genuine picks. Detail (`GET /fixtures/{id}`) still serves
+    # them, so an existing deep link does not break.
+    stmt = stmt.where(Fixture.withdrawn.is_(False))
     if sport_slug:
         stmt = stmt.where(Sport.slug == sport_slug)
     if league_slug:

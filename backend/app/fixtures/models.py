@@ -116,6 +116,25 @@ class Fixture(Base):
     # balldontlie_tennis.py:_match_kickoff_is_estimated.
     kickoff_is_estimated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    # Was this fixture WITHDRAWN by the provider rather than called off?
+    #
+    # POSTPONED is one shared bucket for every reason a match is not being played, which is the
+    # right call for display — but it conflates two things a user experiences very differently.
+    # A provider that explicitly reports PST/CANC is telling us a REAL scheduled match was
+    # called off, and that is worth showing. A fixture that silently disappears from the
+    # provider's list before its kickoff was, in the case this was built for, never a real
+    # scheduled match at all: BallDontLie published a provisional Cincinnati draw, withdrew it,
+    # and replaced it with different (and in several cases differently-paired) matches. Showing
+    # 33 grey "POSTPONED" cards for matches that never existed buried the day's two genuine
+    # picks underneath them.
+    #
+    # Set only by ingest_fixtures._reconcile_vanished_fixtures, and CLEARED whenever the
+    # provider lists the fixture again — a withdrawn draw can be republished, and a fixture
+    # that could never leave this flag would be hidden forever.
+    withdrawn: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, server_default="false"
+    )
+
     __table_args__ = (
         UniqueConstraint("sport_id", "external_id", name="uq_fixtures_sport_external_id"),
         UniqueConstraint(

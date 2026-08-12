@@ -751,3 +751,89 @@ async def test_ingest_fixtures_isolates_one_sports_unregistered_adapter(monkeypa
             )
             await db.execute(delete(Sport).where(Sport.id.in_([broken_sport.id, healthy_sport.id])))
             await db.commit()
+
+
+async def test_a_withdrawn_fixture_is_flagged_and_unflagged_by_the_real_ingest_path(monkeypatch):
+    """The full round trip for Fixture.withdrawn, through _ingest_fixtures_for_league itself.
+
+    The reconciliation is tested in isolation in test_vanished_fixtures_reconcile.py. What that
+    cannot cover is the CLEARING half, which lives in a different function (the update branch
+    of this worker) and is the trap: a fixture that can be flagged but never unflagged is
+    hidden from the feed forever, and a withdrawn draw genuinely can be republished.
+    """
+    kickoff = datetime.now(UTC) + timedelta(days=1)
+    async with async_session_factory() as db:
+        slug = f"test-sport-{uuid.uuid4().hex[:8]}"
+        sport = Sport(slug=slug, name="Test Sport", model_type="test", active=True)
+        db.add(sport)
+        await db.flush()
+        league = League(sport_id=sport.id, slug="wd-league", name="L", country="XX", tier=1)
+        db.add(league)
+        await db.commit()
+        await db.refresh(sport)
+        await db.refresh(league)
+
+    def payload(external_id, home, away):
+        return FixturePayload(
+            external_id=external_id,
+            league_external_id="wd-league",
+            home_team_external_id=home,
+            away_team_external_id=away,
+            kickoff_utc=kickoff,
+            season="2026",
+            home_team_name=f"Team {home}",
+            away_team_name=f"Team {away}",
+            status="scheduled",
+        )
+
+    kept = payload("fx-wd-kept", "10", "20")
+    withdrawn = payload("fx-wd-gone", "30", "40")
+
+    import app.adapters.factory as factory_module
+
+    def use(payloads):
+        monkeypatch.setattr(
+            factory_module.AdapterFactory, "get_stats_adapter", lambda s: FakeAdapter(payloads)
+        )
+
+    async def state(external_id):
+        async with async_session_factory() as db:
+            row = (
+                await db.execute(
+                    select(Fixture.status, Fixture.withdrawn).where(
+                        Fixture.external_id == external_id
+                    )
+                )
+            ).one()
+            return row[0], row[1]
+
+    try:
+        use([kept, withdrawn])
+        await _ingest_fixtures_for_league(sport, league)
+        assert await state("fx-wd-gone") == (FixtureStatus.SCHEDULED, False)
+
+        # The provider drops it from a date it still reports on — the reported case.
+        use([kept])
+        await _ingest_fixtures_for_league(sport, league)
+        assert await state("fx-wd-gone") == (FixtureStatus.POSTPONED, True)
+        # The fixture still listed must be untouched, or the sweep is worse than the bug.
+        assert await state("fx-wd-kept") == (FixtureStatus.SCHEDULED, False)
+
+        # Republished: it must come back, not stay invisible.
+        use([kept, withdrawn])
+        await _ingest_fixtures_for_league(sport, league)
+        assert await state("fx-wd-gone") == (FixtureStatus.SCHEDULED, False)
+    finally:
+        async with async_session_factory() as db:
+            ids = (
+                (await db.execute(select(Fixture.id).where(Fixture.sport_id == sport.id)))
+                .scalars()
+                .all()
+            )
+            if ids:
+                await db.execute(delete(TeamFeatures).where(TeamFeatures.fixture_id.in_(ids)))
+            await db.execute(delete(Fixture).where(Fixture.sport_id == sport.id))
+            await db.execute(delete(Team).where(Team.sport_id == sport.id))
+            await db.execute(delete(League).where(League.sport_id == sport.id))
+            await db.execute(delete(Sport).where(Sport.id == sport.id))
+            await db.commit()
