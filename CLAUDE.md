@@ -682,7 +682,31 @@ test): accuracy **0.4859 → 0.5052**, RPS **0.2152 → 0.2104**, and leagues wo
 is 0.3, with subsampling 0.88 and column sampling 0.63. A far more regularised model.
 - **Scoped to Layer 2 on purpose.** Layer 1's Poisson regressors feed it and also drive
   Over/Under, so they need a Poisson objective rather than 1X2 RPS. The O/U reliability buckets
-  came back unchanged, exactly as that scoping predicts. Tuning Layer 1 is the open follow-up.
+  came back unchanged, exactly as that scoping predicts.
+
+**5. Layer 1 tuned too — and this is where Over/Under finally moved.** Current model
+`football_xgb_v20260812080921`. Home and away tuned SEPARATELY (different targets, home goals
+run materially higher) against **validation Poisson deviance**, not 1X2 RPS: the objective has
+to match what the estimator does, and scoring count regressors by a downstream 1X2 metric would
+optimise them for Layer 2 while they also drive a market that never sees a 1X2 label.
+
+    xG MAE home        0.9907 -> 0.9723        away  0.8876 -> 0.8707
+    Brier under 1.5    0.1804 -> 0.1785        2.5   0.2469 -> 0.2442
+    Brier under 3.5    0.2126 -> 0.2096        4.5   0.1284 -> 0.1265
+    under-3.5 buckets  .621 .664 .723 .753  ->  .578 .647 .740   (wider spread)
+    under-4.5 buckets  .851 .801 .850 .914  ->  .645 .770 .859 .930
+
+**The under-4.5 line went from INVERTED to monotonic** (.851 then .801), and under-3.5's spread
+widened. Discrimination is the constraint repeatedly identified as binding on this market, and
+it is what improved — not calibration, which was already near zero.
+- **The 1X2 trade, stated straight**: accuracy 0.5052 -> 0.5034, about ten fixtures in 5,487,
+  while RPS improved 0.2104 -> 0.2097. Probabilistically flat-to-better, marginally worse on
+  hard accuracy. Ekstraklasa, the one league below its own baseline, went -0.3pp to -2.0pp.
+- **The OOF folds use the tuned Layer 1 config too.** Leaving them on the old settings would
+  train Layer 2 on xG from a different model than the one that ultimately serves it — a
+  train/serve mismatch introduced by the tuning itself.
+- **Corners regressors are deliberately still untuned** and their MAE is unchanged at 2.156,
+  which is the scoping working. They are the remaining follow-up.
 - Reproducibility re-verified with stochasticity now enabled: two runs, identical best params
   and identical test metrics.
 

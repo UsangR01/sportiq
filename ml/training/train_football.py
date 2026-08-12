@@ -86,7 +86,11 @@ from app.models_ml.football_features import (  # noqa: E402
 from app.models_ml.league_baselines import compute_league_baselines  # noqa: E402
 from app.models_ml.markets import GOALS_LINES, over_under_probs  # noqa: E402
 from sklearn.isotonic import IsotonicRegression  # noqa: E402
-from sklearn.metrics import accuracy_score, log_loss  # noqa: E402
+from sklearn.metrics import (  # noqa: E402
+    accuracy_score,
+    log_loss,
+    mean_poisson_deviance,
+)
 from sklearn.model_selection import KFold  # noqa: E402
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -188,6 +192,47 @@ RANDOM_SEED = 20260811
 # different objective (Poisson deviance, not 1X2 RPS) and are a separate follow-up rather than
 # something to fold in silently here.
 N_OPTUNA_TRIALS = 50
+
+
+# Layer 1 is tuned against VALIDATION POISSON DEVIANCE, not 1X2 RPS.
+#
+# The objective has to match what the estimator is actually doing. These are count regressors
+# predicting expected goals; scoring them by the downstream 1X2 metric would optimise them for
+# Layer 2's benefit while they ALSO drive the entire Over/Under market, which never sees a 1X2
+# label. Poisson deviance is the loss the model is already fitting, so tuning and fitting agree.
+#
+# Home and away are tuned separately rather than sharing one configuration. They are different
+# targets with different means — home goals run materially higher — and a single fit for both
+# would quietly favour whichever side has more signal.
+def _optuna_objective_layer1(trial, X_train, y_train, X_val, y_val) -> float:
+    params = {
+        "n_estimators": trial.suggest_int("n_estimators", 50, 400),
+        "max_depth": trial.suggest_int("max_depth", 2, 6),
+        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+        "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+        "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
+        "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
+    }
+    model = xgb.XGBRegressor(objective="count:poisson", random_state=RANDOM_SEED, **params)
+    model.fit(X_train, y_train)
+    # Deviance is undefined at zero, and a Poisson regressor can predict arbitrarily close to
+    # it; clipping keeps a single near-zero prediction from making the whole trial infinite.
+    preds = np.clip(model.predict(X_val), 1e-6, None)
+    return float(mean_poisson_deviance(y_val, preds))
+
+
+def _tune_layer1(label, X_train, y_train, X_val, y_val) -> dict:
+    study = optuna.create_study(
+        direction="minimize", sampler=optuna.samplers.TPESampler(seed=RANDOM_SEED)
+    )
+    study.optimize(
+        lambda trial: _optuna_objective_layer1(trial, X_train, y_train, X_val, y_val),
+        n_trials=N_OPTUNA_TRIALS,
+    )
+    print(f"Optuna layer1 {label}: best validation Poisson deviance={study.best_value:.4f}")
+    print(f"  params={study.best_params}")
+    return study.best_params
 
 
 # Tuned against VALIDATION RPS, never accuracy and never the test split.
@@ -594,10 +639,24 @@ async def main_async() -> None:
     X_test = test_df[feature_cols].astype(float)
 
     # --- Layer 1: Poisson expected-goals regressors ---------------------------------------
-    layer1_home_model = xgb.XGBRegressor(objective="count:poisson", **XGB_COMMON)
-    layer1_home_model.fit(X_train, train_df["home_goals"].astype(float))
-    layer1_away_model = xgb.XGBRegressor(objective="count:poisson", **XGB_COMMON)
-    layer1_away_model.fit(X_train, train_df["away_goals"].astype(float))
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    y_home_train = train_df["home_goals"].astype(float)
+    y_away_train = train_df["away_goals"].astype(float)
+    layer1_home_params = _tune_layer1(
+        "home", X_train, y_home_train, X_val, val_df["home_goals"].astype(float)
+    )
+    layer1_away_params = _tune_layer1(
+        "away", X_train, y_away_train, X_val, val_df["away_goals"].astype(float)
+    )
+
+    layer1_home_model = xgb.XGBRegressor(
+        objective="count:poisson", random_state=RANDOM_SEED, **layer1_home_params
+    )
+    layer1_home_model.fit(X_train, y_home_train)
+    layer1_away_model = xgb.XGBRegressor(
+        objective="count:poisson", random_state=RANDOM_SEED, **layer1_away_params
+    )
+    layer1_away_model.fit(X_train, y_away_train)
 
     # --- Corners-Poisson-regressors (Over/Under corners market, app/models_ml/markets.py) ---
     # Now trained on Layer 1's 21 features PLUS 4 corners-specific rolling ones
@@ -671,8 +730,16 @@ async def main_async() -> None:
         home_oof = np.zeros(len(X))
         away_oof = np.zeros(len(X))
         for fit_idx, held_idx in KFold(n_splits=OOF_FOLDS, shuffle=False).split(X):
-            fold_home = xgb.XGBRegressor(objective="count:poisson", **XGB_COMMON)
-            fold_away = xgb.XGBRegressor(objective="count:poisson", **XGB_COMMON)
+            # Same tuned configuration as the full-fit Layer 1. Using XGB_COMMON here while
+            # the real models are tuned would train Layer 2 on xG from a DIFFERENT model than
+            # the one that ultimately produces its inputs — a train/serve mismatch introduced
+            # by the tuning itself.
+            fold_home = xgb.XGBRegressor(
+                objective="count:poisson", random_state=RANDOM_SEED, **layer1_home_params
+            )
+            fold_away = xgb.XGBRegressor(
+                objective="count:poisson", random_state=RANDOM_SEED, **layer1_away_params
+            )
             fold_home.fit(X.iloc[fit_idx], y_home.iloc[fit_idx])
             fold_away.fit(X.iloc[fit_idx], y_away.iloc[fit_idx])
             home_oof[held_idx] = fold_home.predict(X.iloc[held_idx]).clip(min=0)
@@ -899,6 +966,10 @@ async def main_async() -> None:
         mlflow.log_param("random_seed", RANDOM_SEED)
         for key, value in study.best_params.items():
             mlflow.log_param(f"layer2_{key}", value)
+        for key, value in layer1_home_params.items():
+            mlflow.log_param(f"layer1_home_{key}", value)
+        for key, value in layer1_away_params.items():
+            mlflow.log_param(f"layer1_away_{key}", value)
         mlflow.log_metric("test_accuracy", accuracy)
         mlflow.log_metric("test_rps", rps)
         mlflow.log_metric("baseline_accuracy", baseline_accuracy)
