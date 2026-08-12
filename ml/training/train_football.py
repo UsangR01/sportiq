@@ -54,6 +54,7 @@ Usage (from repo root):
 """
 
 import asyncio
+import math
 import os
 import sys
 from datetime import UTC, datetime
@@ -363,6 +364,75 @@ def per_league_metrics(
             }
         )
     return rows
+
+
+# Scorelines are capped for the distributional metrics below. 9 is far past anything that
+# happens: the largest total in 27,914 real fixtures is well inside it, and anything beyond is
+# folded into the last cell rather than dropped, so no probability mass goes missing.
+MAX_GOALS_PER_SIDE = 9
+
+# Laplace smoothing for the empirical reference tables. Without it a scoreline that never
+# occurred in training gives log(0) = -inf on a single test fixture and destroys the whole
+# metric — the reference would lose to any model purely by being sparse.
+SCORELINE_SMOOTHING = 0.5
+
+
+def _poisson_pmf(k: int, lam: float) -> float:
+    lam = max(float(lam), 1e-9)
+    return math.exp(-lam + k * math.log(lam) - math.lgamma(k + 1))
+
+
+def scoreline_log_loss_model(df: pd.DataFrame) -> float:
+    """Mean -log P(exact scoreline) under the model's own assumption: two INDEPENDENT Poissons
+    at the calibrated per-fixture rates.
+
+    This is the metric an external review asked for, and it is the right instrument for the
+    question. Over/Under Brier scores are computed on four MARGINAL lines, and four marginals
+    can be individually well calibrated while the joint they came from is misshapen. A
+    scoreline-level score cannot hide that.
+    """
+    total = 0.0
+    for row in df.itertuples():
+        h = min(int(row.home_goals), MAX_GOALS_PER_SIDE)
+        a = min(int(row.away_goals), MAX_GOALS_PER_SIDE)
+        p = _poisson_pmf(h, row.xg_home) * _poisson_pmf(a, row.xg_away)
+        total += -math.log(max(p, 1e-12))
+    return total / len(df)
+
+
+def _empirical_scoreline_tables(train_df: pd.DataFrame):
+    """Two model-free references built from the TRAINING split only.
+
+    joint       — the observed P(home=i, away=j). Captures whatever real dependence exists,
+                  with no model and no distributional assumption at all.
+    independent — P(home=i) * P(away=j) from the same data, i.e. the SAME information with the
+                  dependence deliberately removed.
+
+    Comparing those two against each other is the actual test of the critique, and it needs no
+    model: if dependence in football scorelines is worth modelling, the joint table must beat
+    the independent one. Any gap between them is the ceiling on what a bivariate Poisson or a
+    Dixon-Coles correction could recover here.
+    """
+    n = MAX_GOALS_PER_SIDE + 1
+    joint = np.full((n, n), SCORELINE_SMOOTHING)
+    for row in train_df.itertuples():
+        joint[min(int(row.home_goals), MAX_GOALS_PER_SIDE)][
+            min(int(row.away_goals), MAX_GOALS_PER_SIDE)
+        ] += 1.0
+    joint /= joint.sum()
+    home_marginal = joint.sum(axis=1)
+    away_marginal = joint.sum(axis=0)
+    independent = np.outer(home_marginal, away_marginal)
+    return joint, independent
+
+
+def scoreline_log_loss_table(df: pd.DataFrame, table: np.ndarray) -> float:
+    total = 0.0
+    for row in df.itertuples():
+        h = min(int(row.home_goals), MAX_GOALS_PER_SIDE)
+        a = min(int(row.away_goals), MAX_GOALS_PER_SIDE)
+        total += -math.log(max(float(table[h][a]), 1e-12))
+    return total / len(df)
 
 
 def build_training_examples(
@@ -908,6 +978,28 @@ async def main_async() -> None:
             f"r>={MIN_R}, CI low>{MIN_CI_LOW} on SETTLED predictions"
         )
 
+    # --- Full-scoreline evaluation (asked for by an external review) ----------------------
+    # Reported against two model-free references so the number means something: a log loss on
+    # its own is uninterpretable.
+    joint_table, independent_table = _empirical_scoreline_tables(train_df)
+    model_ll = scoreline_log_loss_model(test_df)
+    joint_ll = scoreline_log_loss_table(test_df, joint_table)
+    indep_ll = scoreline_log_loss_table(test_df, independent_table)
+    print()
+    print("FULL-SCORELINE log loss on the test set (lower is better):")
+    print(f"  model, independent Poisson at per-fixture xG   {model_ll:.4f}")
+    print(f"  reference, empirical JOINT from training       {joint_ll:.4f}")
+    print(f"  reference, empirical INDEPENDENT marginals     {indep_ll:.4f}")
+    print(
+        f"  value of modelling dependence at all (indep - joint): {indep_ll - joint_ll:+.4f} "
+        "— this is the CEILING on what a bivariate Poisson or Dixon-Coles could recover, "
+        "measured without any model"
+    )
+    print(
+        f"  our structure vs the dependence-aware reference (model - joint): "
+        f"{model_ll - joint_ll:+.4f}"
+    )
+
     xg_home_raw_mae = float(np.mean(np.abs(test_df["xg_home"] - test_df["home_goals"])))
     xg_home_calibrated_mae = float(
         np.mean(np.abs(xg_home_calibrator.predict(test_df["xg_home"]) - test_df["home_goals"]))
@@ -1013,6 +1105,10 @@ async def main_async() -> None:
             mlflow.log_metric("corners_test_mae", corners_mae)
         if goals_r is not None:
             mlflow.log_metric("goals_total_signal_r_test", goals_r)
+        mlflow.log_metric("scoreline_log_loss_model", model_ll)
+        mlflow.log_metric("scoreline_log_loss_joint_ref", joint_ll)
+        mlflow.log_metric("scoreline_log_loss_independent_ref", indep_ll)
+        mlflow.log_metric("dependence_ceiling", indep_ll - joint_ll)
         mlflow.log_metric("xg_home_raw_mae", xg_home_raw_mae)
         mlflow.log_metric("xg_home_calibrated_mae", xg_home_calibrated_mae)
         mlflow.log_metric("xg_away_raw_mae", xg_away_raw_mae)

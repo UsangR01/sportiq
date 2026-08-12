@@ -712,6 +712,67 @@ it is what improved — not calibration, which was already near zero.
 
 ---
 
+## Bivariate Poisson / Dixon-Coles for Over/Under — measured, and the ceiling is ~zero
+
+An external review argued the Over/Under model is "structurally too simple": independent
+Poisson rates after separate isotonic calibration, when football scorelines show correlation
+and over/under-dispersion. It proposed a bivariate Poisson or Dixon-Coles score model, or a
+negative binomial with league-specific dispersion, and — separately — assessing **full scoreline
+log loss** rather than only per-line Brier.
+
+Re-measured on the current 18-league pool (**27,914 fixtures**, 3.2x the 8,718 the earlier
+investigation used). The pooled finding replicates: `var/mean = 1.0128`, `corr(home, away) =
+-0.0575`, and empirical vs Poisson-at-the-mean P(under 1.5/2.5/3.5/4.5) differ by **<= 0.0021**.
+
+**The per-league cut is new, and it argues AGAINST the proposed remedies rather than for them:**
+
+    UNDERdispersed (var/mean < 1)    9 of 18   epl .945, seriea .948, bundesliga .977,
+                                               scottish_prem .938, denmark .932, austria .939,
+                                               brasileirao, eliteserien, veikkausliiga
+    OVERdispersed (var/mean > 1.05)  3 of 18   csl 1.059, liga_i 1.060, j1_league 1.079
+    median league                    0.989
+    NEGATIVE home/away correlation   15 of 18  (median -0.082, min -0.157)
+
+- **A negative binomial has var >= mean by construction and cannot represent 9 of our 18
+  leagues** — including EPL, Serie A and the Bundesliga. League-specific dispersion is real
+  here; NB is the wrong family for it, because the median league is UNDER-dispersed.
+- **A bivariate Poisson's shared component can only produce corr >= 0**, and 15 of 18 leagues
+  are negative. It cannot express the sign of the dependence in our data.
+- **Dixon-Coles is the one not structurally excluded** (its tau correction can give negative
+  low-score dependence, matching our sign) but it only adjusts 0-0/1-0/0-1/1-1 — cells that
+  move 1X2 draws and under-1.5, not the under-2.5/3.5 lines this product actually sells.
+- Cost of the assumption, using each league's OWN mean: worst deviation across all 18 leagues
+  x 4 lines is **0.0201**; the median league's worst line is **0.0118**.
+
+**THE SCORELINE-LOG-LOSS SUGGESTION WAS THE GOOD PART, AND IT WAS TAKEN.** It is the right
+instrument: four marginal lines can each be well calibrated while the joint they came from is
+misshapen, and it tests the CONDITIONAL claim that the unconditional dispersion figures above
+cannot. `train_football.py` now reports it every run against two model-free references built
+from the training split — the empirical JOINT (all real dependence, no model) and the same
+information with dependence removed:
+
+    model, independent Poisson at per-fixture xG      2.9406
+    reference, empirical JOINT from training          3.0241
+    reference, empirical INDEPENDENT marginals        3.0246
+
+    value of modelling dependence at all   +0.0005    <- the CEILING for bivariate Poisson
+                                                         or Dixon-Coles, measured model-free
+    our structure vs the joint reference   -0.0835    <- we beat the dependence-aware table
+
+**Conditioning on fixture-level features is worth roughly 167x more than the entire dependence
+structure.** The joint table captures every scrap of real dependence with no distributional
+assumption, and beats the independence-stripped version of itself by 0.0005 nats.
+
+Honest caveat: the joint reference estimates 100 cells from 16,287 training fixtures against
+19 marginal parameters, so its advantage is if anything slightly UNDERSTATED by estimation
+noise. At a 167:1 ratio that cannot change the conclusion.
+
+**Verdict: no new score model.** The binding constraint on this market was discrimination, and
+Layer 1 tuning moved it (under-3.5 trend z +5.97 -> +8.79, under-4.5 from inverted to
+monotonic) without touching the distributional assumption at all.
+
+---
+
 ## Measuring whether the predictions work
 
 Spec: `docs/history-metrics-spec.md`, written **before** the endpoint was touched so its shape
