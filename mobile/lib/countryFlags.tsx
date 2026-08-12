@@ -43,6 +43,16 @@ const COUNTRY_FLAG_IMAGES: Record<string, number> = {
   Chile: require("../assets/flags/chile.png"),
   Japan: require("../assets/flags/japan.png"),
   Croatia: require("../assets/flags/croatia.png"),
+  // The Tier-1 league expansion (Allsvenskan, Eliteserien, Veikkausliiga, Ekstraklasa,
+  // Superliga, Czech First League) brought countries the map had never seen, so each one
+  // rendered the globe fallback. Keys are the EXACT strings API-Football stores on
+  // leagues.country — note "Czech-Republic" is hyphenated at the provider, which is why the
+  // normalised fallback below exists rather than relying on getting punctuation right.
+  Norway: require("../assets/flags/norway.png"),
+  Finland: require("../assets/flags/finland.png"),
+  Denmark: require("../assets/flags/denmark.png"),
+  Poland: require("../assets/flags/poland.png"),
+  "Czech-Republic": require("../assets/flags/czechrepublic.png"),
   "Hong Kong": require("../assets/flags/hongkong.png"),
 };
 
@@ -131,8 +141,21 @@ export function countryForTournamentLocation(location: string | null): string | 
  * (resizeMode="cover") to fill the exact same square rather than being stretched/distorted or
  * left with mismatched letterboxing — this is what actually guarantees every flag looks the
  * same size, not just occupies the same layout box. */
+// Punctuation and case are the provider's business, not ours. API-Football writes
+// "Czech-Republic" with a hyphen while every other country is a plain word, and an exact-key
+// lookup that misses fails SILENTLY — a globe instead of a flag, with nothing logged, which
+// reads as a design choice until someone sends a screenshot. Exact match still wins; this only
+// catches what would otherwise have been a miss.
+const normaliseCountry = (value: string) => value.toLowerCase().replace(/[^a-z]/g, "");
+
+const NORMALISED_COUNTRY_FLAGS: Record<string, number> = Object.fromEntries(
+  Object.entries(COUNTRY_FLAG_IMAGES).map(([name, image]) => [normaliseCountry(name), image])
+);
+
 export function CountryFlag({ country, size = 24 }: { country: string | null; size?: number }) {
-  const source = country ? COUNTRY_FLAG_IMAGES[country] : undefined;
+  const source = country
+    ? (COUNTRY_FLAG_IMAGES[country] ?? NORMALISED_COUNTRY_FLAGS[normaliseCountry(country)])
+    : undefined;
   if (!source) {
     return (
       <View style={{ width: size, height: size }} className="items-center justify-center">
