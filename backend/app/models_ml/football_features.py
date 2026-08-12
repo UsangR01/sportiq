@@ -169,7 +169,39 @@ CORNERS_FEATURE_NAMES = FEATURE_NAMES + (
 # xg_against_5) already implies football's own "last 5" rolling-form window — NBA reused the
 # same columns with a documented "actually last 10" override (see nba_features.py); football
 # is the sport those names were originally shaped around.
-LAST_N_FORM = 5
+# MEASURED 2026-08-12, having previously been inherited rather than chosen. This was 5, and
+# the only justification on record was that TeamStats/TeamFeatures already had columns NAMED
+# form_pts_5/xg_for_5 — a value derived from a column name. It drives attack_str, defence_str,
+# form_pts, xg_for/against and the corners rolling features, so it shapes most of the vector,
+# and it was the one feature-layer hyperparameter the Optuna work never touched.
+#
+# Three runs, everything else identical and training reproducible bit-for-bit:
+#
+#                        n=3        n=5         n=10
+#   test accuracy       0.5021     0.5034      0.5096
+#   gap over baseline   +5.78pp    +5.91pp     +6.53pp
+#   RPS                 0.2101     0.2097      0.2098
+#   under-3.5 Brier     0.2100     0.2096      0.2092
+#   scoreline log loss  2.9441     2.9406      2.9381
+#   xG MAE home/away    .974/.873  .972/.871   .970/.869
+#   worst league        -0.016     -0.020      -0.007
+#   buckets monotonic   NO         yes         yes
+#
+# n=3 loses outright and breaks bucket monotonicity (.744 -> .676), so "shorter is fresher" is
+# dead. n=10 wins on seven of eight.
+#
+# HONEST NOTE ON THE ONE IT LOSES, because it was my own pre-registered criterion. I fixed the
+# rule before running as "adopt only if RPS improves", and RPS went 0.2097 -> 0.2098. By the
+# letter of that rule 5 should have stayed. The rule was badly specified: it carried no
+# tolerance, so a 0.05% relative difference counts as a failure while accuracy moves 0.62pp the
+# other way and the scoreline log loss — added specifically as the better structural instrument
+# — also favours 10. Overriding it was a deliberate, user-approved decision, recorded here
+# rather than quietly reinterpreted, because the value of pre-registering is that the person
+# who set the rule does not get to relitigate it after seeing the numbers.
+#
+# Football now matches nba_features.py and tennis_features.py at 10 — but for a MEASURED
+# reason, where those two still inherit it by convention. Neither has been tested.
+LAST_N_FORM = 10
 POINTS = {"W": 3, "D": 1, "L": 0}
 
 

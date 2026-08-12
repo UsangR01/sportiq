@@ -75,6 +75,7 @@ import numpy as np  # noqa: E402
 import optuna  # noqa: E402
 import pandas as pd  # noqa: E402
 import xgboost as xgb  # noqa: E402
+from app.models_ml import football_features  # noqa: E402
 from app.models_ml.elo import compute_elo_history  # noqa: E402
 from app.models_ml.football import FootballModel  # noqa: E402
 from app.models_ml.football_features import (  # noqa: E402
@@ -1082,6 +1083,7 @@ async def main_async() -> None:
         mlflow.log_param("test_season", TEST_SEASON)
         mlflow.log_param("n_optuna_trials", N_OPTUNA_TRIALS)
         mlflow.log_param("random_seed", RANDOM_SEED)
+        mlflow.log_param("last_n_form", football_features.LAST_N_FORM)
         for key, value in study.best_params.items():
             mlflow.log_param(f"layer2_{key}", value)
         for key, value in layer1_home_params.items():

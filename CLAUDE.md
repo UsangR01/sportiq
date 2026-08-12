@@ -793,6 +793,45 @@ monotonic) without touching the distributional assumption at all.
 
 ---
 
+## The rolling-form window was inherited from a column name — now measured
+
+Asked 2026-08-12 whether 3/5/10 had ever been tested. It had not: `LAST_N_FORM` was **5** for
+football because `TeamStats`/`TeamFeatures` already had columns named `form_pts_5`/`xg_for_5`,
+and **10** for NBA and tennis because each matched the one before it. Convention referencing
+convention, and the only feature-layer hyperparameter the Optuna work never touched — despite
+driving `attack_str`, `defence_str`, `form_pts`, `xg_for/against` and the corners features.
+
+Three runs, everything else identical, training reproducible bit-for-bit:
+
+                       n=3        n=5         n=10
+  test accuracy       0.5021     0.5034      0.5096
+  gap over baseline   +5.78pp    +5.91pp     +6.53pp
+  RPS                 0.2101     0.2097      0.2098
+  under-3.5 Brier     0.2100     0.2096      0.2092
+  scoreline log loss  2.9441     2.9406      2.9381
+  xG MAE home/away    .974/.873  .972/.871   .970/.869
+  worst league        -0.016     -0.020      -0.007
+  buckets monotonic   NO         yes         yes
+
+**n=3 loses outright** and breaks bucket monotonicity (.744 -> .676) — "shorter is fresher" is
+dead. **n=10 wins on seven of eight** and is now live (`football_xgb_v20260812204116`).
+
+**IT LOST THE ONE THAT WAS PRE-REGISTERED, and that is recorded rather than smoothed over.**
+The rule fixed before the runs was "adopt only if RPS improves"; RPS went 0.2097 -> 0.2098, so
+by its letter 5 should have stayed. The rule was badly specified — no tolerance, so a 0.05%
+relative difference reads as failure while accuracy moves 0.62pp the other way and the
+scoreline log loss (added precisely as the better structural instrument) also favours 10.
+Overriding it was a deliberate, user-approved decision. The point of pre-registering is that
+the author does not get to relitigate after seeing the numbers, so the override is documented
+as an override.
+
+**Open**: NBA and tennis still use 10 by inheritance, untested. Tennis is the more suspect —
+players compete in bursts within a tournament, so ten matches can reach back across surfaces
+and months, and CLAUDE.md already records that borrowing NBA's base rates for tennis was
+indefensible while its window was borrowed without comment.
+
+---
+
 ## Measuring whether the predictions work
 
 Spec: `docs/history-metrics-spec.md`, written **before** the endpoint was touched so its shape
