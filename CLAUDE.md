@@ -2128,6 +2128,28 @@ match. Root-caused to two independent, stacking issues:
   two the user specifically flagged as still-broken, SHANGHAI SIPG vs Shandong Luneng
   (98% → 85.7%) and Chengdu Better City vs Wuhan Three Towns (99% → 90.8%).
 
+## The default minimum-odds filter is 1.01, not 1.50 (2026-08-14)
+
+Direct request. The old 1.50 default was doing more damage than it looked, and this is the third
+time it has surfaced:
+
+    next 7 days, min_probability=0.6
+      min_odds 1.50    66 fixtures,  64 with a pick,  43 priced
+      min_odds 1.01    98 fixtures,  96 with a pick,  75 priced
+
+**It hid exactly the picks the model is most confident about.** Tennis favourites sit around
+0.70 and price near 1.35-1.45; CLAUDE.md already records a day whose feed rendered EMPTY at 1.50
+because both surviving picks priced at 1.24 and 1.42, and the reporting screenshot only showed
+them because the slider happened to be at 1.01.
+
+**And it filtered in the wrong direction**: a fixture with NO odds at all cannot be judged on
+price, so the floor removed fixtures that HAD real prices while leaving unpriced ones visible.
+
+**Quality is untouched, because `min_odds` never protected it** — it filtered on price, never on
+whether a pick was any good. `MIN_EDGE_OVER_BASE_RATE`, `MIN_FEATURE_COMPLETENESS`,
+`MAX_EDGE_OVER_MARKET` and the barred-market rule all still apply server-side at full strength.
+The probability default stays at **60%**.
+
 ## Head-to-head panel, now for all three sports (2026-08-14)
 
 Asked for after WNBA landed: "I need the historic stat between both team, shown here like for
