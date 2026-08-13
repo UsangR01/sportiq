@@ -1370,9 +1370,23 @@ the prediction the card renders was created AFTER kickoff (`UNKNOWN` provenance)
 latest prediction regardless of kind; the two coincide only on the PRE_MATCH population.
 
 **Still recomputed, not replayed** — same limit as the fix below. `pick_snapshots` is the only
-true record of what was displayed, and it holds 59 rows, **all tennis h2h**: 0 of the 6 football
-fixtures that passed through the 4-8h window since 2026-08-10 were captured. Not yet diagnosed,
-and too small a sample to call a bug.
+true record of what was displayed, and it holds 59 rows, **all tennis h2h**.
+
+> **"0 of 6 football fixtures snapshotted" — DIAGNOSED, and it is not a bug.** Every one of
+> those six kicked off on 2026-08-10 between 15:30 and 18:30, so their 4-8h capture windows ran
+> 07:30-14:30. The job's first ever run was **14:39** — the last window closed **nine minutes**
+> before it. There have been no football fixtures at all since (European leagues between
+> rounds), so tennis-only is simply what has been playable.
+>
+> **The forward-looking risk is real and different**: four of those six carried
+> `feature_completeness` **0.16-0.26**, under the 0.35 floor, so even with the job live they
+> would have produced no shown pick and therefore no snapshot. That is CORRECT — nothing was
+> shown, so there is nothing to record — but it means snapshot coverage will be thinnest exactly
+> when the European seasons open with sparse features, and this table cannot be backfilled.
+>
+> `_snapshot_shown_picks` now **WARNs when it sees fixtures in the window and captures none**,
+> so "correctly showed nothing" stops being indistinguishable from "silently captured nothing"
+> in the logs. Both previously logged at info. Pinned by `test_pick_snapshots.py`.
 
 **`/history` and `/history/summary` now carry the card verdict too** (`pick_market`,
 `pick_selection`, `pick_line`, `pick_probability`, `pick_odds`, `pick_was_correct`; and

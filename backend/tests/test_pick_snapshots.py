@@ -8,6 +8,7 @@ Two properties are pinned here because breaking either produces a metric that lo
 means nothing.
 """
 
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -167,3 +168,34 @@ def test_the_snapshot_reuses_the_feeds_own_selection():
         body = handle.read()
     assert "_bulk_best_picks" in body
     assert "_pick_best" not in body  # not reimplemented, delegated
+
+
+@pytest.mark.asyncio
+async def test_a_window_with_fixtures_but_no_captures_warns(fixture_in_window, caplog):
+    """A run that SEES fixtures and captures none must be distinguishable from a quiet day.
+
+    pick_snapshots is the only permanent record of what was displayed -- best_pick is recomputed
+    per request, so a gap here can never be backfilled. Both cases currently log at info and
+    look identical, which is how a real gap would stay invisible until someone counted rows
+    months later.
+
+    Diagnosed 2026-08-13 from a real question: 59 snapshots existed, all tennis, and zero of the
+    six football fixtures since 2026-08-10 had been captured. That turned out NOT to be a bug --
+    every one of those windows closed before the job's first run, the last by nine minutes -- but
+    nothing in the logs could have said so either way. Four of those six also carried
+    feature_completeness 0.16-0.26, under the 0.35 floor, so they would have produced no shown
+    pick regardless; correct behaviour, and exactly the case worth being able to see.
+    """
+    sport_id, fixture_id = fixture_in_window
+    async with async_session_factory() as db:
+        # Strip the prediction so the feed has nothing to show, reproducing a guard-suppressed
+        # fixture without depending on which guard did the suppressing.
+        await db.execute(delete(Prediction).where(Prediction.fixture_id == fixture_id))
+        await db.commit()
+
+    with caplog.at_level(logging.WARNING, logger="app.workers.snapshot_picks"):
+        await _snapshot_shown_picks()
+
+    assert any(
+        "captured NONE" in record.message for record in caplog.records
+    ), "a window holding fixtures that yielded no picks must warn, not pass silently"

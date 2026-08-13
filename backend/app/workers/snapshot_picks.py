@@ -106,6 +106,22 @@ async def _snapshot_shown_picks() -> None:
         logger.info(
             "Captured %d shown pick(s) from %d fixture(s) in the window", captured, len(fixtures)
         )
+        # A run that SEES fixtures and captures none is not obviously distinguishable from a
+        # quiet day, and this table is the only permanent record of what was displayed — a gap
+        # here can never be backfilled. Warned rather than logged at info so it reaches Sentry.
+        #
+        # This is expected some of the time and is still worth surfacing: the feed's guards
+        # legitimately leave a fixture with no pick, and pre-season football is exactly that
+        # case (four of the six fixtures on 2026-08-10 carried feature_completeness 0.16-0.26,
+        # under the 0.35 floor). The risk is that "correctly showed nothing" and "silently
+        # captured nothing" look identical in the logs until someone counts rows months later.
+        if fixtures and captured == 0:
+            logger.warning(
+                "Snapshot run saw %d fixture(s) in the window and captured NONE — every one had "
+                "no shown pick. Expected when guards suppress a pick (pre-season features), but "
+                "unbackfillable if it is not.",
+                len(fixtures),
+            )
 
 
 @celery_app.task(name="app.workers.snapshot_picks.snapshot_shown_picks")
