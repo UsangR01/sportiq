@@ -90,6 +90,8 @@ import httpx
 from app.adapters.base import (
     DataSourceAdapter,
     FixturePayload,
+    H2HPanel,
+    H2HPanelStat,
     InjuryUpdate,
     OddsPayload,
     TeamStats,
@@ -898,3 +900,136 @@ async def fetch_surface_stats(
         _current_streak(same_surface, raw_player_id) if same_surface else (None, None)
     )
     return win_rate, streak
+
+
+# Serve/return measures shown in the H2H panel, in display order. Chosen from what
+# /match_stats actually returns (probed live 2026-08-13) for what a bettor reads a matchup on:
+# how well each player holds serve, and how well they break. Percentages arrive already scaled
+# 0-100, so they are shown as-is with a "%" suffix rather than re-derived.
+H2H_PANEL_FIELDS = (
+    ("aces", "Aces", ""),
+    ("double_faults", "Double faults", ""),
+    ("first_serve_pct", "1st serve", "%"),
+    ("first_serve_points_won_pct", "1st serve won", "%"),
+    ("break_points_converted_pct", "Break points won", "%"),
+    ("total_points_won_pct", "Total points won", "%"),
+)
+
+# Whole-match rows carry set_number 0; per-set rows repeat the same match. Averaging without
+# this filter would weight a five-setter five times and double-count every number.
+WHOLE_MATCH_SET_NUMBER = 0
+
+H2H_PANEL_MEETINGS = 5
+
+
+async def fetch_h2h_panel(
+    home_external_id: str, away_external_id: str, league: str = "atp"
+) -> H2HPanel | None:
+    """Head-to-head history for the fixture detail panel: the career record plus serve and
+    return averages over their most recent meetings.
+
+    Uses the DEDICATED /head_to_head endpoint for the record -- one call, and it returns
+    player1_wins/player2_wins directly rather than needing a match history to be searched the
+    way basketball does. Both endpoints are GOAT-tier and this account has GOAT for ATP.
+
+    Returns None rather than an empty record when the two have never met, and degrades to the
+    record alone if /match_stats is unavailable -- a panel with a real record and no stat rows
+    is honest; one with fabricated averages is not.
+    """
+    api_key = get_settings().balldontlie_api_key
+    home_raw = _strip_tour_prefix(home_external_id)
+    away_raw = _strip_tour_prefix(away_external_id)
+
+    async with httpx.AsyncClient(
+        base_url=f"https://api.balldontlie.io{_tour_prefix(league)}",
+        headers={"Authorization": api_key},
+        timeout=15.0,
+    ) as client:
+        try:
+            response = await _get_with_retry(
+                client, "/head_to_head", {"player1_id": home_raw, "player2_id": away_raw}
+            )
+        except httpx.HTTPStatusError as exc:
+            # A pair who have NEVER MET comes back 404, not an empty record -- confirmed live
+            # against two real upcoming ATP players. That is a normal answer for a first-time
+            # meeting, which is common in early rounds, so it must not surface as an error or
+            # be logged as one.
+            if exc.response is not None and exc.response.status_code == 404:
+                return None
+            raise
+        record = (response.json() or {}).get("data") or {}
+        if not record:
+            return None
+        # The endpoint answers in ITS OWN player1/player2 order, which is not our home/away.
+        # Reading the wins without checking which slot our home player landed in would invert
+        # the record for roughly half of all fixtures -- the same class of error as trusting
+        # teams_normalized order for home/away.
+        p1_is_home = str((record.get("player1") or {}).get("id")) == str(home_raw)
+        home_wins = record.get("player1_wins" if p1_is_home else "player2_wins") or 0
+        away_wins = record.get("player2_wins" if p1_is_home else "player1_wins") or 0
+        if home_wins + away_wins == 0:
+            return None
+
+        stats: list[H2HPanelStat] = []
+        try:
+            meetings = await _recent_meetings(client, home_raw, away_raw)
+            stats = await _serve_return_averages(client, meetings, home_raw, away_raw)
+        except httpx.HTTPError:
+            # The record is already real and worth showing on its own.
+            pass
+
+    return H2HPanel(
+        meetings_count=home_wins + away_wins,
+        home_wins=int(home_wins),
+        # Tennis cannot draw -- structurally zero, not unmeasured.
+        draws=0,
+        away_wins=int(away_wins),
+        stats=stats,
+    )
+
+
+async def _recent_meetings(client, home_raw: str, away_raw: str) -> list[dict]:
+    """Their most recent completed meetings, newest first."""
+    current_season = _current_tennis_season()
+    seasons = [current_season - i for i in range(TENNIS_SEASONS_BACK)]
+    matches = await _fetch_matches_across_seasons(client, home_raw, seasons)
+    meetings = [
+        m
+        for m in matches
+        if _match_completed(m) and str((_opponent(m, home_raw) or {}).get("id")) == str(away_raw)
+    ]
+    meetings.sort(key=lambda m: str(_match_date(m)), reverse=True)
+    return meetings[:H2H_PANEL_MEETINGS]
+
+
+async def _serve_return_averages(
+    client, meetings: list[dict], home_raw: str, away_raw: str
+) -> list[H2HPanelStat]:
+    if not meetings:
+        return []
+    response = await _get_with_retry(
+        client, "/match_stats", {"match_ids[]": [m["id"] for m in meetings]}
+    )
+    rows = [
+        row
+        for row in (response.json() or {}).get("data", [])
+        if row.get("set_number") == WHOLE_MATCH_SET_NUMBER
+    ]
+    by_player: dict[str, list[dict]] = {}
+    for row in rows:
+        by_player.setdefault(str((row.get("player") or {}).get("id")), []).append(row)
+
+    def average(player_raw: str, field: str) -> float | None:
+        values = [r[field] for r in by_player.get(str(player_raw), []) if r.get(field) is not None]
+        # Each field averages over ITS OWN non-null values: a meeting missing one measure still
+        # contributes to the others, and a measure missing everywhere stays None rather than
+        # becoming a fabricated zero.
+        return round(sum(values) / len(values), 1) if values else None
+
+    stats = []
+    for field, label, suffix in H2H_PANEL_FIELDS:
+        home_value, away_value = average(home_raw, field), average(away_raw, field)
+        if home_value is None and away_value is None:
+            continue
+        stats.append(H2HPanelStat(label, home_value, away_value, suffix))
+    return stats

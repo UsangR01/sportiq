@@ -6,6 +6,8 @@ import httpx
 from app.adapters.base import (
     DataSourceAdapter,
     FixturePayload,
+    H2HPanel,
+    H2HPanelStat,
     InjuryUpdate,
     OddsPayload,
     TeamStats,
@@ -344,3 +346,88 @@ async def fetch_h2h_win_rate(
     if not meetings:
         return None
     return sum(1 for g in meetings if home_team_won(g)) / len(meetings)
+
+
+# How many meetings the H2H panel averages over. Deliberately its own constant, separate from
+# H2H_SEASONS_BACK (which bounds the model feature): a display panel and a model input should
+# be free to disagree without one silently changing the other.
+H2H_PANEL_MEETINGS = 5
+
+
+async def fetch_h2h_panel(
+    home_external_id: str, away_external_id: str, league: str = "nba"
+) -> H2HPanel | None:
+    """Head-to-head history for the fixture detail panel: record, plus average points scored
+    and conceded per side over their last real meetings.
+
+    TWO STATS IS ALL THE DATA SUPPORTS, and that is a provider limit rather than a choice.
+    BallDontLie's /stats returns 401 on this plan, so no box score is reachable at any price we
+    hold -- no rebounds, assists, field-goal percentage, pace. The final score is the only real
+    per-meeting number, which yields points for and points against. Football's five-row panel
+    exists because API-Football hands over corners, shots and possession; inventing equivalents
+    here would mean fabricating them.
+
+    Reuses the same /games search fetch_h2h_win_rate already does -- BallDontLie has no
+    dedicated H2H endpoint for basketball, unlike tennis -- so this costs one paginated call.
+    """
+    api_key = get_settings().balldontlie_api_key
+    current_season = _current_season(league)
+    seasons = [current_season - i for i in range(H2H_SEASONS_BACK)]
+    home_raw = strip_league_prefix(home_external_id)
+    away_raw = strip_league_prefix(away_external_id)
+
+    async with httpx.AsyncClient(
+        base_url=_API_ROOT + _LEAGUE_PATHS[league],
+        headers={"Authorization": api_key},
+        timeout=10.0,
+    ) as client:
+        games = await _fetch_all_games(
+            client, {"team_ids[]": home_raw, "seasons[]": seasons, "per_page": 100}
+        )
+    games = [_normalise_game(g, league) for g in games]
+
+    def opponent_id(g: dict) -> str:
+        home_side = str(g["home_team"]["id"]) == home_raw
+        return str(g["visitor_team"]["id"]) if home_side else str(g["home_team"]["id"])
+
+    meetings = [
+        g
+        for g in games
+        if g.get("status") == "Final"
+        and opponent_id(g) == away_raw
+        and g.get("home_team_score") is not None
+    ]
+    if not meetings:
+        return None
+    meetings.sort(key=lambda g: g["datetime"], reverse=True)
+    meetings = meetings[:H2H_PANEL_MEETINGS]
+
+    home_points: list[int] = []
+    away_points: list[int] = []
+    home_wins = 0
+    for g in meetings:
+        # Re-expressed from THIS fixture's home team's perspective, whichever side they were on
+        # in that meeting.
+        was_home = str(g["home_team"]["id"]) == home_raw
+        scored = g["home_team_score"] if was_home else g["visitor_team_score"]
+        conceded = g["visitor_team_score"] if was_home else g["home_team_score"]
+        home_points.append(scored)
+        away_points.append(conceded)
+        if scored > conceded:
+            home_wins += 1
+
+    def mean(values: list[int]) -> float:
+        return round(sum(values) / len(values), 1)
+
+    return H2HPanel(
+        meetings_count=len(meetings),
+        home_wins=home_wins,
+        # Basketball cannot draw, so this is structurally zero rather than unmeasured.
+        draws=0,
+        away_wins=len(meetings) - home_wins,
+        # ONE row, not two. "Points allowed" is the exact mirror of "Points scored" in a
+        # two-team head-to-head -- 73.8/87.0 becomes 87.0/73.8 -- so showing both fills the
+        # panel without adding a single fact. This is football's "Goals" row, and with /stats
+        # gated at 401 there is genuinely nothing else to put beside it.
+        stats=[H2HPanelStat("Points", mean(home_points), mean(away_points))],
+    )

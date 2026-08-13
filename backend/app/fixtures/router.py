@@ -17,6 +17,7 @@ from app.fixtures.schemas import (
     FixtureDetail,
     FixtureSummary,
     HeadToHeadResponse,
+    HeadToHeadStat,
     LiveStateResponse,
     OddsLineResponse,
     PredictionResponse,
@@ -933,12 +934,18 @@ async def _fetch_head_to_head(
     bookmaker-odds table per direct user request. Fetched live, at request time (not persisted,
     not precomputed at ingest) since this is a detail-screen-only concern, not something the
     Picks list needs to filter/sort on — a per-viewed-fixture cost, not a per-ingested-fixture
-    one. Football only for now: API-Football has a dedicated /fixtures/headtohead endpoint;
-    NBA's own H2H (BallDontLie, via a manual fixture-history search) is real but not wired up
-    here — None, not a fabricated empty record, for NBA or any team missing an external_id."""
-    if sport_slug != "football":
-        return None
+    one.
 
+    All three sports now, each through its own provider, with the DEPTH THE PROVIDER ACTUALLY
+    ALLOWS rather than a shape forced to match:
+
+        football   5 rows   API-Football /fixtures/headtohead + /fixtures/statistics
+        tennis     6 rows   BallDontLie /head_to_head (record) + /match_stats (serve/return)
+        NBA/WNBA   2 rows   BallDontLie /games -- /stats is 401 on this plan, so the final
+                            score is the only real per-meeting number that exists
+
+    None, never a fabricated empty record, for two teams that have never met or a team with no
+    external_id."""
     home_team = (
         await db.execute(select(Team).where(Team.id == fixture.home_team_id))
     ).scalar_one_or_none()
@@ -948,6 +955,53 @@ async def _fetch_head_to_head(
     if not home_team or not away_team or not home_team.external_id or not away_team.external_id:
         return None
 
+    league_slug = (
+        await db.execute(select(League.slug).where(League.id == fixture.league_id))
+    ).scalar_one_or_none()
+
+    if sport_slug == "football":
+        return await _football_head_to_head(home_team, away_team)
+    if sport_slug in ("nba", "tennis"):
+        return await _balldontlie_head_to_head(sport_slug, league_slug, home_team, away_team)
+    return None
+
+
+async def _balldontlie_head_to_head(
+    sport_slug: str, league_slug: str | None, home_team: Team, away_team: Team
+) -> HeadToHeadResponse | None:
+    """Basketball and tennis both come from BallDontLie, through different namespaces and very
+    different endpoints — hence one branch per sport rather than one shared call."""
+    if sport_slug == "tennis":
+        from app.adapters.balldontlie_tennis import fetch_h2h_panel
+
+        league = league_slug or "atp"
+    else:
+        from app.adapters.balldontlie import fetch_h2h_panel
+
+        league = league_slug or "nba"
+
+    try:
+        panel = await fetch_h2h_panel(home_team.external_id, away_team.external_id, league)
+    except httpx.HTTPError:
+        # The panel is an enrichment; a rate limit or an outage must not fail the whole
+        # fixture screen. BallDontLie's NBA tier is 5 req/min, so this is a live possibility.
+        logger.warning("H2H fetch failed for %s; rendering the fixture without it", sport_slug)
+        return None
+    if panel is None:
+        return None
+    return HeadToHeadResponse(
+        meetings_count=panel.meetings_count,
+        home_wins=panel.home_wins,
+        draws=panel.draws,
+        away_wins=panel.away_wins,
+        stats=[
+            HeadToHeadStat(label=s.label, home=s.home, away=s.away, suffix=s.suffix)
+            for s in panel.stats
+        ],
+    )
+
+
+async def _football_head_to_head(home_team: Team, away_team: Team) -> HeadToHeadResponse | None:
     from app.adapters.api_football import H2HDetail, fetch_h2h_detail
     from app.core.redis import get_redis
     from app.fixtures.h2h_cache import get_cached_h2h, set_cached_h2h
@@ -971,21 +1025,34 @@ async def _fetch_head_to_head(
     if detail is None:
         return None
 
+    # Football's named fields mapped onto the shared row shape. A row is omitted entirely when
+    # NEITHER side has a value, rather than rendered as a pair of dashes.
+    rows = [
+        ("Goals", detail.avg_goals_home, detail.avg_goals_away, ""),
+        ("Corners", detail.avg_corners_home, detail.avg_corners_away, ""),
+        ("Total shots", detail.avg_shots_home, detail.avg_shots_away, ""),
+        ("Shots on goal", detail.avg_shots_on_goal_home, detail.avg_shots_on_goal_away, ""),
+        ("Possession", detail.avg_possession_home, detail.avg_possession_away, "%"),
+    ]
     return HeadToHeadResponse(
         meetings_count=detail.meetings_count,
         home_wins=detail.home_wins,
         draws=detail.draws,
         away_wins=detail.away_wins,
-        avg_goals_home=detail.avg_goals_home,
-        avg_goals_away=detail.avg_goals_away,
-        avg_corners_home=detail.avg_corners_home,
-        avg_corners_away=detail.avg_corners_away,
-        avg_shots_home=detail.avg_shots_home,
-        avg_shots_away=detail.avg_shots_away,
-        avg_shots_on_goal_home=detail.avg_shots_on_goal_home,
-        avg_shots_on_goal_away=detail.avg_shots_on_goal_away,
-        avg_possession_home=detail.avg_possession_home,
-        avg_possession_away=detail.avg_possession_away,
+        # Rounded here so the API is consistent across sports: the basketball and tennis
+        # adapters already round, and football was emitting 7.666666666666667 for a mean of
+        # three integers. The client rounds for display anyway, so this is about the payload
+        # being readable rather than about what a user sees.
+        stats=[
+            HeadToHeadStat(
+                label=label,
+                home=None if home is None else round(home, 1),
+                away=None if away is None else round(away, 1),
+                suffix=suffix,
+            )
+            for label, home, away, suffix in rows
+            if home is not None or away is not None
+        ],
     )
 
 

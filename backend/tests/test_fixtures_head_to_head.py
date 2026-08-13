@@ -116,9 +116,14 @@ async def seeded_fixture_without_external_ids():
         await db.commit()
 
 
-async def test_fetch_head_to_head_returns_none_for_non_football_sport(
+async def test_a_sport_with_no_h2h_provider_never_calls_footballs(
     seeded_fixture_with_external_ids, monkeypatch
 ):
+    """THIS ASSERTED "nba returns None" UNTIL 2026-08-14, and that is no longer the contract:
+    basketball and tennis now have their own panels, through BallDontLie. What must still hold
+    is that a sport with no H2H source of its own does not silently fall through to
+    API-Football's -- which would ask the football provider for two teams it has never heard
+    of and spend real quota doing it."""
     called = False
 
     async def _fake_fetch(*args, **kwargs):
@@ -129,10 +134,10 @@ async def test_fetch_head_to_head_returns_none_for_non_football_sport(
     monkeypatch.setattr("app.adapters.api_football.fetch_h2h_detail", _fake_fetch)
 
     async with async_session_factory() as db:
-        result = await _fetch_head_to_head(db, "nba", seeded_fixture_with_external_ids)
+        result = await _fetch_head_to_head(db, "nfl", seeded_fixture_with_external_ids)
 
     assert result is None
-    assert called is False  # never even attempts the live call for a non-football sport
+    assert called is False
 
 
 async def test_fetch_head_to_head_returns_none_when_team_missing_external_id(
@@ -196,11 +201,25 @@ async def test_fetch_head_to_head_maps_real_detail_for_football(
     assert result.home_wins == 1
     assert result.draws == 1
     assert result.away_wins == 0
-    assert result.avg_goals_home == 1.5
-    assert result.avg_goals_away == 1.0
-    assert result.avg_corners_home == 6.0
-    assert result.avg_shots_on_goal_away == 3.0
-    assert result.avg_possession_home == 55.0
+    # Named avg_* fields became a generic labelled list when tennis and basketball joined:
+    # the three sports do not share a stat vocabulary, so football's five rows would have sat
+    # beside eleven permanently-null tennis fields. See HeadToHeadStat.
+    by_label = {stat.label: stat for stat in result.stats}
+    assert by_label["Goals"].home == 1.5
+    assert by_label["Goals"].away == 1.0
+    assert by_label["Corners"].home == 6.0
+    assert by_label["Possession"].suffix == "%"
+    assert by_label["Goals"].suffix == ""
+    assert by_label["Shots on goal"].away == 3.0
+    assert by_label["Possession"].home == 55.0
+    # Every football row survives the mapping -- five, in display order.
+    assert [stat.label for stat in result.stats] == [
+        "Goals",
+        "Corners",
+        "Total shots",
+        "Shots on goal",
+        "Possession",
+    ]
 
 
 async def test_fetch_head_to_head_returns_none_when_adapter_has_no_real_meetings(

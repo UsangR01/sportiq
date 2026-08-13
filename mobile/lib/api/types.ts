@@ -148,21 +148,29 @@ export interface TeamFeaturesResponse {
 // null (never a fabricated empty record) for NBA or two teams with no shared history. Each
 // avg_* field is independently null when none of the counted meetings had a real value for
 // that specific stat.
+/** One labelled comparison row. A LIST rather than named fields because the sports do not
+ * share a stat vocabulary, and their providers do not expose the same depth:
+ *
+ *   football   goals, corners, shots, shots on goal, possession
+ *   tennis     aces, double faults, 1st serve %, break points, total points won
+ *   NBA/WNBA   points -- BallDontLie's /stats is 401 on this plan, so the final score is the
+ *              only real per-meeting number that exists
+ *
+ * The screen renders whatever rows it is given, so a new sport needs no change here. */
+export interface HeadToHeadStat {
+  label: string;
+  home: number | null;
+  away: number | null;
+  /** Appended verbatim: "%" for percentages, "" for counts. */
+  suffix: string;
+}
+
 export interface HeadToHeadResponse {
   meetings_count: number;
   home_wins: number;
   draws: number;
   away_wins: number;
-  avg_goals_home: number | null;
-  avg_goals_away: number | null;
-  avg_corners_home: number | null;
-  avg_corners_away: number | null;
-  avg_shots_home: number | null;
-  avg_shots_away: number | null;
-  avg_shots_on_goal_home: number | null;
-  avg_shots_on_goal_away: number | null;
-  avg_possession_home: number | null;
-  avg_possession_away: number | null;
+  stats: HeadToHeadStat[];
 }
 
 export interface FixtureDetail extends FixtureSummary {

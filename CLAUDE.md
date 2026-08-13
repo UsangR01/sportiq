@@ -2128,6 +2128,51 @@ match. Root-caused to two independent, stacking issues:
   two the user specifically flagged as still-broken, SHANGHAI SIPG vs Shandong Luneng
   (98% → 85.7%) and Chengdu Better City vs Wuhan Three Towns (99% → 90.8%).
 
+## Head-to-head panel, now for all three sports (2026-08-14)
+
+Asked for after WNBA landed: "I need the historic stat between both team, shown here like for
+football. Show the stats for nba and tennis."
+
+**The depth differs by provider, and that is the finding — not a shortcut.** Probed live before
+any code was written:
+
+    football   5 rows   API-Football   goals, corners, shots, shots on goal, possession
+    tennis     6 rows   BallDontLie    aces, double faults, 1st serve %, 1st serve won %,
+                                       break points won %, total points won %
+    NBA/WNBA   1 row    BallDontLie    points
+
+**Basketball gets ONE row because `/stats` returns 401 on this plan.** No box score is reachable
+at any price we hold — no rebounds, assists, field-goal percentage, pace. The final score is the
+only real per-meeting number. **"Points allowed" was written, then removed: in a two-team H2H it
+is the exact mirror of "points scored"** (73.8/87.0 becomes 87.0/73.8), so it filled the panel
+without adding a fact.
+
+**Tennis is as rich as football**, via two GOAT-tier endpoints this account already has:
+`/head_to_head` returns the career record outright (no match-history search, unlike basketball),
+and `/match_stats` carries serve and return splits.
+
+**`HeadToHeadResponse.stats` became a LABELLED LIST instead of named `avg_*` fields.** The three
+sports share almost no vocabulary, so naming every measure would have given each sport a
+majority of permanently-null fields and made every new sport edit both the schema and the mobile
+component. The client now renders whatever rows it is given.
+
+**Three real behaviours found by running it, not by reading docs:**
+- **`/head_to_head` returns 404 when two players have never met**, not a zeroed record.
+  Confirmed against real upcoming ATP pairs — 6 of 14 sampled had never met, which is ordinary
+  in early rounds. Treated as "no history" rather than an error or a logged failure.
+- **`/match_stats` returns per-SET rows alongside the whole-match row**, all with the same match
+  id. Averaging without filtering to `set_number == 0` weights a five-setter five times.
+- **BallDontLie's tennis H2H answers in its own player1/player2 order**, which is not our
+  home/away. Reading the wins without checking which slot our player landed in would invert the
+  record for roughly half of all fixtures — the same class of error as trusting TheRundown's
+  `teams_normalized` order for home/away.
+
+**Verified live through the real HTTP endpoint** for all three: WNBA (Liberty v Sparks, 3-2,
+100.6 vs 96.8 points), tennis (Khachanov v Kovacevic, 1-0, aces 22 vs 16, 1st serve 66% vs 57%),
+football (Tokyo Verdy v Kashiwa Reysol, 2-0-3, five rows). Football's averages are now rounded
+in the mapping — it was emitting `7.666666666666667` where the other two adapters already
+rounded.
+
 ## Head-to-head panel replaces the raw Odds table on fixture detail
 
 Per direct user request: "Users don't find the Odds section useful, instead they've asked that

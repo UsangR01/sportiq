@@ -203,10 +203,20 @@ function StatRow({
  * statistics"). Per a follow-up ask, shows average goals/corners/shots/shots-on-goal/
  * possession over the last meetings_count real meetings instead of a list of individual match
  * scores ("important stats that will give users confidence on the prediction"). Every value
- * is already relative to THIS fixture's home/away assignment (see backend/app/adapters/
- * api_football.py:H2HDetail), so no client-side flipping is needed here. Only rendered when
- * the backend actually has real history — football-only for now, null (not a fabricated
- * empty state) for NBA or two teams with no shared past meetings. */
+ * is already relative to THIS fixture's home/away assignment, so no client-side flipping is
+ * needed here.
+ *
+ * ALL THREE SPORTS, at whatever depth the provider allows — this said "football-only for now"
+ * until 2026-08-14:
+ *
+ *   football   5 rows   API-Football
+ *   tennis     6 rows   BallDontLie /head_to_head + /match_stats (serve and return)
+ *   NBA/WNBA   1 row    BallDontLie /games — /stats is 401 on this plan, so the final score
+ *                       is the only real per-meeting number, and "points allowed" would be
+ *                       the exact mirror of "points scored" rather than a second fact
+ *
+ * Null (not a fabricated empty state) when the two have genuinely never met — common in early
+ * tennis rounds, where the provider answers 404 rather than a zeroed record. */
 function HeadToHead({
   headToHead,
   homeTeam,
@@ -259,29 +269,21 @@ function HeadToHead({
         </Text>
       </View>
 
-      <StatRow label="Goals" homeValue={headToHead.avg_goals_home} awayValue={headToHead.avg_goals_away} />
-      <StatRow
-        label="Corners"
-        homeValue={headToHead.avg_corners_home}
-        awayValue={headToHead.avg_corners_away}
-      />
-      <StatRow
-        label="Total Shots"
-        homeValue={headToHead.avg_shots_home}
-        awayValue={headToHead.avg_shots_away}
-      />
-      <StatRow
-        label="Shots on Goal"
-        homeValue={headToHead.avg_shots_on_goal_home}
-        awayValue={headToHead.avg_shots_on_goal_away}
-      />
-      <StatRow
-        label="Possession"
-        homeValue={headToHead.avg_possession_home}
-        awayValue={headToHead.avg_possession_away}
-        suffix="%"
-        decimals={0}
-      />
+      {/* Whatever rows the backend sends, in its order. Football gets five, tennis six,
+          basketball one -- each sport's provider exposes a different depth, and hardcoding
+          football's five here is what stopped the other two having a panel at all. */}
+      {headToHead.stats.map((stat) => (
+        <StatRow
+          key={stat.label}
+          label={stat.label}
+          homeValue={stat.home}
+          awayValue={stat.away}
+          suffix={stat.suffix}
+          // Percentages read as whole numbers ("66%", not "66.0%"); counts keep one decimal
+          // because they are averages over a handful of meetings and 6.0 vs 6.4 is the point.
+          decimals={stat.suffix === "%" ? 0 : 1}
+        />
+      ))}
     </View>
   );
 }

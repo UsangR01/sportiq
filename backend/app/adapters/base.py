@@ -166,3 +166,35 @@ class DataSourceAdapter(ABC):
 
     @abstractmethod
     async def fetch_injuries(self, sport: str) -> list[InjuryUpdate]: ...
+
+
+@dataclass
+class H2HPanelStat:
+    """One labelled comparison row in the head-to-head panel."""
+
+    label: str
+    home: float | None
+    away: float | None
+    suffix: str = ""
+
+
+@dataclass
+class H2HPanel:
+    """Head-to-head history shaped for DISPLAY, produced by whichever adapter owns the sport.
+
+    A list of labelled stats rather than named fields, because the sports do not share a
+    vocabulary and their providers do not expose the same depth -- football has corners and
+    possession, tennis has aces and break points, and BallDontLie's NBA plan returns 401 for
+    /stats so basketball has the final scores and nothing else. Naming every measure in one
+    type would give each sport a majority of permanently-null fields.
+
+    Every value is relative to the CURRENT fixture's home/away assignment, not each historical
+    meeting's own: a team's record should not flip depending on which side it happened to be on
+    in a past meeting.
+    """
+
+    meetings_count: int
+    home_wins: int
+    draws: int
+    away_wins: int
+    stats: list[H2HPanelStat]

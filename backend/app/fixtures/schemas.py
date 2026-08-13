@@ -143,33 +143,55 @@ class PredictionResponse(BaseModel):
     extra_markets: ExtraMarketsResponse | None = None
 
 
+class HeadToHeadStat(BaseModel):
+    """One labelled comparison row: the same measure for each side, averaged over the counted
+    meetings.
+
+    A LIST rather than named fields, because the three sports genuinely do not share a stat
+    vocabulary and their providers do not expose the same depth:
+
+        football   goals, corners, shots, shots on goal, possession   (API-Football)
+        tennis     aces, double faults, 1st serve %, break points,
+                   total points won                                   (BallDontLie, GOAT tier)
+        NBA/WNBA   points scored, points allowed                      (scores ONLY -- see below)
+
+    Naming them all in one model would mean a football row carrying eleven permanently-null
+    tennis fields, and every new sport editing this schema plus the mobile component. The
+    client renders whatever rows it is given.
+    """
+
+    label: str
+    home: float | None = None
+    away: float | None = None
+    # Appended verbatim when rendering: "%" for percentages, "" for counts. The unit belongs
+    # with the value that has it, rather than being re-derived from the label on the client.
+    suffix: str = ""
+
+
 class HeadToHeadResponse(BaseModel):
     """Real head-to-head history between this fixture's two teams — replaces the raw
     bookmaker-odds table on the fixture detail screen per direct user request ("Users don't
-    find the Odds section useful... replaced with H2H statistics"). Per a follow-up ask,
-    shows average goals/corners/shots/shots-on-goal/possession over the last 5 real meetings
-    per side instead of a list of individual match scores ("important stats that will give
-    users confidence on the prediction"). home_wins/draws/away_wins and every avg_*_home/away
-    field are relative to THIS fixture's home/away assignment, not each past meeting's own —
-    see app/adapters/api_football.py:H2HDetail. Football only for now (no equivalent built for
-    NBA yet — see app/fixtures/router.py:get_fixture); null, not a fabricated empty record,
-    when unavailable. Each avg_* field is independently null when none of the counted meetings
-    had a real value for that specific stat (never a fabricated average)."""
+    find the Odds section useful... replaced with H2H statistics"), showing averages over the
+    last real meetings rather than a list of individual scores ("important stats that will give
+    users confidence on the prediction").
+
+    home_wins/draws/away_wins and every stat are relative to THIS fixture's home/away
+    assignment, not each past meeting's own — a team's H2H record should not flip depending on
+    which side it happened to be on in a past meeting.
+
+    Available for football, tennis and basketball. Null — never a fabricated empty record —
+    when the two have genuinely never met, or a team could not be resolved.
+
+    DEPTH VARIES BY PROVIDER, and NBA/WNBA is the thin one for a reason worth stating:
+    BallDontLie's /stats returns 401 on this plan, so no box score exists at any price we hold
+    and the only real per-meeting numbers are the final scores. Two rows is what the data
+    supports; inventing more would mean fabricating them."""
 
     meetings_count: int
     home_wins: int
     draws: int
     away_wins: int
-    avg_goals_home: float | None = None
-    avg_goals_away: float | None = None
-    avg_corners_home: float | None = None
-    avg_corners_away: float | None = None
-    avg_shots_home: float | None = None
-    avg_shots_away: float | None = None
-    avg_shots_on_goal_home: float | None = None
-    avg_shots_on_goal_away: float | None = None
-    avg_possession_home: float | None = None
-    avg_possession_away: float | None = None
+    stats: list[HeadToHeadStat] = []
 
 
 class FixtureDetail(FixtureSummary):
