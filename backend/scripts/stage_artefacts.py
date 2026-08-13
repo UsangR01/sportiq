@@ -30,6 +30,7 @@ Usage (from backend/):
 
 import argparse
 import asyncio
+import json
 import shutil
 from pathlib import Path
 
@@ -41,6 +42,15 @@ from app.predictions.models import ModelRegistry
 from app.sports.models import Sport
 
 DEPLOYED_DIR = Path(__file__).resolve().parents[2] / "ml" / "artifacts" / "deployed"
+
+# What was staged, and what the registry said about it. A FRESH DATABASE HAS NO
+# models_registry ROWS AT ALL -- alembic creates the table and nothing fills it -- so an
+# image full of artefacts still resolves no model and produces zero predictions, silently.
+# scripts/seed_model_registry.py replays this file to close that gap.
+#
+# Written HERE rather than maintained by hand so the two can never disagree: you cannot
+# stage a new artefact without recording which version and metrics it shipped with.
+MANIFEST = DEPLOYED_DIR / "manifest.json"
 
 
 async def main(confirm: bool) -> None:
@@ -99,6 +109,21 @@ async def main(confirm: bool) -> None:
     for source, target in planned:
         shutil.copy2(source, target)
         print(f"  staged {target.name}")
+
+    manifest = [
+        {
+            "sport_slug": sport_slug,
+            "version": registry_row.version,
+            "artefact_path": registry_row.artefact_path.replace("\\", "/").rsplit("/", 1)[-1],
+            "accuracy": registry_row.accuracy,
+            "rps_score": registry_row.rps_score,
+            "roi_simulation": registry_row.roi_simulation,
+            "trained_at": registry_row.trained_at.isoformat(),
+        }
+        for registry_row, sport_slug in sorted(rows, key=lambda pair: pair[1])
+    ]
+    MANIFEST.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    print(f"  wrote {MANIFEST.name} ({len(manifest)} models)")
     print("done — commit ml/artifacts/deployed/ so the image contains them")
     await engine.dispose()
 

@@ -1,0 +1,29 @@
+[
+  {
+    "sport_slug": "football",
+    "version": "football_xgb_v20260813153115",
+    "artefact_path": "football_xgb_20260813153115.joblib",
+    "accuracy": 0.5095680699835976,
+    "rps_score": 0.20984704535797388,
+    "roi_simulation": 0.021412820512820438,
+    "trained_at": "2026-08-13T15:31:17.987890+00:00"
+  },
+  {
+    "sport_slug": "nba",
+    "version": "nba_xgb_v20260728142554",
+    "artefact_path": "nba_xgb_20260728142552.joblib",
+    "accuracy": 0.6857142857142857,
+    "rps_score": 0.20020702481269836,
+    "roi_simulation": 0.20873793103448263,
+    "trained_at": "2026-07-28T14:25:54.087596+00:00"
+  },
+  {
+    "sport_slug": "tennis",
+    "version": "tennis_xgb_v20260813023503",
+    "artefact_path": "tennis_xgb_20260813023501.joblib",
+    "accuracy": 0.6376811594202898,
+    "rps_score": 0.22752073407173157,
+    "roi_simulation": null,
+    "trained_at": "2026-08-13T02:35:03.792132+00:00"
+  }
+]
