@@ -281,3 +281,40 @@ real CLV read informs it rather than arriving after the money is spent.
 
 **Interim reads are for instrumentation only.** Any figure before 2026-09-15 is a pipeline
 check, not evidence, and must not be quoted as a track record in either direction.
+
+---
+
+## 10. One prediction per fixture (added 2026-08-13)
+
+Found while building `ml/notebooks/prediction_history.ipynb`, which is exactly what that notebook
+is for.
+
+`run_predictions` **appends** a prediction row rather than replacing one, so a fixture
+re-predicted as its features changed carries a series. Every metric in §4 was computed over rows,
+which weights a fixture by how often it happened to be re-predicted:
+
+    settled football PRE_MATCH rows   143
+    distinct fixtures behind them      63     one of them carrying 25 rows
+    reported accuracy              0.5524
+    accuracy, one row per fixture  0.3651     <- an 18.7pp overstatement
+
+All 143 were genuine forecasts made before kickoff, so this is not a leakage problem. It is a
+denominator problem: **a fixture is one event and contributes one result.**
+
+`_representative_prediction_ids` picks the last row created BEFORE kickoff, partitioned by
+`(fixture_id, kind)`. Three choices worth stating:
+- **Before kickoff, not merely newest.** `created_at` alone is not trustworthy — regeneration
+  reset it on 91 football rows to timestamps after their own kickoffs (§2b already records this).
+- **Partitioned by kind too**, so a fixture holding both a forecast and a retrodiction keeps one
+  of each rather than one hiding the other from its own population.
+- **The series is kept, not deleted.** It is a real record of how a forecast moved as injuries and
+  odds landed. The defect was consuming it as though each row were an independent event.
+
+Corrected live figures at the time of the fix — **neither is reportable**, both sit below the
+§9 floor of 93:
+
+    football   n=63   0.3651   CI [0.257, 0.489]
+    tennis     n=75   0.6533   CI [0.541, 0.751]
+
+Football now reads BELOW its own baseline. That is a worse number than was previously displayed
+and it is the honest one; the previous figure was an artefact of counting.

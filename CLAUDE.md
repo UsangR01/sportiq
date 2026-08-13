@@ -1039,6 +1039,56 @@ football against a 10.5pp detectable effect, needing ~891 graded picks against 1
 ~5,406 against 77. An early percentage is noise in either direction, which is exactly why the
 fields sit beside it.
 
+### `ml/notebooks/prediction_history.ipynb` — daily results, and a queryable history
+
+Run it with the **`SportIQ (backend venv)`** kernel. Anaconda supplies Jupyter on this machine but
+its base environment has no database driver, so the project venv is registered as a kernel rather
+than adding a dependency anywhere:
+
+    backend/.venv/Scripts/python -m ipykernel install --user --name sportiq --display-name "SportIQ (backend venv)"
+
+Data is pulled once via top-level `await` on asyncpg (ipykernel supports it, so no `nest_asyncio`);
+everything after that is pure pandas, so the analysis is reproducible even if the database moves on
+mid-session. Ten sections: coverage, daily results, cumulative accuracy, reliability/Brier,
+confidence tier, feature completeness, per-league, CLV, market mix, and a `history(...)` query
+helper that returns rows **plus** the same summary block — `n`, Wilson interval and detectable
+effect — so an ad-hoc question cannot come back as a bare percentage.
+
+`_wilson_interval`, `_detectable_effect`, `MIN_REPORTABLE_N` and the grading rule are **imported
+from `app.history.router`**, not reimplemented. A notebook with its own copy would eventually
+disagree with the endpoint and there would be no way to tell which one moved. Verified: notebook
+and `/history/summary` return identical n per sport.
+
+**Building it immediately found a real defect in the live endpoint — which is what it is for.**
+`run_predictions` APPENDS a prediction rather than replacing one, so a fixture re-predicted as its
+features changed carries a series, and every history metric counted rows:
+
+    settled football PRE_MATCH rows   143
+    distinct fixtures behind them      63     one fixture carried 25 rows
+    reported accuracy              0.5524
+    one row per fixture            0.3651     <- an 18.7pp overstatement
+
+All 143 were genuine pre-kickoff forecasts, so this was never leakage — it was a denominator.
+A fixture is one event and contributes one result. `_representative_prediction_ids` now keeps the
+last row created BEFORE kickoff (not merely the newest: regeneration reset `created_at` on 91
+football rows to after their own kickoffs), partitioned by `(fixture_id, kind)` so a fixture
+holding both a forecast and a retrodiction keeps one of each. The series itself is kept — it
+records how a forecast moved as injuries and odds landed; the bug was consuming it as independent
+events. Corrected live, and **neither is reportable** (both under the floor of 93):
+
+    football   n=63   0.3651   CI [0.257, 0.489]      <- now BELOW its own baseline
+    tennis     n=75   0.6533   CI [0.541, 0.751]
+
+Football reading below baseline is a worse number than was on display, and the honest one.
+Regression-tested in `test_history.py` with a fixture whose earlier revisions were right and whose
+final pre-kickoff call was wrong, so row-counting and fixture-counting disagree unmistakably.
+
+**This also corrects something recorded a day earlier.** The duplicate `Prediction` rows were
+noted as "harmless today — nothing calls `scalar_one` on `Prediction`". That was true about
+crashes and wrong about measurement: they were silently inflating a live, user-facing accuracy the
+whole time. The check performed was for the failure mode that had bitten before, not for the one
+that was actually present.
+
 ### What the first measurements found
 
 - **CLV is negative, but less so than the naive number.** Proxy over pre-match picks: favoured

@@ -2,7 +2,7 @@ import math
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -82,6 +82,47 @@ def _detectable_effect(p: float, n: int) -> float:
     return (_Z_ALPHA + _Z_BETA) * math.sqrt(max(p * (1 - p), 1e-9) / n)
 
 
+def _representative_prediction_ids():
+    """One prediction per (fixture, kind) — the final forecast, not every revision of it.
+
+    WITHOUT THIS, EVERY METRIC IS WEIGHTED BY HOW OFTEN A FIXTURE HAPPENED TO BE RE-PREDICTED.
+    `run_predictions` appends a row rather than replacing one, so a fixture re-predicted as its
+    features changed accumulates a series. Measured 2026-08-13: 143 settled football PRE_MATCH
+    rows sat on just **63** fixtures, one of them carrying 25 — and the reported accuracy moved
+    0.5524 -> 0.3651 once each fixture counted once. A fixture is one event and must contribute
+    one result; the old behaviour let the most-revised fixtures dominate the number.
+
+    Keeping the series is deliberate — it is a real record of how a forecast moved as injuries
+    and odds landed, and is worth having. The defect was consuming it as though each row were an
+    independent event.
+
+    Ordering: prefer a row created BEFORE kickoff, then the latest of those. Before-kickoff is
+    what the user could actually have acted on, and `created_at` alone is not sufficient because
+    regeneration resets it — 91 football rows were regenerated on 2026-08-10 to timestamps after
+    their own kickoffs. Partitioned by KIND as well as fixture, so a fixture holding both a
+    pre-match forecast and a retrodiction keeps one of each rather than letting one hide the
+    other from its own population.
+    """
+    ranked = (
+        select(
+            Prediction.id.label("pid"),
+            func.row_number()
+            .over(
+                partition_by=(Prediction.fixture_id, Prediction.kind),
+                order_by=(
+                    (Prediction.created_at < Fixture.kickoff_utc).desc(),
+                    Prediction.created_at.desc(),
+                    Prediction.id.desc(),
+                ),
+            )
+            .label("rn"),
+        )
+        .join(Fixture, Fixture.id == Prediction.fixture_id)
+        .subquery()
+    )
+    return select(ranked.c.pid).where(ranked.c.rn == 1)
+
+
 def _history_query(sport_slug: str | None, league_slug: str | None):
     """Settled fixtures the model actually made a call on, newest first.
 
@@ -107,6 +148,9 @@ def _history_query(sport_slug: str | None, league_slug: str | None):
         .join(away_team, away_team.id == Fixture.away_team_id)
         # Outer: most fixtures have no live-state row carrying a result_type at all.
         .outerjoin(FixtureLiveState, FixtureLiveState.fixture_id == Fixture.id)
+        # One row per (fixture, kind) — see _representative_prediction_ids. Applied in the shared
+        # query so /history and /history/summary can never disagree about the population.
+        .where(Prediction.id.in_(_representative_prediction_ids()))
         .order_by(Outcome.settled_at.desc())
     )
     if sport_slug:

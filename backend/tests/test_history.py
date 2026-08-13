@@ -256,3 +256,122 @@ def test_the_reportable_threshold_matches_the_pre_registration():
     assert MIN_REPORTABLE_N == 93
     assert width(MIN_REPORTABLE_N) <= 0.20
     assert width(MIN_REPORTABLE_N - 1) > 0.20  # genuinely the smallest such n
+
+
+@pytest.fixture
+async def fixture_predicted_many_times():
+    """One settled fixture carrying a SERIES of pre-match predictions, as production actually
+    stores them: run_predictions appends a row each time a fixture is re-predicted rather than
+    replacing one. The final forecast before kickoff is WRONG while the earlier revisions were
+    right, so any metric that counts rows instead of fixtures scores this fixture as mostly
+    correct when the call that stood at kickoff was not."""
+    async with async_session_factory() as db:
+        slug = f"test-dup-{uuid.uuid4().hex[:8]}"
+        sport = Sport(slug=slug, name="Test Dup", model_type="test", active=True)
+        db.add(sport)
+        await db.flush()
+        league = League(sport_id=sport.id, slug=f"{slug}-l", name="L", country="XX", tier=1)
+        db.add(league)
+        await db.flush()
+        home = Team(sport_id=sport.id, league_id=league.id, name="H", external_id=f"h{slug}")
+        away = Team(sport_id=sport.id, league_id=league.id, name="A", external_id=f"a{slug}")
+        db.add_all([home, away])
+        await db.flush()
+        kickoff = datetime.now(UTC) - timedelta(days=1)
+        fixture = Fixture(
+            sport_id=sport.id,
+            league_id=league.id,
+            external_id=f"fx-{slug}",
+            home_team_id=home.id,
+            away_team_id=away.id,
+            kickoff_utc=kickoff,
+            status=FixtureStatus.COMPLETED,
+            season="2026",
+        )
+        db.add(fixture)
+        await db.flush()
+        db.add(
+            Outcome(
+                fixture_id=fixture.id,
+                home_score=0,
+                away_score=1,
+                result=MatchResult.AWAY_WIN,
+                settled_at=kickoff + timedelta(hours=2),
+            )
+        )
+        # Four earlier revisions calling HOME (correct by luck of the row count, wrong on the
+        # result), then the final pre-kickoff call, also HOME... deliberately make the earlier
+        # ones AWAY (right) and the last one HOME (wrong), so row-counting and fixture-counting
+        # disagree in an unmistakable direction.
+        for i, (h, a) in enumerate([(0.2, 0.8), (0.2, 0.8), (0.2, 0.8), (0.2, 0.8)]):
+            db.add(
+                Prediction(
+                    fixture_id=fixture.id,
+                    model_version="v1",
+                    home_prob=h,
+                    draw_prob=None,
+                    away_prob=a,
+                    confidence_tier=ConfidenceTier.MEDIUM,
+                    kind=PredictionKind.PRE_MATCH,
+                    created_at=kickoff - timedelta(hours=10 - i),
+                )
+            )
+        db.add(
+            Prediction(
+                fixture_id=fixture.id,
+                model_version="v1",
+                home_prob=0.9,
+                draw_prob=None,
+                away_prob=0.1,
+                confidence_tier=ConfidenceTier.HIGH,
+                kind=PredictionKind.PRE_MATCH,
+                created_at=kickoff - timedelta(minutes=30),
+            )
+        )
+        await db.commit()
+        ids = {"sport_id": sport.id, "slug": slug, "fixture_id": fixture.id}
+    yield ids
+    async with async_session_factory() as db:
+        await db.execute(delete(Prediction).where(Prediction.fixture_id == ids["fixture_id"]))
+        await db.execute(delete(Outcome).where(Outcome.fixture_id == ids["fixture_id"]))
+        await db.execute(delete(Fixture).where(Fixture.sport_id == ids["sport_id"]))
+        await db.execute(delete(Team).where(Team.sport_id == ids["sport_id"]))
+        await db.execute(delete(League).where(League.sport_id == ids["sport_id"]))
+        await db.execute(delete(Sport).where(Sport.id == ids["sport_id"]))
+        await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_a_fixture_counts_once_however_often_it_was_re_predicted(
+    api_client, fixture_predicted_many_times
+):
+    """THE defect, found while building ml/notebooks/prediction_history.ipynb.
+
+    run_predictions appends rather than replaces, so 143 settled football pre-match rows sat on
+    just 63 fixtures — one carrying 25. Every metric was therefore weighted by how often a
+    fixture happened to be re-predicted, and the reported football accuracy moved 0.5524 ->
+    0.3651 once each fixture counted once. A fixture is one event and contributes one result.
+    """
+    slug = fixture_predicted_many_times["slug"]
+    resp = await api_client.get(f"/history?sport_slug={slug}&limit=50")
+    assert resp.status_code == 200
+    entries = resp.json()
+    assert len(entries) == 1, "five prediction rows, one fixture, one graded entry"
+
+    summary = (await api_client.get(f"/history/summary?sport_slug={slug}")).json()
+    assert summary[0]["settled_fixtures"] == 1  # the field was always named for fixtures
+
+
+@pytest.mark.asyncio
+async def test_the_representative_prediction_is_the_last_one_before_kickoff(
+    api_client, fixture_predicted_many_times
+):
+    """Not simply the newest row. created_at is not trustworthy on its own — regeneration reset
+    it on 91 football rows to timestamps AFTER their own kickoffs — and the honest
+    representative is the call that stood when the user could still act on it."""
+    slug = fixture_predicted_many_times["slug"]
+    entry = (await api_client.get(f"/history?sport_slug={slug}")).json()[0]
+    # The last pre-kickoff revision called HOME at 0.9 and the match finished AWAY.
+    assert entry["predicted_outcome"] == "home"
+    assert entry["was_correct"] is False
+    assert entry["predicted_probability"] == pytest.approx(0.9)
