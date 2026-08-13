@@ -560,6 +560,7 @@ def _pick_best(
     candidates: list[_MarketCandidate],
     min_probability: float | None = None,
     sport_slug: str | None = None,
+    is_settled: bool = False,
 ) -> BestPick | None:
     """The best VALUE pick, not the most likely statement.
 
@@ -602,7 +603,40 @@ def _pick_best(
     excluded the entire 1X2 market.
 
     A candidate whose market has no measured base rate is NOT dropped — we can't judge its
-    informativeness, and discarding it silently would be worse than admitting that."""
+    informativeness, and discarding it silently would be worse than admitting that.
+
+    is_settled exempts a DECIDED fixture from MIN_FEATURE_COMPLETENESS, and from that guard
+    ONLY. Reported by a user: a Hearts v Dundee Utd card from 2026-08-09 had shown under-10.5
+    corners at 2.05, the match finished 7-2 on corners so the pick WON, and days later the card
+    carried no pick at all. Nothing about the fixture changed. The floor was raised 0.25 -> 0.35
+    on 2026-08-13, that prediction sits at 0.32, and best_pick is recomputed per request — so a
+    guard tightened after the fact reached backwards and deleted a published result.
+
+    THE BIAS IS THE ARGUMENT, not tidiness. Retroactive filtering is not neutral: sub-0.35
+    picks measure 0.2857 accuracy against 0.5263 at or above it, so dropping them from history
+    makes the visible track record BETTER than the real one. A history that improves every time
+    a guard tightens is not a history. 21 picks over 14 days had been erased, 9 of them Scottish
+    Premiership.
+
+    SCOPED TO THIS ONE GUARD DELIBERATELY, after trying it the other way. Exempting the others
+    was tried first, on the tidier-sounding principle that no bet-worthiness test belongs on a
+    played match, and it rewrote history in the opposite direction:
+      - lifting NO_DEMONSTRATED_SIGNAL_MARKETS put goals under-4.5 at 1.18 on the reported card
+        in place of the corners pick the user actually saw;
+      - lifting MIN_EDGE_OVER_BASE_RATE surfaced a 1X pick sitting BELOW its own base rate on a
+        fixture that had been correctly hidden all along (caught by an existing test).
+    ADDING a pick that was never shown is the same defect as removing one that was. So the
+    exemption covers only the guard that actually tightened and erased, and MIN_EDGE_OVER_BASE_
+    RATE / MAX_EDGE_OVER_MARKET / the barred-market rule still apply everywhere, unchanged.
+
+    min_probability also still applies: it is the user's own visible control, and a card
+    disappearing when they raise their own slider is that control working.
+
+    HONEST LIMIT: this does NOT replay the card as shown, and cannot. Ranking still runs against
+    today's odds, so a settled card shows what the model called rather than a reconstruction.
+    Only pick_snapshots can do that, and it holds nothing before 2026-08-10 — the reported
+    fixture is 08-09, so that particular card is genuinely unrecoverable. Snapshots are the
+    long-term answer; this stops the tightening ratchet in the meantime."""
     # min_probability is an ABSOLUTE floor on the displayed probability, because that is what
     # the UI promises. An earlier version made it drive the informativeness requirement
     # instead, and the result was indefensible from the user's side: at a "75%" setting a pick
@@ -625,7 +659,11 @@ def _pick_best(
         )
         # A vector that was mostly missing at inference time cannot say anything about THIS
         # fixture, however confident the number looks. See MIN_FEATURE_COMPLETENESS.
-        and (c.feature_completeness is None or c.feature_completeness >= MIN_FEATURE_COMPLETENESS)
+        and (
+            is_settled
+            or c.feature_completeness is None
+            or c.feature_completeness >= MIN_FEATURE_COMPLETENESS
+        )
     ]
     priced = [c for c in candidates if c.probability is not None and c.odds is not None]
     unpriced = [c for c in candidates if c.probability is not None and c.odds is None]
@@ -710,6 +748,11 @@ async def _bulk_best_picks(
         )
     ).all()
     sport_by_fixture: dict = {fixture.id: slug for fixture, slug in fixture_rows}
+    # A decided fixture is reviewed, not backed — see _pick_best's is_settled. POSTPONED is not
+    # settled: it has no result, and list_fixtures already nulls its best_pick outright.
+    settled_fixtures: set = {
+        fixture.id for fixture, _ in fixture_rows if fixture.status == FixtureStatus.COMPLETED
+    }
     reference_corners = await bulk_corners_reference(db, [fixture for fixture, _ in fixture_rows])
 
     prediction_rows = (
@@ -742,11 +785,20 @@ async def _bulk_best_picks(
         else:
             # Only when no market was explicitly asked for. A caller naming goals_total wants
             # goals_total; what is barred is it winning the DEFAULT cross-market ranking.
+            #
+            # DELIBERATELY still applied to settled fixtures, unlike the guards in _pick_best,
+            # and this was tried the other way first. Lifting it for settled fixtures put goals
+            # under-4.5 at 1.18 on the reported Hearts v Dundee Utd card in place of the
+            # corners pick the user actually saw — rewriting the past by ADDING rather than
+            # removing. The distinction that matters: the guards in _pick_best DELETE a
+            # fixture's pick outright, while this one only decides which market wins the
+            # headline, and it decides that the same way on every day at once.
             candidates = [c for c in candidates if c.market not in NO_DEMONSTRATED_SIGNAL_MARKETS]
         best = _pick_best(
             candidates,
             min_probability=min_probability,
             sport_slug=sport_by_fixture.get(fixture_id),
+            is_settled=fixture_id in settled_fixtures,
         )
         if best is not None:
             best_picks[fixture_id] = best
