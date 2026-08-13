@@ -1323,6 +1323,57 @@ metrics gap, and it bears on `goals_total` explaining 0.2% of variance: the feat
 to carry goal signal are the ones most absent where the model learns. Corners is flat at 89-92%
 across every season, so the same cut would find nothing there.
 
+### The notebook now grades the CARD's pick, not the model's 1X2 call
+
+Asked 2026-08-13, after the fix below: "I'd prefer the notebook actually visualises only the
+predictions on the card. That's what really matters for trust." Correct, and it exposed that
+**every accuracy this project had ever published measured a different object from the product.**
+
+`/history`, `/history/summary` and the notebook all graded the **1X2 argmax** of the stored
+`Prediction`. The card shows `best_pick`, chosen across four markets. Hearts v Dundee Utd is
+both at once: the card said UNDER 10.5 CORNERS and won; the 1X2 call said away against a 4-0
+home win and lost. Both records were accurate about their own object; only one is the promise.
+
+**The four-market grading rule existed exactly once, in TypeScript** — so only the phone could
+say whether a card had been right. Ported to `app/predictions/grading.py:grade_pick`, a
+deliberate line-by-line port of `mobile/lib/pickFormat.ts:evaluatePickCorrectness` including the
+parts that look like bugs (a `"12"` double chance returns None; an exact push loses both ways),
+because a measurement that disagrees with the card is the defect being closed. Pinned by
+`test_pick_grading.py`. The notebook calls the feed's own `_bulk_best_picks`, so it cannot show
+a pick the app would not.
+
+**The headline moves a long way, and so does the baseline:**
+
+    football, 1X2 argmax (what was reported)   n=63   0.3651
+    football, the card's actual pick           n=62   0.7258   baseline 0.6391   +8.67pp
+
+**Football card picks are 43 double chance + 19 corners and ZERO h2h**, so the number this
+project published for football was measuring a market football cards never show. Tennis is the
+mirror image — all 85 of its card picks are h2h.
+
+**Do not read 0.7258 as the product being twice as good.** Double chance and corners are
+intrinsically higher-probability markets, so the no-skill baseline rises with the accuracy. The
+honest figure is the **+8.67pp gap against a detectable effect of 14.09pp** — still not
+conclusive, on n=62.
+- **Baseline is now the mean of each pick's own `MARKET_BASE_RATES` entry**, since "always pick
+  home" is meaningless for a corners card. Tennis abstains (its rates are deliberately empty),
+  so its baseline is blank rather than borrowed.
+- **Two bugs in the first version of this, both caught by reading the output rather than by
+  review**: pandas turns a column of `None` into `NaN`, so `("double_chance","1X",nan)` matched
+  no base-rate key and reported `baseline_cov 0.0` for every double-chance pick; and the gap
+  compared a 147-row accuracy against a baseline drawn from 19 rows. The gap is now computed on
+  the subset that actually has a base rate, reported alongside `baseline_n`.
+
+**`KIND='PRE_MATCH'` is load-bearing here, not a nicety.** For **578 of 740** settled fixtures
+the prediction the card renders was created AFTER kickoff (`UNKNOWN` provenance), so grading
+"the card" without that filter measures hindsight. `_bulk_best_picks` builds the card from the
+latest prediction regardless of kind; the two coincide only on the PRE_MATCH population.
+
+**Still recomputed, not replayed** — same limit as the fix below. `pick_snapshots` is the only
+true record of what was displayed, and it holds 59 rows, **all tennis h2h**: 0 of the 6 football
+fixtures that passed through the 4-8h window since 2026-08-10 were captured. Not yet diagnosed,
+and too small a sample to call a bug.
+
 ### A tightening guard rewrote published history — settled fixtures are now exempt
 
 Reported 2026-08-13: "a lot of the Scottish league games that were present in the cards days ago
