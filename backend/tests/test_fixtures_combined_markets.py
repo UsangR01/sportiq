@@ -579,35 +579,61 @@ def test_informativeness_is_a_fixed_bar_not_something_the_slider_moves():
 # --- base rates are per SPORT -------------------------------------------------------------
 
 
-def test_tennis_home_is_judged_against_the_tennis_tiebreak_not_footballs_home_advantage():
-    """Football's base rates must not govern tennis.
+def test_tennis_is_not_judged_against_footballs_home_advantage_nor_against_its_own_tiebreak():
+    """Football's base rates must not govern tennis — still true, now satisfied differently.
 
-    "Home" in tennis is not a venue — there is no home court. It is an arbitrary but stable
-    tiebreak (lower external player id, balldontlie_tennis.py:_home_away_players), and that
-    tiebreak is far from 50/50: measured over 17,434 real completed ATP matches (2021-2025)
-    the lower-id player wins 62.17%, because ids correlate loosely with time on tour.
+    THIS TEST PREVIOUSLY ASSERTED THE OPPOSITE OUTCOME, and is rewritten rather than deleted
+    because the reasoning it encoded is the thing that was wrong. It argued that a tennis
+    "home 55%" call says less than nothing, being 7 points below the 62.17% the lower-id
+    tiebreak gives you on its own. The 62.17% is real. What does not follow is treating it as a
+    bar a pick must clear:
 
-    Judged against football's 45.82% home rate, a tennis "home 55%" call looks like +9 points
-    of information when it is really 7 points BELOW what the tiebreak alone gives you. The gate
-    was admitting picks that say less than nothing.
+      - the id ordering is not a strategy anyone can run — a user cannot see our row ordering;
+      - it is a proxy for player strength (the lower-id player is the higher-ranked one 69% of
+        the time), and rank_diff, the model's primary feature, already prices that in — so the
+        gate charged the same fact twice;
+      - two base rates summing to 1 put the bars at 0.672 and 0.428, so against a model whose
+        probabilities cluster in 0.44-0.69 the AWAY slot almost always cleared and the home slot
+        almost never did. Measured over 669 real tennis predictions, 167 (25.0%) came out
+        inverted: the product recommended the player the model rated lower.
+
+    Tennis now abstains from the gate entirely, as it already did for markets it does not have.
+    Football's home advantage is a real causal effect and keeps its rate.
     """
     from app.fixtures.router import _MarketCandidate, _pick_best
 
     mediocre = _MarketCandidate("home", 0.55, 1.90, "h2h", None)
 
-    # Under football's table this clears the gate (0.55 - 0.4582 = +0.092 >= 0.05)...
+    # Football is unchanged: 0.55 - 0.4582 = +0.092 >= 0.05.
     assert _pick_best([mediocre], sport_slug="football") is not None
-    # ...but for tennis it is BELOW the base rate entirely (0.55 - 0.6217 = -0.072).
-    assert _pick_best([mediocre], sport_slug="tennis") is None
+    # Tennis no longer rejects its own favourite on account of the id ordering.
+    best = _pick_best([mediocre], sport_slug="tennis")
+    assert best is not None and best.selection == "home"
 
 
-def test_tennis_pick_well_above_its_own_base_rate_still_surfaces():
-    """The gate must not simply suppress tennis. A genuinely strong call still passes."""
+def test_a_strong_tennis_call_still_surfaces():
+    """Unchanged, and worth keeping: removing the gate must not have broken ordinary selection."""
     from app.fixtures.router import _MarketCandidate, _pick_best
 
     strong = _MarketCandidate("home", 0.85, 1.40, "h2h", None)
     best = _pick_best([strong], sport_slug="tennis")
     assert best is not None and best.selection == "home"
+
+
+def test_the_tennis_favourite_wins_over_its_own_complement():
+    """THE inversion, as a behavioural test rather than a constants check.
+
+    Brandon Nakashima v Rafael Jodar, 2026-08-12: home 0.5616, away 0.4384, result HOME_WIN.
+    The old gate rejected home (needed 0.6717) and admitted away (needed 0.4283), so the only
+    offerable pick was the side the model rated lower — which lost.
+    """
+    from app.fixtures.router import _MarketCandidate, _pick_best
+
+    home = _MarketCandidate("home", 0.5616, 1.70, "h2h", None)
+    away = _MarketCandidate("away", 0.4384, 2.10, "h2h", None)
+    best = _pick_best([home, away], sport_slug="tennis")
+    assert best is not None
+    assert best.selection == "home", "the model's favourite must not be filtered out from under it"
 
 
 def test_base_rate_abstains_for_a_market_the_sport_does_not_have():

@@ -1039,6 +1039,78 @@ football against a 10.5pp detectable effect, needing ~891 graded picks against 1
 ~5,406 against 77. An early percentage is noise in either direction, which is exactly why the
 fields sit beside it.
 
+### Tennis abstains from the base-rate gate — it was inverting a quarter of all picks
+
+Reported as "how come this wasn't on the card, even with the slider at 50%?" — a real ATP fixture
+(Brandon Nakashima v Rafael Jodar, 2026-08-12) where the model called home at 0.5616, the match
+finished HOME_WIN, and the feed offered **away at 0.4384**.
+
+**The mechanism.** `MIN_EDGE_OVER_BASE_RATE` requires a pick to clear its market's base rate by
+5pp. Tennis carried `("h2h","home"): 0.6217 / ("h2h","away"): 0.3783`, so home needed 0.6717 and
+away needed 0.4283. Home failed, away passed, and the product recommended the player the model
+rated lower.
+
+**Those constants were real but described the wrong thing.** "Home" in tennis is
+`_home_away_players`' lower-player-id tiebreak — a label-stability device, not a venue. Measured
+2026-08-13: `corr(player_id, rank_points) = -0.11`, and the lower-id player is the higher-ranked
+one **69%** of the time. So 0.6217 encoded "the stronger player usually wins" wearing a home/away
+label. Two consequences:
+- **Double counting.** `rank_diff` is the model's primary feature, so its probability already
+  prices in that the home player is stronger. The gate charged the same fact a second time.
+- **The bars cannot be symmetric.** Two rates summing to 1, each +5pp, sit at 0.672 and 0.428 —
+  symmetric around the base-rate split, not around 0.5. Against a model whose probabilities
+  cluster in 0.44-0.69 the away slot nearly always clears and the home slot nearly never does.
+  Over all 669 tennis predictions, **167 (25.0%) were inverted**.
+
+Honest caveat kept in view: on the 146 settled inverted picks, showing the favourite would have
+scored 54.8% against the 45.2% shown — 80 vs 66, about 1.2 standard errors, **not** statistically
+distinguishable from chance. The case for changing it is structural, not that the loss is proven.
+
+**`_TENNIS_BASE_RATES` is now empty**, so `_base_rate` returns None and the gate abstains —
+exactly as it already did for draw/double-chance/goals/corners, which tennis also does not have.
+The gate was also redundant: `min_probability` (user slider, default 0.6),
+`MIN_FEATURE_COMPLETENESS` and `MAX_EDGE_OVER_MARKET` all still apply, in coordinates a user can
+see. Football keeps its rates — its home advantage is a real causal effect and "back the home
+team" is a strategy someone could actually run. Live: **0 of 21** tennis picks inverted, down
+from 4 of 4 on the same fixtures.
+
+**A gate can come back, and the condition is pre-registered** in `router.py` before the evidence
+existed: the model must beat **"back the higher-ranked player"** by ≥3pp pooled AND not have that
+edge concentrated in one surface. `train_tennis.py` now reports exactly that every run:
+
+    pooled   n=3,900   model 0.6436   baseline 0.6221   +2.15pp    <- below the 3pp bar
+      Clay   n=1,234   +2.51pp
+      Grass  n=  477   +5.24pp
+      Hard   n=2,159   +1.25pp
+
+**Verdict: no gate.** Both conditions fail — 2.15pp pooled, and the edge sits on grass.
+
+**Per surface because ranking is surface-blind and the model is not**, which was the question
+that prompted it. The baseline itself barely moves by surface (Hard 0.6325 / Clay 0.6202 /
+Grass 0.6377 over 17,480 matches — a **1.75pp** spread), so "higher-ranked players aren't equally
+good on all surfaces" is true of players but does **not** show up in how often the higher-ranked
+one wins. Any per-surface difference in the GAP is therefore the model's doing.
+- **My prediction was wrong.** I expected the edge to be largest on CLAY, where ranking is least
+  reliable. It is largest on GRASS in both runs — the smallest stratum (n=477), where a spurious
+  high value is most likely, and a 95% interval there is roughly ±4.4pp.
+- **The per-surface figures are unstable between runs** that differ only by seed (Clay +1.46 →
+  +2.51, Grass +5.87 → +5.24). The pooled figure is stable (+2.13 → +2.15). Treat the surface
+  cuts as a prompt, not a finding.
+
+**Two data problems fixed on the way, both of which would have corrupted that cut:**
+- **`"Grass"` and `"Grass "` were separate values** — 4,296 rows vs 386. This is not cosmetic:
+  `surface_win_rate`, `surface_streak` and `h2h_win_rate_surface` all match on this string, so 8%
+  of grass matches were compared against the wrong pool. Stripped at collection AND on load,
+  because re-collecting costs 17k rate-limited calls.
+- **`train_tennis.py` pinned no seed** — neither the Optuna sampler nor `random_state`, while the
+  search space includes `subsample`/`colsample_bytree`. A pre-registered threshold is meaningless
+  against a number that moves on its own, so both are now pinned to match `train_football.py`.
+  Current model **`tennis_xgb_v20260813023503`**, test accuracy 0.6377. The prior run scored
+  0.6386, but that was unseeded, so the difference cannot be attributed to the surface fix.
+- **Live surface data is 89% missing** (2,019 of 2,268 settled tennis fixtures have no
+  `tournament_surface` — the column was added recently and never backfilled), so the per-surface
+  cut works on the test split but not yet on live results.
+
 ### `ml/notebooks/prediction_history.ipynb` — daily results, and a queryable history
 
 Run it with the **`SportIQ (backend venv)`** kernel. Anaconda supplies Jupyter on this machine but

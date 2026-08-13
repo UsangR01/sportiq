@@ -367,11 +367,45 @@ MARKET_BASE_RATES: dict[tuple[str, str, float | None], float] = {
 # (0.5198) purely because PLAYER_ID is stored as a string, so min() compared "10" < "9"
 # lexicographically — worth knowing before re-deriving these.
 _TENNIS_BASE_RATES: dict[tuple[str, str, float | None], float] = {
-    ("h2h", "home", None): 0.6217,
-    ("h2h", "away", None): 0.3783,
-    # No draw in tennis, and no double-chance/goals/corners markets either — those keys are
-    # absent rather than zeroed, so _base_rate returns None and the gate abstains instead of
-    # judging a market this sport does not have.
+    # DELIBERATELY EMPTY. Tennis abstains from the base-rate gate entirely, for the same reason
+    # it already abstained for draw/double-chance/goals/corners: those keys are absent rather
+    # than zeroed, so _base_rate returns None and the gate declines to judge a market this sport
+    # does not have. HOME/AWAY IS SUCH A MARKET.
+    #
+    # It used to hold ("h2h","home"): 0.6217 and ("h2h","away"): 0.3783. Those numbers were real
+    # — the player labelled "home" does win about that often — but "home" in tennis is not a
+    # venue. app/adapters/balldontlie_tennis.py:_home_away_players assigns home = the LOWER
+    # BallDontLie player id, purely so a fixture's sides cannot flip between an early scheduled
+    # ingest and a later completed one. Measured 2026-08-13, that ordering is a weak proxy for
+    # strength: corr(player_id, rank_points) = -0.11, and the lower-id player is the
+    # higher-ranked one 69% of the time. So the base rate encoded "the stronger player usually
+    # wins" wearing a home/away label.
+    #
+    # Two things followed, and the second is why this is now empty rather than merely refreshed:
+    #   1. DOUBLE COUNTING. rank_diff is the model's primary feature, so its probability for the
+    #      home player ALREADY prices in that he is the stronger one. Requiring him to clear a
+    #      prior that exists BECAUSE he is the stronger one charges the same fact twice.
+    #   2. THE BARS CANNOT BE SYMMETRIC. Two base rates summing to 1, each plus 5pp, put the bar
+    #      at 0.672 for home and 0.428 for away — symmetric around the base-rate split, not
+    #      around 0.5. Against a model whose probabilities cluster in 0.44-0.69 the away slot
+    #      almost always clears and the home slot almost never does. Measured over all 669
+    #      tennis predictions: 167 (25.0%) were INVERTED — the model favoured home, home failed
+    #      its bar, away cleared it, so the product recommended the player the model rated LOWER.
+    #
+    # The gate is also redundant here. "Is this confident enough to show?" is already answered by
+    # the user's own min_probability slider (default 0.6), by MIN_FEATURE_COMPLETENESS, and by
+    # MAX_EDGE_OVER_MARKET — all in coordinates a user can see. This was a fourth, hidden filter
+    # keyed on our own row ordering.
+    #
+    # WHAT WOULD BRING A GATE BACK, pre-registered before the data exists: a tennis pick should
+    # have to beat the strategy a user could actually run — "back the higher-ranked player",
+    # which hits 0.6296 over 17,480 real matches (Hard 0.6325 / Clay 0.6202 / Grass 0.6377, a
+    # 1.75pp spread, so it is not surface-dependent in any way that matters). train_tennis.py
+    # now reports the model against exactly that, pooled and per surface. Reintroduce a gate
+    # only if the model beats that baseline by >= 3pp on the test split AND the per-surface
+    # figures do not show the edge coming from one surface alone. The current margin is 1.6pp
+    # (63.86% vs 62.22%), which is why the honest response today is no gate rather than a gate
+    # against an artifact.
 }
 
 BASE_RATES_BY_SPORT: dict[str, dict[tuple[str, str, float | None], float]] = {

@@ -54,6 +54,9 @@ VAL_SEASON = 2024
 TEST_SEASON = 2025
 
 N_OPTUNA_TRIALS = 50
+# Matches train_football.py's pinned seed so runs are comparable to each other; the value
+# itself is arbitrary, its fixedness is not.
+RANDOM_SEED = 20260811
 
 
 def _iso_monday(d):
@@ -95,9 +98,86 @@ def build_training_examples(games: pd.DataFrame, rank_points: pd.DataFrame) -> p
         features["label"] = 1 if home_row["WL"] == "W" else 0
         features["season"] = season
         features["match_id"] = match_id
+        # Carried for REPORTING only — neither is in FEATURE_NAMES, so neither reaches the
+        # model. `surface` lets the ranking baseline below be cut per surface, and rank_diff is
+        # already a feature but is read there as the baseline's own decision rule.
+        features["surface"] = home_row["SURFACE"]
         rows.append(features)
 
     return pd.DataFrame(rows)
+
+
+MIN_SURFACE_ROWS_TO_REPORT = 100
+
+
+def _ranking_baseline_report(test_df, predicted_labels, model_accuracy: float) -> dict:
+    """Score the model against BACK THE HIGHER-RANKED PLAYER, pooled and per surface.
+
+    WHY THIS BASELINE AND NOT "ALWAYS PICK HOME". "Home" in tennis is the lower BallDontLie
+    player id — a label-stability device, not a venue — so "always pick home" measures our own
+    row ordering. Backing the higher-ranked player is the strategy a user could actually run
+    without a model, which is what a baseline is supposed to represent. It is also what
+    justified removing the tennis base-rate gate from app/fixtures/router.py: that gate was
+    comparing picks against the id ordering, which inverted a quarter of them.
+
+    PER SURFACE, because ranking is surface-blind and the model is not. ATP points are one
+    number across all surfaces, while the model carries surface_win_rate, surface_streak and
+    h2h_win_rate_surface precisely to know what the ranking does not. If those features earn
+    their place, the model's edge should be LARGER on clay, where ranking is least reliable.
+    Measured over 17,480 real matches the baseline itself barely moves by surface (Hard 0.6325,
+    Clay 0.6202, Grass 0.6377 — a 1.75pp spread), so any per-surface difference in the GAP is
+    the model's doing rather than the baseline's.
+
+    Ties and missing ranks abstain rather than guess: a baseline that silently falls back to
+    "pick home" on unranked players would smuggle the id ordering back in through the door this
+    exists to close.
+    """
+    df = test_df.reset_index(drop=True).copy()
+    df["model_correct"] = (
+        pd.Series(predicted_labels).reset_index(drop=True) == df["label"]
+    ).astype(int)
+    rated = df[df["rank_diff"].notna() & (df["rank_diff"] != 0)].copy()
+    if rated.empty:
+        print("ranking baseline: no test rows carry rank points for both players — skipped")
+        return {}
+    # rank_diff = home_points - away_points, so > 0 means the home slot IS the higher-ranked
+    # player and the baseline predicts label 1.
+    rated["baseline_correct"] = ((rated["rank_diff"] > 0).astype(int) == rated["label"]).astype(int)
+
+    pooled_base = float(rated["baseline_correct"].mean())
+    pooled_model = float(rated["model_correct"].mean())
+    metrics = {
+        "ranking_baseline_accuracy": pooled_base,
+        "ranking_baseline_n": float(len(rated)),
+        "model_accuracy_on_ranked_subset": pooled_model,
+        "ranking_baseline_gap": pooled_model - pooled_base,
+    }
+    print(
+        "\nvs 'back the higher-ranked player' (the strategy a user could run without us):\n"
+        f"  pooled   n={len(rated):<6} model={pooled_model:.4f} baseline={pooled_base:.4f} "
+        f"gap={(pooled_model - pooled_base) * 100:+.2f}pp"
+    )
+    print(f"  (model accuracy over ALL test rows, including unranked: {model_accuracy:.4f})")
+
+    if "surface" in rated.columns:
+        # Stripped defensively: the collected log holds both "Grass" and "Grass " and an
+        # unstripped groupby splits the smaller stratum out of sight.
+        rated["surface"] = rated["surface"].astype(str).str.strip()
+        for surface, g in rated.groupby("surface"):
+            if len(g) < MIN_SURFACE_ROWS_TO_REPORT:
+                continue  # below this a surface rate is noise, not a signal
+            b, m = float(g["baseline_correct"].mean()), float(g["model_correct"].mean())
+            metrics[f"ranking_gap_{surface.lower()}"] = m - b
+            metrics[f"ranking_baseline_{surface.lower()}"] = b
+            print(
+                f"  {surface:<8} n={len(g):<6} model={m:.4f} baseline={b:.4f} "
+                f"gap={(m - b) * 100:+.2f}pp"
+            )
+    print(
+        "  A gate against this baseline is pre-registered in app/fixtures/router.py at >=3pp\n"
+        "  pooled AND not concentrated in one surface. Below that, no gate."
+    )
+    return metrics
 
 
 def _optuna_objective(trial, X_train, y_train, X_val, y_val) -> float:
@@ -110,7 +190,7 @@ def _optuna_objective(trial, X_train, y_train, X_val, y_val) -> float:
         "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
         "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
     }
-    model = xgb.XGBClassifier(objective="binary:logistic", **params)
+    model = xgb.XGBClassifier(objective="binary:logistic", random_state=RANDOM_SEED, **params)
     model.fit(X_train, y_train)
     val_preds = model.predict_proba(X_val)[:, 1]
     return log_loss(y_val, val_preds)
@@ -167,6 +247,15 @@ async def main_async() -> None:
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
 
     games = pd.read_parquet(DATA_DIR / f"tennis_game_log_{TOUR}.parquet")
+    # Applied on load as well as at collection, because the already-collected parquet still
+    # holds the unstripped values and re-collecting costs 17k rate-limited API calls. "Grass"
+    # (4,296 rows) and "Grass " (386) are the same surface; unstripped they are two, which
+    # splits the surface FEATURES — surface_win_rate, surface_streak and h2h_win_rate_surface
+    # all match on this string, so 8% of grass matches were compared against the wrong pool.
+    if "SURFACE" in games.columns:
+        games["SURFACE"] = (
+            games["SURFACE"].astype(str).str.strip().replace({"": None, "None": None})
+        )
     rank_points = pd.read_parquet(DATA_DIR / f"tennis_rank_points_{TOUR}.parquet")
 
     print("assembling training examples (this walks every match with a leakage-safe filter)...")
@@ -188,7 +277,15 @@ async def main_async() -> None:
 
     print(f"running Optuna ({N_OPTUNA_TRIALS} trials)...")
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study = optuna.create_study(direction="minimize")
+    # SEEDED, because a pre-registered threshold is meaningless against a number that moves on
+    # its own. app/fixtures/router.py now commits to reinstating the tennis gate only if the
+    # model beats the ranking baseline by >=3pp; if consecutive runs of this script disagree by
+    # an unknown amount, that criterion cannot be evaluated. train_football.py already pins its
+    # sampler for the same reason — tennis and NBA did not, which is why the first measured gap
+    # (+2.13pp) could not be compared against the previous run's accuracy.
+    study = optuna.create_study(
+        direction="minimize", sampler=optuna.samplers.TPESampler(seed=RANDOM_SEED)
+    )
     study.optimize(
         lambda trial: _optuna_objective(trial, X_train, y_train, X_val, y_val),
         n_trials=N_OPTUNA_TRIALS,
@@ -197,7 +294,11 @@ async def main_async() -> None:
 
     X_trainval = pd.concat([X_train, X_val])
     y_trainval = pd.concat([y_train, y_val])
-    final_model = xgb.XGBClassifier(objective="binary:logistic", **study.best_params)
+    # random_state pinned as well as the sampler: the search space includes subsample and
+    # colsample_bytree, so the FIT is stochastic even once the params are fixed.
+    final_model = xgb.XGBClassifier(
+        objective="binary:logistic", random_state=RANDOM_SEED, **study.best_params
+    )
     final_model.fit(X_trainval, y_trainval)
 
     val_raw = final_model.predict_proba(X_val)[:, 1]
@@ -218,6 +319,8 @@ async def main_async() -> None:
 
     print(f"test accuracy={accuracy:.4f} (baseline={baseline_accuracy:.4f}) brier/rps={brier:.4f}")
 
+    ranking_metrics = _ranking_baseline_report(test_df, test_pred_label, accuracy)
+
     artefact_path = ARTIFACT_DIR / f"tennis_xgb_{datetime.now(UTC):%Y%m%d%H%M%S}.joblib"
     joblib.dump(
         {"model": final_model, "calibrator": calibrator, "feature_names": feature_cols},
@@ -236,6 +339,11 @@ async def main_async() -> None:
         mlflow.log_metric("test_accuracy", accuracy)
         mlflow.log_metric("test_brier_rps", brier)
         mlflow.log_metric("baseline_accuracy", baseline_accuracy)
+        # Logged so the "does this model beat a strategy a user could run?" question accrues a
+        # history rather than being asked once and forgotten — the same reason the corners
+        # market's calibration is logged every run.
+        for name, value in ranking_metrics.items():
+            mlflow.log_metric(name, value)
         mlflow.log_metric("val_log_loss", study.best_value)
         mlflow.log_artifact(str(artefact_path))
 

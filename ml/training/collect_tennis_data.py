@@ -203,7 +203,13 @@ async def collect_game_log() -> pd.DataFrame:
                 completed += 1
                 game_date = _match_date(match)
                 tournament = match.get("tournament", {})
-                surface = tournament.get("surface")
+                # STRIPPED, because the provider is not consistent about it. Measured over the
+                # real collected log: "Grass" appears 4,296 times and "Grass " — same value with
+                # a trailing space — another 386. Unstripped they are two distinct categories,
+                # which silently splits any per-surface cut and, worse, splits the surface
+                # FEATURES: surface_win_rate / surface_streak / h2h_win_rate_surface all match on
+                # this string, so 8% of grass matches were being compared against the wrong pool.
+                surface = (tournament.get("surface") or "").strip() or None
                 winner_id = _match_winner_id(match)
 
                 home_player, away_player = _home_away_players(match)
