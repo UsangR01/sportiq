@@ -7,12 +7,22 @@ export interface TokenPair {
   token_type: string;
 }
 
+export interface LeagueOption {
+  slug: string;
+  name: string;
+}
+
 export interface SportResponse {
   id: string;
   slug: string;
   name: string;
   model_type: string;
   league_count: number;
+  /** Only populated when the sport has few enough leagues to offer as filters (see
+   * app/sports/router.py:LEAGUE_PICKER_MAX). Football's 18 come back empty on purpose --
+   * the feed already groups by league internally, which is the right affordance at that
+   * count. Basketball's NBA/WNBA and tennis's ATP/WTA come back populated. */
+  leagues: LeagueOption[];
 }
 
 export interface BestPick {

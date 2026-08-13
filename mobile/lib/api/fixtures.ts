@@ -3,6 +3,8 @@ import type { FixtureDetail, FixtureSummary } from "./types";
 
 export interface ListFixturesParams {
   sport_slug?: string;
+  /** Narrows to one competition within a sport -- NBA vs WNBA, ATP vs WTA. */
+  league_slug?: string;
   status?: "scheduled" | "live" | "completed" | "postponed";
   limit?: number;
   /** ISO datetime strings — backend already supported this filter, just never had a caller. */
@@ -23,6 +25,7 @@ export interface ListFixturesParams {
 export function listFixtures(params: ListFixturesParams = {}): Promise<FixtureSummary[]> {
   const query = new URLSearchParams();
   if (params.sport_slug) query.set("sport_slug", params.sport_slug);
+  if (params.league_slug) query.set("league_slug", params.league_slug);
   if (params.status) query.set("status", params.status);
   if (params.limit) query.set("limit", String(params.limit));
   if (params.date_from) query.set("date_from", params.date_from);

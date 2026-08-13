@@ -128,6 +128,13 @@ export default function PicksScreen() {
 
   const [minProbability, setMinProbability] = useState(DEFAULT_MIN_PROBABILITY);
 
+  // Narrows within a sport: NBA vs WNBA, ATP vs WTA. Component state rather than the
+  // preferences store because, unlike sportFilter, it is NOT synced to the guest session --
+  // that blob migrates into user_preferences on registration and there is no league column
+  // to migrate into. A sport is "what I follow" and persists; a league is a narrowing within
+  // a browsing session. Promote it if that turns out to be the wrong read.
+  const [leagueFilter, setLeagueFilter] = useState<string | null>(null);
+
   // Defaults to "today" — the backend only ever backfills/looks ahead 7 days either way
   // (see components/DateNavigator.tsx), so this always starts inside real, populated data.
   const [selectedDate, setSelectedDate] = useState<Date>(() => startOfDay(new Date()));
@@ -140,6 +147,7 @@ export default function PicksScreen() {
       "fixtures",
       "picks",
       sportFilter,
+      leagueFilter,
       selectedDate.toDateString(),
       minProbability,
       minOdds,
@@ -152,6 +160,7 @@ export default function PicksScreen() {
       const { from, to } = dayBounds(selectedDate);
       return listFixtures({
         sport_slug: sportFilter ?? undefined,
+        league_slug: leagueFilter ?? undefined,
         date_from: from,
         date_to: to,
         limit: FIXTURES_PAGE_LIMIT,
@@ -178,8 +187,14 @@ export default function PicksScreen() {
       <View className="mb-2 flex-row items-center gap-2 px-4">
         <SportDropdown
           sports={sportsQuery.data ?? []}
-          selected={sportFilter}
-          onSelect={setSportFilter}
+          selected={{ sport: sportFilter, league: leagueFilter }}
+          onSelect={(selection) => {
+            // Both move together. Picking a different sport must clear a league that belongs
+            // to the old one, or the query asks for e.g. football + wnba and returns nothing
+            // while the trigger still reads like a valid choice.
+            setSportFilter(selection.sport);
+            setLeagueFilter(selection.league);
+          }}
         />
         <DateNavigator selected={selectedDate} onSelect={setSelectedDate} />
       </View>
