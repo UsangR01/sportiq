@@ -66,3 +66,8 @@ ml/export/*.parquet
 **/*-firebase-adminsdk-*.json
 **/serviceAccountKey*.json
 **/firebase-service-account*.json
+
+# Per-fixture test outputs written by ml/training/train_football.py, one file per training run.
+# Generated and regeneratable, same reasoning as ml/data/ and ml/export/*.parquet above — the
+# code that produces them is the source. They also travel with their MLflow run as an artifact.
+ml/evaluation/*.parquet

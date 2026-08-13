@@ -1265,6 +1265,110 @@ that was actually present.
   but *correctness* evidence points higher. Small n, wide intervals — a candidate to revisit,
   not a settled answer.
 
+### 1X2 finally got the instrument every other market already had
+
+An external critique listed five measurement gaps. Checked against the code rather than
+accepted: **O/U calibration for goals and corners was already done**, per-league metrics existed
+for 1X2 only, and three were real. Two were closed 2026-08-13; the numbers are below.
+
+**1X2 had RPS and nothing else.** Over/Under goals got a reliability table only after shipping
+overconfident, corners only after shipping judged by MAE while the product sold "P(under 9.5)".
+The flagship market never got one at all — nobody could say whether fixtures called 55% home win
+55% of the time. `app/models_ml/evaluation.py:multiclass_calibration` now reports log loss,
+multiclass Brier, top-label ECE and per-class reliability every run.
+
+    log loss           1.0179   (uncalibrated 1.0148)     <- calibration is WORSE
+    Brier (multiclass) 0.6070   (uncalibrated 0.6070)     <- identical to 4dp
+    ECE (top label)    0.0143
+
+**The first thing it measured is that isotonic calibration on 1X2 is not earning its place.** Log
+loss is slightly worse calibrated than raw and Brier is unchanged. Not harmful at this size, and
+it is the first evidence either way after the step had been in the pipeline for months.
+
+**Home is well calibrated and DRAW is a base rate wearing a prediction:**
+
+    home   .0-.1 .161 | .2-.3 .268 | .4-.5 .467 | .5-.6 .566 | .7-.8 .721 | .8-.9 .800
+    draw   0.2-0.3: n=5023 of 5487 fixtures, actual .257
+    away   monotonic to .5-.6 (.546), then .7-.8 n=131 actual .649
+
+Home is monotonic across nine buckets and within ~0.02 of the diagonal above 0.2 — genuinely
+good. **92% of all fixtures get a draw probability between 0.2 and 0.3**, observed 0.257. The
+model is right about draws and cannot discriminate between them at all — the 1X2 analogue of
+the goals_total finding, and previously invisible because RPS averages it away.
+
+**Per-fixture test outputs** now land in `ml/evaluation/test_predictions_<version>.parquet`
+(also an MLflow artifact): calibrated and uncalibrated probabilities, xG/corners predictions,
+actuals, plus `feature_completeness`/`has_xg_features`/`has_corners`. Every comparison here had
+rested on printed headlines plus booster hashes, which proves SCOPE and cannot attribute — it is
+what forced the standing caveat that corners MAE 2.167 → 2.157 is not an improvement because the
+test set grew 35%. That is now a join on `fixture_id`, not a warning in a comment.
+- **`_register_model` was minting its own `datetime.now()`**, so every model ever trained had a
+  registry version a few seconds ahead of its artefact filename (`...20260813134420.joblib`
+  registered as `...v20260813134423`). Cosmetic until per-fixture rows existed; fatal to their
+  purpose, since `predictions.model_version` carries the registry string. One timestamp now
+  feeds all three via `model_version_for()`.
+- **These live in `backend/app/models_ml/`, not in `train_football.py`**, because that script
+  imports xgboost/mlflow/optuna at module scope and nothing defined there is reachable from CI.
+  Every metric this project has been embarrassed by existed only as a printed number. Vindicated
+  within minutes: a test caught `np.arange(0.0, 1.0, 0.1)` yielding `0.30000000000000004`, so a
+  probability of exactly 0.3 missed its own reliability bucket.
+- Scoping confirmed as expected — no estimator changed, and accuracy/RPS came back **identical**
+  at 0.5096/0.2098. Current model `football_xgb_v20260813153115`.
+
+**Still open from that critique**: per-league × per-market metrics (per-league is 1X2 only), and
+splitting results by xG availability. The second is sharper than the critic knew — coverage is
+**2021 0% / 2022 57% / 2023 91% (TRAIN) / 2024 86% (VAL) / 2025 98% (TEST)**, so train is ~49%
+covered against a test set at 98%. That is a train/test mismatch in feature AVAILABILITY, not a
+metrics gap, and it bears on `goals_total` explaining 0.2% of variance: the features most likely
+to carry goal signal are the ones most absent where the model learns. Corners is flat at 89-92%
+across every season, so the same cut would find nothing there.
+
+### A tightening guard rewrote published history — settled fixtures are now exempt
+
+Reported 2026-08-13: "a lot of the Scottish league games that were present in the cards days ago
+are now missing... Hearts and Dundee on the 9 August had Under 10.5 corners on the card, with an
+odd of over 2. This was a win — and I don't see it on the card going back to that day. **Historic
+cards should not be altered, should they?**"
+
+Correct on every detail, and self-inflicted. Verified against the real row: that fixture's
+prediction carries `feature_completeness` **0.32**, `MIN_FEATURE_COMPLETENESS` was raised
+**0.25 → 0.35 the same day**, and `best_pick` is recomputed on every request rather than stored.
+So a guard tightened after the fact reached backwards and deleted a result the product had
+already published. Real corners were 7-2 = **9**, so under 10.5 genuinely won.
+
+**The measurement that justified raising the floor was right and looked at the wrong
+population.** It said "a measured cost of ZERO upcoming picks" — true. The floor lives in
+`_pick_best`, which runs for every fixture the feed renders, *including settled ones being
+reviewed*. Upcoming was checked; the past was never looked at. **21 picks over 14 days had been
+erased, 9 of them Scottish Premiership.**
+
+**The bias is the argument, not tidiness.** Retroactive filtering is not neutral here: sub-0.35
+picks measure **0.2857** accuracy against **0.5263** at or above it, so dropping them makes the
+visible track record BETTER than the real one. A history that improves every time a guard
+tightens is not a history.
+
+`_pick_best(is_settled=True)` now exempts `COMPLETED` fixtures from `MIN_FEATURE_COMPLETENESS`.
+
+**SCOPED TO THAT ONE GUARD, after trying it wider and measuring the result.** The tidier
+principle — "no bet-worthiness test belongs on a played match" — rewrote history in the opposite
+direction, twice:
+- lifting `NO_DEMONSTRATED_SIGNAL_MARKETS` put **goals under-4.5 at 1.18** on the reported card
+  in place of the corners pick the user actually saw;
+- lifting `MIN_EDGE_OVER_BASE_RATE` surfaced a 1X pick sitting BELOW its own base rate on a
+  fixture that had been correctly hidden all along — caught by an existing test, not by review.
+
+**ADDING a pick that was never shown is the same defect as deleting one that was.** So
+`MIN_EDGE_OVER_BASE_RATE`, `MAX_EDGE_OVER_MARKET` and the barred-market rule still apply
+everywhere, unchanged, and `test_settled_fixtures_keep_their_pick.py` pins that they keep biting.
+`min_probability` also still applies — it is the user's own visible control, and a card
+disappearing when they move their own slider is that control working.
+
+**HONEST LIMIT: this does not replay the card as SHOWN, and cannot.** Ranking still runs against
+today's odds, so a settled card shows what the model called rather than a reconstruction.
+`pick_snapshots` is the only thing that can do that and holds nothing before 2026-08-10 — the
+reported fixture is 08-09, so that specific card is genuinely unrecoverable. Snapshots are the
+long-term answer; this stops the ratchet in the meantime.
+
 ## Pick ranking, odds reliability, and prediction-quality measurement
 
 A block of work driven by two user observations that turned out to share one root cause: "a

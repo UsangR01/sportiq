@@ -85,6 +85,10 @@ from app.models_ml.football_features import (  # noqa: E402
     merge_corners_into_game_log,
     merge_xg_into_game_log,
 )
+from app.models_ml.evaluation import (  # noqa: E402
+    build_test_prediction_rows,
+    multiclass_calibration,
+)
 from app.models_ml.league_baselines import compute_league_baselines  # noqa: E402
 from app.models_ml.markets import CORNERS_LINES, GOALS_LINES, over_under_probs  # noqa: E402
 from app.predictions.market_signal import (  # noqa: E402
@@ -554,6 +558,9 @@ def build_training_examples(
         ]
         features["season"] = season
         features["fixture_id"] = fixture_id
+        # Carried for the saved per-fixture test outputs (save_test_predictions), so a later
+        # comparison can cut by date without re-deriving it from a parquet join.
+        features["game_date"] = game_date
         # Carried through purely so metrics can be reported per league (per_league_metrics).
         # NOT a model input — the feature selection is by FEATURE_NAMES, so an extra column
         # here is inert, and league identity as a feature was measured and regressed (see
@@ -567,6 +574,24 @@ def build_training_examples(
         rows.append(features)
 
     return pd.DataFrame(rows)
+
+
+# Per-fixture test outputs land here. TDD §9 lists ml/evaluation/ and it had never been
+# created; this is what it is for.
+EVALUATION_DIR = ML_DIR / "evaluation"
+
+ARTEFACT_PREFIX = "football_xgb_"
+
+
+def model_version_for(artefact_path: Path) -> str:
+    """The models_registry version string for an artefact, derived from its own filename.
+
+    One timestamp for the artefact, the registry row and the saved per-fixture predictions, so
+    all three can be matched by name. They could not be before: _register_model called
+    datetime.now() a second time, leaving every model's registry version a few seconds ahead of
+    the file it describes.
+    """
+    return f"{ARTEFACT_PREFIX}v{artefact_path.stem.removeprefix(ARTEFACT_PREFIX)}"
 
 
 async def _register_model(
@@ -595,7 +620,12 @@ async def _register_model(
         for row in existing_active:
             row.is_active = False
 
-        version = f"football_xgb_v{datetime.now(UTC):%Y%m%d%H%M%S}"
+        # DERIVED from the artefact filename, not a fresh timestamp. Minting a second
+        # datetime.now() here put the registry version a few seconds ahead of the artefact
+        # stem for every model ever trained, so nothing could be matched between them by name.
+        # That was cosmetic until per-fixture test outputs existed; now the whole point of
+        # those rows is joining them to the version a prediction actually carries.
+        version = model_version_for(artefact_path)
         db.add(
             ModelRegistry(
                 sport_id=sport.id,
@@ -1001,6 +1031,13 @@ async def main_async() -> None:
         )
     print(f"flat-stake ROI (home picks with real odds, n={len(roi_rows)}): {flat_stake_roi}")
 
+    one_x_two_metrics, one_x_two_lines = multiclass_calibration(
+        y_test.to_numpy(), test_calibrated, test_raw, CLASSES
+    )
+    print()
+    for line in one_x_two_lines:
+        print(line)
+
     # Honest before/after check on the real test set — same "report it straight, not spun
     # positively" convention as the corners-rolling-features MAE result already in CLAUDE.md.
     # The SAME statistic the live trigger uses (app/predictions/market_signal.py), computed on
@@ -1171,6 +1208,39 @@ async def main_async() -> None:
     )
     print(f"saved artefact to {artefact_path}")
 
+    # Per-fixture test outputs, keyed on the artefact's own version so two runs can be joined
+    # rather than compared by eye. Written AFTER the artefact, so a file on disk always
+    # corresponds to a model that exists.
+    corners_home_pred_full = pd.Series(np.nan, index=test_df.index, dtype=float)
+    corners_away_pred_full = pd.Series(np.nan, index=test_df.index, dtype=float)
+    if corners_test_mask.sum() > 0:
+        corners_home_pred_full.loc[corners_test_mask] = corners_home_calibrator.predict(
+            corners_home_model.predict(X_test_corners[corners_test_mask])
+        )
+        corners_away_pred_full.loc[corners_test_mask] = corners_away_calibrator.predict(
+            corners_away_model.predict(X_test_corners[corners_test_mask])
+        )
+    EVALUATION_DIR.mkdir(parents=True, exist_ok=True)
+    test_predictions = build_test_prediction_rows(
+        test_df,
+        feature_cols,
+        test_calibrated,
+        test_raw,
+        # The CALIBRATED rates, because those are what FootballModel.predict serves to the
+        # Over/Under markets — saving the raw ones would record a number no user ever sees.
+        xg_home_calibrator.predict(test_df["xg_home"]),
+        xg_away_calibrator.predict(test_df["xg_away"]),
+        CLASSES,
+        model_version_for(artefact_path),
+    )
+    test_predictions["corners_home_pred"] = corners_home_pred_full.to_numpy()
+    test_predictions["corners_away_pred"] = corners_away_pred_full.to_numpy()
+    predictions_path = (
+        EVALUATION_DIR / f"test_predictions_{model_version_for(artefact_path)}.parquet"
+    )
+    test_predictions.to_parquet(predictions_path, index=False)
+    print(f"saved {len(test_predictions)} per-fixture test predictions to {predictions_path}")
+
     mlflow.set_tracking_uri(f"file:{ML_DIR / 'mlruns'}")
     mlflow.set_experiment("football_1x2")
     with mlflow.start_run():
@@ -1180,6 +1250,9 @@ async def main_async() -> None:
         mlflow.log_param("n_optuna_trials", N_OPTUNA_TRIALS)
         mlflow.log_param("random_seed", RANDOM_SEED)
         mlflow.log_param("last_n_form", football_features.LAST_N_FORM)
+        # The per-fixture outputs travel WITH the run, so a comparison between two runs never
+        # depends on both files still being on one machine's disk.
+        mlflow.log_artifact(str(predictions_path))
         for key, value in study.best_params.items():
             mlflow.log_param(f"layer2_{key}", value)
         for key, value in layer1_home_params.items():
@@ -1201,6 +1274,11 @@ async def main_async() -> None:
             mlflow.log_metric(f"gap__{row['league']}", row["gap"])
             mlflow.log_metric(f"n__{row['league']}", row["n"])
         mlflow.log_metric("val_log_loss", val_log_loss)
+        # 1X2 log loss / multiclass Brier / ECE / per-class reliability. val_log_loss above is
+        # a TUNING diagnostic on uncalibrated validation probabilities and should not be read
+        # as a test metric; these are the held-out ones.
+        for metric_name, metric_value in one_x_two_metrics.items():
+            mlflow.log_metric(metric_name, metric_value)
         if flat_stake_roi is not None:
             mlflow.log_metric("flat_stake_roi_home_picks", flat_stake_roi)
         if corners_mae is not None:
