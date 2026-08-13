@@ -879,6 +879,30 @@ predicted total corners 9.10–15.02 (mean 10.71).
 measurement, not a promotion attempt — the script registers and activates on every run, so
 measuring a baseline necessarily leaves a row. It was superseded minutes later by the tuned model.
 
+**The duplicate-background-process footgun, hit again — and this time it silently changed which
+model was SERVED.** A launch appeared not to start (its log read 0 bytes five seconds in, because
+output was still buffered), so it was launched a second time with the same `>` redirect. That
+TRUNCATED the first process's log while the first process kept running. Two full trainings then
+ran concurrently and both registered: `...v20260813004745` at 00:47 and `...v20260813005943` at
+00:59. The later one activated itself, so the registry pointed at a version that **no prediction
+had been generated with** — every one of the 135 was stamped `...004745`.
+- **An empty log is not evidence a process died.** Check for the process, not for output.
+- Resolved by activating `...004745`, the version the predictions actually carry, after proving
+  the two artefacts byte-identical across all five boosters. The alternative — regenerating 135
+  predictions onto `...005943` — would have spent real H2H API calls for a model that provably
+  cannot differ. `...005943` is left inactive, like the baseline row.
+- Silver lining: an unplanned THIRD reproducibility check. Two independent full runs, five
+  byte-identical boosters, identical artefact size.
+- **Known limitation this exposed in the new re-queue rule:** it compares the version STRING, not
+  artefact content, so two identical models under different versions would trigger a full,
+  pointless regeneration. Acceptable — a retrain producing a byte-identical artefact is not a
+  normal event, and it only happened here because of the double launch — but worth knowing before
+  reading a future mass re-queue as a real model change.
+
+Verified served end to end after the fix: `GET /stats/model` reports `football_xgb_v20260813004745`,
+all 135 upcoming predictions are on that one version with **zero** on a stale one, and a real
+fixture (Tokyo Verdy v Kashiwa Reysol) serves corners under-9.5 0.450 / under-10.5 0.575.
+
 ---
 
 ## Bivariate Poisson / Dixon-Coles for Over/Under — measured, and the ceiling is ~zero
