@@ -257,6 +257,29 @@ async def _reconcile_vanished_fixtures(
     return len(gone)
 
 
+async def _active_model_version(db: AsyncSession, sport_id) -> str | None:
+    """The version currently serving this sport, or None if nothing is promoted yet.
+
+    Read from models_registry rather than from a loaded model, because promotion here is a DB
+    update rather than a deploy (TDD §3.1) — so the registry is the authority on what a fresh
+    prediction would be stamped with, and comparing against it is what makes a retrain
+    propagate to already-predicted fixtures.
+    """
+    from app.predictions.models import ModelRegistry
+
+    return (
+        (
+            await db.execute(
+                select(ModelRegistry.version).where(
+                    ModelRegistry.sport_id == sport_id, ModelRegistry.is_active.is_(True)
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
+
+
 async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
     # NOTE: TDD §6.2 references a sports.data_source_slug column that isn't in the §2.1 schema
     # listing. Using sport.slug directly as the AdapterFactory key until that's reconciled.
@@ -472,13 +495,39 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
         # already has a real prediction, so a daily re-run of this worker doesn't waste real
         # H2H/moneyline API calls recomputing predictions whose features haven't materially
         # changed since kickoff is still days out.
+        # ...AND when the prediction it already has came from a SUPERSEDED model.
+        #
+        # "No prediction yet" alone meant a retrain never reached a single user. Measured
+        # 2026-08-13: all 135 upcoming football fixtures were serving predictions from one of
+        # FOUR superseded versions, the newest of them three retrains old — including the
+        # rolling-window change adopted the day before. Nothing failed and nothing logged; the
+        # models were trained, registered and activated, and the feed simply went on showing
+        # the old numbers. That is the same shape as the stale-worker and served-but-untrained
+        # traps already recorded here: work completed, never delivered.
+        #
+        # Cost stays bounded because this fires on a VERSION CHANGE, not on a schedule — a
+        # routine daily re-run still queues nothing, which is what the original guard was
+        # protecting. Only a promotion causes the sweep, and a promotion is exactly when every
+        # served number is out of date.
         from app.workers.run_predictions import run_predictions
 
+        active_version = await _active_model_version(db, sport.id)
         for fixture in upcoming:
-            has_prediction = (
-                await db.execute(select(Prediction.id).where(Prediction.fixture_id == fixture.id))
-            ).first()
-            if has_prediction is None:
+            existing_version = (
+                (
+                    await db.execute(
+                        select(Prediction.model_version).where(Prediction.fixture_id == fixture.id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            stale = (
+                existing_version is not None
+                and active_version is not None
+                and existing_version != active_version
+            )
+            if existing_version is None or stale:
                 run_predictions.delay(str(fixture.id))
 
         await _queue_kickoff_reminders(db, upcoming)

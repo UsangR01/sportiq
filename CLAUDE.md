@@ -807,10 +807,77 @@ it is what improved — not calibration, which was already near zero.
 - **The OOF folds use the tuned Layer 1 config too.** Leaving them on the old settings would
   train Layer 2 on xG from a different model than the one that ultimately serves it — a
   train/serve mismatch introduced by the tuning itself.
-- **Corners regressors are deliberately still untuned** and their MAE is unchanged at 2.156,
-  which is the scoping working. They are the remaining follow-up.
+- ~~**Corners regressors are deliberately still untuned**~~ — **done 2026-08-13, see below.**
 - Reproducibility re-verified with stochasticity now enabled: two runs, identical best params
   and identical test metrics.
+
+---
+
+## Corners tuned — and the market it sells had never been measured at all
+
+**Current model: `football_xgb_v20260813004745`.** The corners pair was the last untuned
+estimator in this model, and closing it turned up something bigger than the tuning.
+
+**The Over/Under CORNERS market shipped with no held-out evaluation whatsoever.** Goals has had
+Brier + reliability buckets every run since it was caught shipping overconfident; corners was
+judged only by MAE, and MAE is not what the market sells. The product surfaces "P(under 9.5
+corners)" and nobody had ever checked whether that number was right — the identical gap, in the
+identical place, that the goals block exists to close. It matters more now than it would have
+before: `goals_total` is barred from the headline pick, so corners wins roughly half of them.
+So the instrument was built FIRST and a baseline captured with it, because tuning cannot be
+judged on a metric that does not exist yet.
+
+**Pre-registered before any tuned number was seen** (in `train_football.py`, next to the code):
+under-9.5 Brier must improve by ≥0.0005 (PRIMARY — it is what the market sells); corners MAE
+must not worsen by more than 0.010 (a guard, not a target); under-9.5 buckets must not lose
+monotonicity if they have it. **Tolerances stated up front this time** — the previous
+pre-registration on this project specified none, so a 0.05% move read as failure and the rule
+had to be overridden after the fact.
+
+    under 9.5 Brier      0.2535 -> 0.2509     PASS, 5x the 0.0005 bar
+    corners test MAE     2.158  -> 2.120      PASS (improved, not merely held)
+    bucket monotonicity  see below            PASS
+
+All three passed, so it was adopted. Tuning again found the defaults genuinely wrong rather than
+merely unstated — depth 4 → 3/4, learning rate 0.3 → **0.032/0.028**, ~365 trees with real
+subsampling. Same objective as Layer 1 (validation Poisson deviance, home and away separately),
+because these are count regressors and scoring them by one market line would tune them for 9.5
+while they also serve 10.5 and the fixture-detail display. `_tune_layer1` is now `_tune_poisson`,
+shared by all four count regressors.
+
+**The under-10.5 line went from INVERTED to fully monotonic, and its spread doubled:**
+
+    under 10.5   .577 .559 .574 .627 .651   ->   .516 .547 .579 .627 .665
+    under  9.5   .479 .459 .475 .522 .548   ->   .447 .442 .477 .525 .564
+
+Discrimination is the constraint repeatedly identified as binding on every derived market here,
+and it is what moved. Scoping verified by hashing boosters rather than assumed: `layer1_home`/
+`layer1_away`/`layer2` are **byte-identical** between the baseline and tuned artefacts and only
+the corners pair CHANGED, which is why 1X2 accuracy/RPS being unchanged (0.5096/0.2098) is
+correct scoping and not a silently broken run.
+
+**The honest limit: corners discrimination is real but weak.** Predicted probabilities span
+0.2–0.7 while the observed rate spans only 0.44–0.56. The model orders fixtures correctly but is
+far more spread than reality justifies, and the bottom two 9.5 buckets are still inverted on
+small n (47 and 385). This is better than goals — which was flat at its base rate — and consistent
+with the r=+0.288 measured live. It is not a strong signal, and the new buckets are now the
+instrument for saying so each run.
+
+**A separate and more damaging finding, which is why the retrain nearly didn't matter:
+NO UPCOMING FIXTURE WAS USING EVEN THE PREVIOUS MODEL.** All 135 upcoming football fixtures were
+serving predictions from one of **four superseded versions**, the newest three retrains old —
+including the rolling-window change adopted the day before. The queueing guard only ever asked
+"does a prediction exist?", so a promotion never refreshed anything. Nothing failed and nothing
+logged, because promotion is a DB update rather than a deploy. This is the same shape as the
+stale-worker and served-but-untrained traps already recorded here: **work completed, never
+delivered.** `ingest_fixtures` now also re-queues when a fixture's stored `model_version` differs
+from the active one — bounded, because it fires on a version CHANGE rather than on a schedule, so
+a routine daily run still queues nothing. All 135 were regenerated: one version, no duplicates,
+predicted total corners 9.10–15.02 (mean 10.71).
+
+**Registry note:** `football_xgb_v20260813003444` is the untuned BASELINE arm of this
+measurement, not a promotion attempt — the script registers and activates on every run, so
+measuring a baseline necessarily leaves a row. It was superseded minutes later by the tuned model.
 
 ---
 

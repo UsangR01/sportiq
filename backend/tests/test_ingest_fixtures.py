@@ -837,3 +837,113 @@ async def test_a_withdrawn_fixture_is_flagged_and_unflagged_by_the_real_ingest_p
             await db.execute(delete(League).where(League.sport_id == sport.id))
             await db.execute(delete(Sport).where(Sport.id == sport.id))
             await db.commit()
+
+
+async def test_a_prediction_from_a_superseded_model_is_regenerated(monkeypatch):
+    """A retrain that reaches nobody is not a retrain.
+
+    Measured 2026-08-13: all 135 upcoming football fixtures were serving predictions from one
+    of FOUR superseded model versions, the newest three retrains old — because the queueing
+    guard only ever asked "does a prediction exist?". Promotion is a DB update rather than a
+    deploy, so nothing anywhere noticed; the numbers on every card simply stayed old.
+
+    The guard against the opposite error still has to hold: matching versions must NOT re-queue,
+    or every daily run spends real H2H/odds API calls recomputing predictions nothing changed.
+    """
+    from app.predictions.models import ModelRegistry
+
+    kickoff = datetime.now(UTC) + timedelta(days=1)
+    async with async_session_factory() as db:
+        slug = f"test-sport-{uuid.uuid4().hex[:8]}"
+        sport = Sport(slug=slug, name="Test Sport", model_type="test", active=True)
+        db.add(sport)
+        await db.flush()
+        league = League(sport_id=sport.id, slug="stale-l", name="L", country="XX", tier=1)
+        db.add(league)
+        db.add(
+            ModelRegistry(
+                sport_id=sport.id,
+                version="active_v2",
+                artefact_path="/nowhere.joblib",
+                is_active=True,
+                trained_at=datetime.now(UTC),
+            )
+        )
+        await db.commit()
+        await db.refresh(sport)
+        await db.refresh(league)
+
+    payload = FixturePayload(
+        external_id="fx-stale-model-1",
+        league_external_id="stale-l",
+        home_team_external_id="50",
+        away_team_external_id="60",
+        kickoff_utc=kickoff,
+        season="2026",
+        home_team_name="Home FC",
+        away_team_name="Away FC",
+        status="scheduled",
+    )
+
+    import app.adapters.factory as factory_module
+
+    monkeypatch.setattr(
+        factory_module.AdapterFactory, "get_stats_adapter", lambda s: FakeAdapter([payload])
+    )
+    queued: list[str] = []
+    import app.workers.run_predictions as run_predictions_module
+
+    monkeypatch.setattr(
+        run_predictions_module.run_predictions, "delay", lambda fid: queued.append(fid)
+    )
+
+    async def set_prediction_version(fixture_id, version):
+        async with async_session_factory() as db:
+            await db.execute(delete(Prediction).where(Prediction.fixture_id == fixture_id))
+            db.add(
+                Prediction(
+                    fixture_id=fixture_id,
+                    model_version=version,
+                    home_prob=0.5,
+                    draw_prob=0.3,
+                    away_prob=0.2,
+                    confidence_tier=ConfidenceTier.MEDIUM,
+                    created_at=datetime.now(UTC),
+                )
+            )
+            await db.commit()
+
+    try:
+        await _ingest_fixtures_for_league(sport, league)
+        async with async_session_factory() as db:
+            fixture = (
+                await db.execute(select(Fixture).where(Fixture.external_id == "fx-stale-model-1"))
+            ).scalar_one()
+
+        # Superseded: must be regenerated.
+        await set_prediction_version(fixture.id, "old_v1")
+        queued.clear()
+        await _ingest_fixtures_for_league(sport, league)
+        assert queued == [str(fixture.id)]
+
+        # Current: must NOT be, or a daily run burns real API calls for nothing.
+        await set_prediction_version(fixture.id, "active_v2")
+        queued.clear()
+        await _ingest_fixtures_for_league(sport, league)
+        assert queued == []
+    finally:
+        async with async_session_factory() as db:
+            ids = (
+                (await db.execute(select(Fixture.id).where(Fixture.sport_id == sport.id)))
+                .scalars()
+                .all()
+            )
+            if ids:
+                await db.execute(delete(Prediction).where(Prediction.fixture_id.in_(ids)))
+                await db.execute(delete(TeamFeatures).where(TeamFeatures.fixture_id.in_(ids)))
+            await db.execute(delete(Fixture).where(Fixture.sport_id == sport.id))
+            await db.execute(delete(ModelRegistry).where(ModelRegistry.sport_id == sport.id))
+            await db.execute(delete(Team).where(Team.sport_id == sport.id))
+            await db.execute(delete(League).where(League.sport_id == sport.id))
+            await db.execute(delete(Sport).where(Sport.id == sport.id))
+            await db.commit()

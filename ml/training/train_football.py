@@ -86,7 +86,7 @@ from app.models_ml.football_features import (  # noqa: E402
     merge_xg_into_game_log,
 )
 from app.models_ml.league_baselines import compute_league_baselines  # noqa: E402
-from app.models_ml.markets import GOALS_LINES, over_under_probs  # noqa: E402
+from app.models_ml.markets import CORNERS_LINES, GOALS_LINES, over_under_probs  # noqa: E402
 from app.predictions.market_signal import (  # noqa: E402
     MIN_CI_LOW,
     MIN_N,
@@ -212,7 +212,7 @@ N_OPTUNA_TRIALS = 50
 # Home and away are tuned separately rather than sharing one configuration. They are different
 # targets with different means — home goals run materially higher — and a single fit for both
 # would quietly favour whichever side has more signal.
-def _optuna_objective_layer1(trial, X_train, y_train, X_val, y_val) -> float:
+def _optuna_objective_poisson(trial, X_train, y_train, X_val, y_val) -> float:
     params = {
         "n_estimators": trial.suggest_int("n_estimators", 50, 400),
         "max_depth": trial.suggest_int("max_depth", 2, 6),
@@ -230,15 +230,17 @@ def _optuna_objective_layer1(trial, X_train, y_train, X_val, y_val) -> float:
     return float(mean_poisson_deviance(y_val, preds))
 
 
-def _tune_layer1(label, X_train, y_train, X_val, y_val) -> dict:
+def _tune_poisson(label, X_train, y_train, X_val, y_val) -> dict:
+    """Shared by Layer 1's expected-goals regressors and the corners pair — four count
+    regressors fitting the same loss, so they tune identically and only the target differs."""
     study = optuna.create_study(
         direction="minimize", sampler=optuna.samplers.TPESampler(seed=RANDOM_SEED)
     )
     study.optimize(
-        lambda trial: _optuna_objective_layer1(trial, X_train, y_train, X_val, y_val),
+        lambda trial: _optuna_objective_poisson(trial, X_train, y_train, X_val, y_val),
         n_trials=N_OPTUNA_TRIALS,
     )
-    print(f"Optuna layer1 {label}: best validation Poisson deviance={study.best_value:.4f}")
+    print(f"Optuna poisson {label}: best validation Poisson deviance={study.best_value:.4f}")
     print(f"  params={study.best_params}")
     return study.best_params
 
@@ -719,10 +721,10 @@ async def main_async() -> None:
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     y_home_train = train_df["home_goals"].astype(float)
     y_away_train = train_df["away_goals"].astype(float)
-    layer1_home_params = _tune_layer1(
+    layer1_home_params = _tune_poisson(
         "home", X_train, y_home_train, X_val, val_df["home_goals"].astype(float)
     )
-    layer1_away_params = _tune_layer1(
+    layer1_away_params = _tune_poisson(
         "away", X_train, y_away_train, X_val, val_df["away_goals"].astype(float)
     )
 
@@ -754,12 +756,54 @@ async def main_async() -> None:
         f"corners training rows: {corners_train_mask.sum()}/{len(train_df)} "
         f"(test rows with real corner counts: {corners_test_mask.sum()}/{len(test_df)})"
     )
-    corners_home_model = xgb.XGBRegressor(objective="count:poisson", **XGB_COMMON)
+    # Tuned, closing the last untuned estimator in this model. Layer 1 and Layer 2 were tuned
+    # earlier and the corners pair was explicitly left as a follow-up; until then it ran on
+    # XGB_COMMON, i.e. XGBoost's defaults reached by omission, which the Layer 1 pass showed to
+    # be genuinely wrong rather than merely unstated (the search moved depth 4 -> 2 and learning
+    # rate 0.3 -> 0.034).
+    #
+    # Same objective as Layer 1 — VALIDATION POISSON DEVIANCE, home and away separately — for
+    # the same reason: these are count regressors, so tuning and fitting should optimise the
+    # same loss, and scoring them by a downstream market metric would tune them for one line
+    # (9.5) while they also serve 10.5 and the fixture-detail display. Separately, because the
+    # away side genuinely wins fewer corners than the home side.
+    #
+    # PRE-REGISTERED, before the tuned numbers were seen. Adopt only if ALL hold:
+    #   1. under-9.5 Brier improves by >= 0.0005. PRIMARY, because it is what the market
+    #      actually sells and what the new evaluation block above measures.
+    #   2. corners test MAE does not worsen by more than 0.010. A guard, not a target: MAE is
+    #      not the market metric, but a real collapse in point accuracy would mean the Brier
+    #      gain came from somewhere suspect.
+    #   3. under-9.5 reliability buckets do not LOSE monotonicity if they currently have it.
+    #      Discrimination has been the binding constraint on every derived market here.
+    # Tolerances are explicit and stated up front. The last pre-registration on this project
+    # specified none, so a 0.05% relative move read as failure while every other measure moved
+    # the other way, and the rule had to be overridden after the fact. A rule with no tolerance
+    # is a rule that has not been thought through.
+    corners_home_params = _tune_poisson(
+        "corners_home",
+        X_train_corners[corners_train_mask],
+        train_df.loc[corners_train_mask, "home_corners"].astype(float),
+        X_val_corners[corners_val_mask],
+        val_df.loc[corners_val_mask, "home_corners"].astype(float),
+    )
+    corners_away_params = _tune_poisson(
+        "corners_away",
+        X_train_corners[corners_train_mask],
+        train_df.loc[corners_train_mask, "away_corners"].astype(float),
+        X_val_corners[corners_val_mask],
+        val_df.loc[corners_val_mask, "away_corners"].astype(float),
+    )
+    corners_home_model = xgb.XGBRegressor(
+        objective="count:poisson", random_state=RANDOM_SEED, **corners_home_params
+    )
     corners_home_model.fit(
         X_train_corners[corners_train_mask],
         train_df.loc[corners_train_mask, "home_corners"].astype(float),
     )
-    corners_away_model = xgb.XGBRegressor(objective="count:poisson", **XGB_COMMON)
+    corners_away_model = xgb.XGBRegressor(
+        objective="count:poisson", random_state=RANDOM_SEED, **corners_away_params
+    )
     corners_away_model.fit(
         X_train_corners[corners_train_mask],
         train_df.loc[corners_train_mask, "away_corners"].astype(float),
@@ -1055,6 +1099,58 @@ async def main_async() -> None:
                     f"actual={actual_under[in_bucket].mean():.3f}"
                 )
 
+    # --- Over/Under CORNERS: the same held-out evaluation, which it has never had ------------
+    #
+    # Corners shipped judged by MAE alone, and MAE is not what this market sells. The product
+    # surfaces "P(under 9.5 corners)"; whether that number is right had never been measured,
+    # which is the identical gap that let Over/Under GOALS ship visibly overconfident until the
+    # block above was added. It matters more than it used to: goals_total is barred from the
+    # headline pick (no demonstrated signal), so corners now wins roughly half of them, and it
+    # is the one derived market with a measured correlation to reality (r=+0.288, n=234).
+    #
+    # Deliberately mirrors the goals block rather than sharing code with it: the two differ in
+    # their masks (corner counts are missing for ~30-65% of fixtures depending on league and are
+    # never zero-filled) and in reading calibrated rather than raw rates, and forcing one helper
+    # to serve both would hide those differences rather than state them.
+    corners_market_metrics: dict[str, float] = {}
+    if corners_test_mask.sum() > 0:
+        actual_corner_totals = (
+            test_df.loc[corners_test_mask, "home_corners"].astype(float)
+            + test_df.loc[corners_test_mask, "away_corners"].astype(float)
+        ).to_numpy()
+        # Calibrated, because that is what FootballModel.predict serves to the market.
+        corners_totals = corners_home_calibrator.predict(
+            corners_home_model.predict(X_test_corners[corners_test_mask])
+        ) + corners_away_calibrator.predict(
+            corners_away_model.predict(X_test_corners[corners_test_mask])
+        )
+        print("Over/Under corners — held-out calibration (predicted vs actually observed):")
+        for line in CORNERS_LINES:
+            predicted_under = np.array(
+                [over_under_probs(float(t), (line,))[line][0] for t in corners_totals]
+            )
+            actual_under = (actual_corner_totals < line).astype(float)
+            brier = float(np.mean((predicted_under - actual_under) ** 2))
+            mean_gap = float(predicted_under.mean() - actual_under.mean())
+            corners_market_metrics[f"corners_ou_{line}_brier"] = brier
+            corners_market_metrics[f"corners_ou_{line}_mean_gap"] = mean_gap
+            print(
+                f"  under {line}: brier={brier:.4f} "
+                f"mean predicted={predicted_under.mean():.3f} "
+                f"actual={actual_under.mean():.3f} gap={mean_gap:+.3f}"
+            )
+            # Discrimination, not calibration, has been the binding constraint on every derived
+            # market here, and a mean gap of ~0 cannot distinguish a model that orders fixtures
+            # correctly from one that predicts the base rate for everything.
+            for lo in (0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8):
+                in_bucket = (predicted_under >= lo) & (predicted_under < lo + 0.1)
+                n = int(in_bucket.sum())
+                if n >= 20:
+                    print(
+                        f"      predicted {lo:.1f}-{lo + 0.1:.1f}: n={n:4d} "
+                        f"actual={actual_under[in_bucket].mean():.3f}"
+                    )
+
     artefact_path = ARTIFACT_DIR / f"football_xgb_{datetime.now(UTC):%Y%m%d%H%M%S}.joblib"
     joblib.dump(
         {
@@ -1090,6 +1186,10 @@ async def main_async() -> None:
             mlflow.log_param(f"layer1_home_{key}", value)
         for key, value in layer1_away_params.items():
             mlflow.log_param(f"layer1_away_{key}", value)
+        for key, value in corners_home_params.items():
+            mlflow.log_param(f"corners_home_{key}", value)
+        for key, value in corners_away_params.items():
+            mlflow.log_param(f"corners_away_{key}", value)
         mlflow.log_metric("test_accuracy", accuracy)
         mlflow.log_metric("test_rps", rps)
         mlflow.log_metric("baseline_accuracy", baseline_accuracy)
@@ -1116,6 +1216,10 @@ async def main_async() -> None:
         mlflow.log_metric("xg_away_raw_mae", xg_away_raw_mae)
         mlflow.log_metric("xg_away_calibrated_mae", xg_away_calibrated_mae)
         for metric_name, metric_value in over_under_metrics.items():
+            mlflow.log_metric(metric_name, metric_value)
+        # Logged so the corners market has a run-over-run history, the same way goals does —
+        # the absence of one is why its calibration went unexamined for as long as it did.
+        for metric_name, metric_value in corners_market_metrics.items():
             mlflow.log_metric(metric_name, metric_value)
         mlflow.log_artifact(str(artefact_path))
 
