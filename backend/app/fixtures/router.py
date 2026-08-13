@@ -441,17 +441,53 @@ MIN_EDGE_OVER_BASE_RATE = 0.05
 # built on real data is the product working. Capping by probability would blunt exactly the
 # band that earns its confidence while leaving the empty-vector band untouched.
 #
-# 0.25 is where the cliff is -- 85% extreme below it, 6% just above. Deliberately BELOW
-# mobile's LOW_CONFIDENCE_COMPLETENESS of 0.35, because these are different instruments: 0.35
-# dims a badge and says "limited data", a soft signal that costs nothing if over-applied,
-# while this removes a pick outright and should therefore be the stricter bar to clear.
-# Setting both to 0.35 would suppress the 0.25-0.35 band, which contains one mildly-extreme
-# pick in seventeen and does not deserve it.
+# 0.25 was where the EXTREMENESS cliff is -- 85% extreme below it, 6% just above -- and that
+# reading still stands. It was set deliberately BELOW mobile's LOW_CONFIDENCE_COMPLETENESS of
+# 0.35 on the reasoning that the two are different instruments: 0.35 dims a badge, a soft signal
+# that costs nothing if over-applied, while this removes a pick outright.
+#
+# RAISED TO 0.35 on 2026-08-13, and NOT on the strength of the accuracy numbers. Stating that
+# plainly because the accuracy numbers were the stated reason before they were looked at
+# properly, and they do not support it -- every band interval overlaps every other:
+#
+#     football, settled, one row per fixture
+#     0.00-0.25   n= 9   acc 0.333   95% CI [0.12, 0.65]
+#     0.25-0.35   n= 5   acc 0.200   95% CI [0.04, 0.62]
+#     0.35-0.50   n=13   acc 0.385   95% CI [0.18, 0.64]
+#     0.50-0.65   n= 6   acc 0.833   95% CI [0.44, 0.97]
+#
+# The 0.200 rests on FIVE fixtures; two more correct results would make it 0.60. If anything
+# these hint at a cliff nearer 0.50, on n=6, which is thinner still. No floor can be located
+# from this, and the earlier claim that two measurements "agree on 0.35" was wrong.
+#
+# The two reasons that DO hold, neither of them statistical:
+#   1. COHERENCE. Mobile dims below 0.35 and captions it "limited data". Between 0.25 and 0.35
+#      the product therefore recommended a pick while simultaneously telling the user its data
+#      was limited. That is incoherent whatever the accuracy turns out to be, and one of the two
+#      numbers had to move; the safer direction is the one that shows fewer, better-founded
+#      picks.
+#   2. IT COSTS NOTHING TODAY. Measured at the time of the change: ZERO upcoming picks sit in
+#      the 0.25-0.35 band (football 143 upcoming, mean completeness 0.540; tennis 4, mean
+#      0.839). It is protection for the next season opening, when EPL and the Scottish
+#      Premiership last ran at 0.12-0.19, not a cut to the current feed.
+#
+# NOT raised to 0.50, though the same weak evidence points there: that would drop 11 real
+# upcoming football picks on the strength of a six-fixture band. Removing real picks needs
+# better evidence than keeping them.
+#
+# Checked PER SPORT rather than assumed, because applying a football-derived constant to tennis
+# is exactly the error that made the tennis base-rate gate invert a quarter of its picks (see
+# _TENNIS_BASE_RATES). Tennis has 3 settled fixtures in the affected band and 0 upcoming, so it
+# is neither helped nor harmed.
+#
+# WHEN TO REVISIT: football currently has 33 settled fixtures carrying a completeness value.
+# At 93 -- the MIN_REPORTABLE_N used by /history, the smallest n whose Wilson interval is under
+# 20pp wide -- the bands become separable and this should be re-derived rather than re-argued.
 #
 # NULL passes deliberately. feature_completeness was added without a backfill because older
 # predictions genuinely have no measurement -- treating unmeasured as failing would silently
 # erase every prediction made before that migration.
-MIN_FEATURE_COMPLETENESS = 0.25
+MIN_FEATURE_COMPLETENESS = 0.35
 
 
 def _base_rate(candidate: _MarketCandidate, sport_slug: str | None = None) -> float | None:

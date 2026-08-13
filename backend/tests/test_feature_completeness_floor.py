@@ -70,9 +70,28 @@ def test_the_boundary_is_inclusive(completeness, kept):
     assert (_pick_best([_candidate(0.72, completeness)]) is not None) is kept
 
 
-def test_the_floor_is_below_mobiles_limited_data_threshold():
-    """Different instruments, deliberately different numbers. Mobile's 0.35 dims a badge and
-    says "limited data" -- cheap if over-applied. This removes a pick outright, so it clears a
-    stricter bar. Equalising them would suppress the 0.25-0.35 band, which measured one mildly
-    extreme pick in seventeen and does not deserve removal."""
-    assert MIN_FEATURE_COMPLETENESS < 0.35
+def test_the_floor_matches_mobiles_limited_data_threshold():
+    """THIS ASSERTED THE OPPOSITE UNTIL 2026-08-13, and the reason it changed is not that the
+    accuracy evidence improved -- it is that the old arrangement was incoherent.
+
+    The floor sat at 0.25 while mobile dims below 0.35 and captions it "limited data", so a pick
+    between the two was recommended and labelled poorly-founded at the same time. One of the two
+    numbers had to move. It moved to the safer side, at a measured cost of ZERO upcoming picks.
+
+    The accuracy bands still cannot locate a cliff -- every 95% interval overlaps every other,
+    and the worst band rests on five fixtures. See MIN_FEATURE_COMPLETENESS for the numbers and
+    for the n at which this should be re-derived rather than re-argued.
+    """
+    assert MIN_FEATURE_COMPLETENESS == LOW_CONFIDENCE_COMPLETENESS_ON_MOBILE
+
+
+# Mirrors mobile/components/fixtures/FixtureCard.tsx:LOW_CONFIDENCE_COMPLETENESS. Duplicated as
+# a named constant rather than a bare 0.35 so the coupling is visible from this side too -- the
+# two live in different languages and nothing else would catch them drifting apart again.
+LOW_CONFIDENCE_COMPLETENESS_ON_MOBILE = 0.35
+
+
+def test_a_pick_built_on_a_near_empty_vector_is_still_removed():
+    """The motivating case, unchanged by the move: Tottenham vs Newcastle served 1X at 99.7%
+    from 3 of 31 features because EPL's season had not opened."""
+    assert _pick_best([_candidate(0.997, 0.10)]) is None

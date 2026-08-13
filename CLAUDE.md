@@ -1287,7 +1287,28 @@ fixture and told the user nothing**; 0.35 separates "no real data yet" from "par
 genuine data". Below it the badge dims and reads "limited data", worded as a limitation of the
 DATA rather than a hedge on the number.
 
-**Dimming was not enough, and `MIN_FEATURE_COMPLETENESS = 0.25` (`app/fixtures/router.py`) is
+> **`MIN_FEATURE_COMPLETENESS` is 0.35 as of 2026-08-13, not the 0.25 described below — and it
+> was NOT raised on the accuracy evidence.** Measured properly, every band's 95% interval
+> overlaps every other (football, one row per fixture: 0.00-0.25 n=9 acc 0.333 [0.12, 0.65];
+> 0.25-0.35 n=5 acc 0.200 [0.04, 0.62]; 0.35-0.50 n=13 acc 0.385 [0.18, 0.64]; 0.50-0.65 n=6
+> acc 0.833 [0.44, 0.97]). The worst band rests on FIVE fixtures. An earlier claim in this
+> session that "two independent measurements agree the break is at 0.35" was wrong: the older
+> table's correctness column reads 0/43/33/38/81%, which if anything points at 0.50, on n=6.
+>
+> What justified the move is not statistical. **Mobile dims below 0.35 and captions it "limited
+> data", so between 0.25 and 0.35 the product recommended a pick and called its own data
+> limited at the same time.** One of the two numbers had to move, and it moved to the safer
+> side at a measured cost of **zero** upcoming picks (football 143 upcoming, mean completeness
+> 0.540, none in the band; tennis 4, mean 0.839). It is protection for the next season opening,
+> when EPL and the Scottish Premiership last sat at 0.12-0.19.
+>
+> Deliberately NOT 0.50, though the same weak evidence points there — that would drop 11 real
+> picks on a six-fixture band, and removing picks needs better evidence than keeping them.
+> Checked PER SPORT rather than assumed, because a football-derived constant applied to tennis
+> is exactly what made the tennis base-rate gate invert a quarter of its picks. Re-derive at
+> n=93 settled football fixtures carrying a completeness value (currently 33).
+
+**Dimming was not enough, and `MIN_FEATURE_COMPLETENESS` (`app/fixtures/router.py`) is
 the hard version.** Found by opening the running app after the 18-league retrain: Tottenham vs
 Newcastle served **1X at 99.7%** — Newcastle to neither win nor draw at 0.3% — from a vector
 with **3 of 31 features** populated, because EPL's season had not opened and neither side had
