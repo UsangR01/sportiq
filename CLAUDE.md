@@ -813,6 +813,35 @@ it is what improved — not calibration, which was already near zero.
 
 ---
 
+## The budget audit: one real win, and no others left
+
+After the plan turned out to be Ultra rather than Pro, every decision in this repo shaped by an
+API budget was re-checked (2026-08-13) rather than assumed still binding. The result is worth
+recording because it is mostly NEGATIVE, and a negative audit is what stops the same ground
+being re-covered:
+
+- **Corners collection — REAL, and taken.** Sized against 7,500/day, recoverable at 75,000.
+  66% -> 91%, see below.
+- **Odds cadence, closing-odds capture, tennis odds — NOT affected.** Every one of those is
+  metered against **TheRundown at 5,000 per MONTH**, which has not changed. `celery.py`'s
+  6-hourly arithmetic and the 2-hourly tennis job stay exactly as they are; loosening them on
+  the strength of an API-Football upgrade would repeat the outage that caused them.
+- **xG — a different provider entirely** (TheStatsAPI, 120/min), so unaffected, and its gaps
+  are upstream rather than uncollected. Season **2021 carries no xG at all across all 18
+  leagues** (5,413 fixtures, a TRAIN season) and the never-attempted league-seasons were
+  already sampled and documented as genuinely absent. One target looked like a real failure —
+  **La Liga 24/25 at 70/380** — and is not: all 380 are cached and only 70 carry a real
+  `xg.home`. An upstream hole in one season of one league.
+- **Injuries (`INJURY_LOOKAHEAD_DAYS = 3`) — affordable to widen, but pointless today.** The
+  four key-player features it would feed were pruned in `d0a24d9`, so a wider window collects
+  data no model consumes. Revisit only alongside rebuilding that feature, and only after the
+  duplicate-rows and ID-join problems recorded above are fixed.
+
+**The transferable lesson, now in Risks & Decisions: a constraint recorded as an engineering
+decision should name the budget it assumed.** The corners date bound, and several
+"we did not collect that league" choices, were correct at 7,500/day and were still being
+honoured at 75,000 because nothing in the comment said which ceiling it was reasoning about.
+
 ## Corners coverage 66% -> 91%, and the silent gate that had hidden four leagues
 
 Done 2026-08-13, once `GET /status` showed the plan is **Ultra: 75,000 requests/day** rather

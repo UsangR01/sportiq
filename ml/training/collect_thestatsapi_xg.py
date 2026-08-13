@@ -95,6 +95,18 @@ AMBIGUITY_MARGIN = 0.15
 # (league slug matching train_football.py's LEAGUES, competition id, season label, season int).
 # EPL 21/22 is deliberately absent: measured 0/5 sampled matches carry xG, so it is a genuine
 # upstream gap rather than something a re-run would fix.
+#
+# LA LIGA 24/25 IS IN THIS LIST AND STILL ONLY 18% COVERED, AND THAT IS NOT A BUG HERE. An audit
+# on 2026-08-13 flagged it as the one target that had been attempted yet came back under half
+# covered, which looks exactly like a rate-limited or half-finished run. It is neither: all 380
+# matches are in the raw cache, and only 70 of them carry a real `xg.home` from the provider.
+# Its neighbouring seasons are 380/380. So this is an upstream hole in one season of one league,
+# and re-running costs 380 calls to change nothing.
+#
+# Worth stating because the check that settles it is one line against the cache, and two
+# sloppier probes got it wrong first — grepping the raw JSON for a `"xg":` string reports 0/380
+# for seasons that are fully covered, because the key is present-but-null on every record. Read
+# `(match.get("xg") or {}).get("home") is not None`, the same condition resolve() uses.
 TARGETS = [
     ("epl", "comp_3039", "22/23", 2022),
     ("epl", "comp_3039", "23/24", 2023),
