@@ -191,3 +191,51 @@ def build_test_prediction_rows(
         rows[f"p_{cls}_uncalibrated"] = raw_probs[:, i]
     rows["correct"] = rows["pred_label"] == rows["label"]
     return rows
+
+
+def per_league_market_metrics(
+    rows: pd.DataFrame, goals_lines: tuple[float, ...], corners_lines: tuple[float, ...]
+) -> pd.DataFrame:
+    """Brier per league PER MARKET, from the saved per-fixture test rows.
+
+    THE LAST GAP FROM THE MEASUREMENT CRITIQUE. Per-league existed for 1X2 only and per-market
+    existed pooled only, so the one cut that can show "this league's corners are fine but its
+    goals are noise" had never been produced. A pooled market number can be carried by a few
+    leagues exactly as a pooled headline can.
+
+    Computed from the same rows that get written to ml/evaluation/, so it costs one groupby
+    rather than a retrain, and any run's table can be regenerated from its own saved file.
+
+    Brier rather than accuracy because these markets sell a PROBABILITY. Leagues under
+    MIN_LEAGUE_ROWS_FOR_MARKET are dropped rather than printed: a Brier on 40 fixtures moves
+    more with which fixtures landed in the split than with the model.
+    """
+    from app.models_ml.markets import over_under_probs
+
+    out = []
+    for league, group in rows.groupby("league"):
+        if len(group) < MIN_LEAGUE_ROWS_FOR_MARKET:
+            continue
+        goal_totals = (group["home_goals"] + group["away_goals"]).to_numpy()
+        xg_totals = (group["xg_home_pred"] + group["xg_away_pred"]).to_numpy()
+        row = {"league": str(league), "n": len(group)}
+        for line in goals_lines:
+            predicted = np.array([over_under_probs(float(t), (line,))[line][0] for t in xg_totals])
+            row[f"goals_u{line}_brier"] = float(np.mean((predicted - (goal_totals < line)) ** 2))
+
+        corners = group[group["has_corners"]]
+        row["n_corners"] = len(corners)
+        if len(corners) >= MIN_LEAGUE_ROWS_FOR_MARKET:
+            actual = (corners["home_corners"] + corners["away_corners"]).to_numpy()
+            totals = (corners["corners_home_pred"] + corners["corners_away_pred"]).to_numpy()
+            for line in corners_lines:
+                predicted = np.array([over_under_probs(float(t), (line,))[line][0] for t in totals])
+                row[f"corners_u{line}_brier"] = float(np.mean((predicted - (actual < line)) ** 2))
+        out.append(row)
+    return pd.DataFrame(out)
+
+
+# A Brier on a handful of fixtures moves more with which fixtures landed in the split than with
+# the model. Higher than MIN_BUCKET_ROWS_TO_REPORT because this cut slices twice (league AND
+# market) and the corners subset is thinner again.
+MIN_LEAGUE_ROWS_FOR_MARKET = 100

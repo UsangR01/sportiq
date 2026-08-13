@@ -1323,6 +1323,54 @@ metrics gap, and it bears on `goals_total` explaining 0.2% of variance: the feat
 to carry goal signal are the ones most absent where the model learns. Corners is flat at 89-92%
 across every season, so the same cut would find nothing there.
 
+### Closing out the measurement backlog — five items, and two of my own claims were wrong
+
+**Per league × per market** (`evaluation.py:per_league_market_metrics`) — the last gap from the
+critique. Per-league existed for 1X2 only, per-market pooled only, so the cut that shows "this
+league's corners are fine but its goals are noise" had never been produced. One groupby over the
+saved per-fixture rows, so any past run's table regenerates from its own parquet. Goals under-3.5
+Brier spans **0.168 (J1 League) to 0.261 (Veikkausliiga)** — a 9-point spread the pooled 0.2096
+hides entirely.
+
+**Isotonic calibration on 1X2 IS earning its place — my earlier claim was wrong.** I judged it on
+log loss (1.0179 calibrated vs 1.0148 raw) and multiclass Brier (identical) and said it was not.
+Both are the wrong instrument: calibration exists to make the probability VALUE trustworthy, and
+the product reads that value directly (`min_probability`, the base-rate gates, EV ranking).
+On the metric it exists for it wins clearly:
+
+    ECE   calibrated 0.0143   uncalibrated 0.0195      accuracy 0.5096 vs 0.5081, RPS identical
+
+**The draw finding is real and already contained.** 92% of test fixtures get a draw probability
+in 0.2-0.3 (observed 0.257) — correct on average, carrying no per-fixture information. But
+`MIN_EDGE_OVER_BASE_RATE` requires a draw to reach 0.3038, and measured over the whole settled
+card history: **0 draw picks have ever reached a card**. No new guard needed; the existing one
+already refuses the market the model cannot discriminate.
+
+**xG availability, on the test split, cannot answer the question** — only 44 of 5,487 test rows
+lack xG (0.4773 vs 0.5098 accuracy, n=44). The mismatch is on the TRAIN side (~49% vs 98%) and
+stays a standing risk rather than a measurable effect.
+
+**`tennis fixtures.tournament_surface` backfilled 14% → 98%** (2,000 rows,
+`scripts/backfill_tennis_tournament_meta.py`). Cheap because `/matches?season=X` embeds the whole
+tournament object — one paginated sweep, no per-fixture lookups. Surfaces come back clean
+(Hard 1,111 / Clay 968 / Grass 249, no whitespace variant). This unblocks the per-surface cut of
+LIVE results that the tennis base-rate gate decision is pre-registered against; it previously
+worked only on the test split.
+
+**NBA training was genuinely non-reproducible, and more so than football ever was.** It pinned no
+seed while tuning `subsample`/`colsample_bytree`, so every run sampled different rows and columns
+— unlike football, whose defaults sat at 1.0 and whose fits were therefore already deterministic.
+`RANDOM_SEED` now seeds the sampler and both estimators.
+
+> **"STRATEGIC: nothing is deployed — no `infra/`" was STALE and had been repeated for weeks.**
+> `infra/render.yaml` is real and complete (three services off one image, managed Postgres and
+> Redis, `preDeployCommand: alembic upgrade head`), `backend/Dockerfile` exists, and there is a
+> soak harness that validated the blueprint. What is genuinely outstanding is the deploy ITSELF
+> — a dashboard action needing secrets that are deliberately not in git — and, until that
+> happens, `eas.json`'s preview/production profiles point at `sportpiq-api.onrender.com`, which
+> still returns `x-render-routing: no-server`. Same doc-drift pattern as the `/history` 501 note:
+> a stale line got quoted back as the state of the world.
+
 ### The notebook now grades the CARD's pick, not the model's 1X2 call
 
 Asked 2026-08-13, after the fix below: "I'd prefer the notebook actually visualises only the

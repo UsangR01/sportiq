@@ -88,6 +88,7 @@ from app.models_ml.football_features import (  # noqa: E402
 from app.models_ml.evaluation import (  # noqa: E402
     build_test_prediction_rows,
     multiclass_calibration,
+    per_league_market_metrics,
 )
 from app.models_ml.league_baselines import compute_league_baselines  # noqa: E402
 from app.models_ml.markets import CORNERS_LINES, GOALS_LINES, over_under_probs  # noqa: E402
@@ -1235,6 +1236,16 @@ async def main_async() -> None:
     )
     test_predictions["corners_home_pred"] = corners_home_pred_full.to_numpy()
     test_predictions["corners_away_pred"] = corners_away_pred_full.to_numpy()
+    # Per league PER MARKET — the last gap from the measurement critique. Per-league existed
+    # for 1X2 only and per-market pooled only, so the cut that shows "this league's corners are
+    # fine but its goals are noise" had never been produced. One groupby over rows already in
+    # hand, so any past run's table can be regenerated from its own saved parquet.
+    league_market = per_league_market_metrics(test_predictions, GOALS_LINES, CORNERS_LINES)
+    if not league_market.empty:
+        print()
+        print("PER LEAGUE x PER MARKET (Brier, lower is better; leagues under 100 rows omitted):")
+        print(league_market.sort_values("league").to_string(index=False))
+
     predictions_path = (
         EVALUATION_DIR / f"test_predictions_{model_version_for(artefact_path)}.parquet"
     )

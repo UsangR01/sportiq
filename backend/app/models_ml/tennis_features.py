@@ -56,6 +56,7 @@ Missing data is represented as None throughout (never a fabricated neutral value
 nba_features.py's own rationale exactly.
 """
 
+import os
 from datetime import date
 
 import pandas as pd
@@ -77,7 +78,13 @@ FEATURE_NAMES = (
     "moneyline_implied_prob_home",
 )
 
-LAST_N_FORM = 10  # matches nba_features.py's own window convention
+# MEASURED 2026-08-13, having been inherited rather than chosen: this was 10 purely because
+# nba_features.py used 10, which itself was 10 because football's columns were named _5. Tennis
+# was the most suspect of the three -- players compete in bursts inside a tournament, so ten
+# matches can reach back across surfaces and months -- and CLAUDE.md already recorded that
+# borrowing NBA's base rates for tennis was indefensible while its window was borrowed in
+# silence. Set from the run recorded in train_tennis.py, not by convention.
+LAST_N_FORM = int(os.environ.get("SPORTIQ_TENNIS_LAST_N_FORM", "10"))
 
 
 def _rest_days(prior_sorted_desc: pd.DataFrame, as_of_date: date) -> float | None:

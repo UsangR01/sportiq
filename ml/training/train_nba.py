@@ -52,6 +52,13 @@ TRAIN_SEASONS = ["2020-21", "2021-22", "2022-23", "2023-24"]
 VAL_SEASON = "2024-25"
 TEST_SEASON = "2025-26"
 
+# Pinned so a retrain is reproducible. This mattered MORE here than it did for football: that
+# script's search space left subsample/colsample_bytree at their 1.0 defaults, so its fits were
+# already deterministic and only the search was not. NBA tunes BOTH (see _optuna_objective), so
+# every run of this script genuinely sampled different rows and columns and no two artefacts
+# could be compared. Same value as train_football.py/train_tennis.py.
+RANDOM_SEED = 20260811
+
 N_OPTUNA_TRIALS = 50
 
 
@@ -204,7 +211,7 @@ def _optuna_objective(trial, X_train, y_train, X_val, y_val) -> float:
         "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
         "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
     }
-    model = xgb.XGBClassifier(objective="binary:logistic", **params)
+    model = xgb.XGBClassifier(objective="binary:logistic", random_state=RANDOM_SEED, **params)
     model.fit(X_train, y_train)
     val_preds = model.predict_proba(X_val)[:, 1]
     return log_loss(y_val, val_preds)
@@ -300,7 +307,11 @@ async def main_async() -> None:
 
     print(f"running Optuna ({N_OPTUNA_TRIALS} trials)...")
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study = optuna.create_study(direction="minimize")
+    # Seeded sampler: without it the SEARCH is the unreproducible step, which would undo the
+    # point of seeding the estimators below.
+    study = optuna.create_study(
+        direction="minimize", sampler=optuna.samplers.TPESampler(seed=RANDOM_SEED)
+    )
     study.optimize(
         lambda trial: _optuna_objective(trial, X_train, y_train, X_val, y_val),
         n_trials=N_OPTUNA_TRIALS,
@@ -310,7 +321,9 @@ async def main_async() -> None:
     # Re-train on train+val with the winning hyperparameters (TDD §3.5).
     X_trainval = pd.concat([X_train, X_val])
     y_trainval = pd.concat([y_train, y_val])
-    final_model = xgb.XGBClassifier(objective="binary:logistic", **study.best_params)
+    final_model = xgb.XGBClassifier(
+        objective="binary:logistic", random_state=RANDOM_SEED, **study.best_params
+    )
     final_model.fit(X_trainval, y_trainval)
 
     # Isotonic calibration on validation predictions (TDD §3.5).
