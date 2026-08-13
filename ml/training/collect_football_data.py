@@ -453,7 +453,9 @@ def _merge_lookup(path: Path, fresh: dict[str, str], value_column: str) -> None:
     print(f"  lookup {path.name} now {len(rows)} rows")
 
 
-def collect_league(league_slug: str, stages: tuple[str, ...] = STAGES) -> None:
+def collect_league(
+    league_slug: str, stages: tuple[str, ...] = STAGES, retry_missing_corners: bool = False
+) -> None:
     config = LEAGUE_CONFIGS[league_slug]
     league_id = config["league_id"]
     rundown_sport_id = config["rundown_sport_id"]
@@ -462,7 +464,19 @@ def collect_league(league_slug: str, stages: tuple[str, ...] = STAGES) -> None:
     codes_path = DATA_DIR / f"football_team_codes_{league_slug}.parquet"
     names_path = DATA_DIR / f"football_team_names_{league_slug}.parquet"
     wanted = sorted(config.get("seasons", SEASONS))
-    if games_path.exists() and names_path.exists():
+    # A MISSING TEAM-NAMES FILE MUST NOT SKIP THE WHOLE LEAGUE. Requiring names here was
+    # deliberate for the gamelog stage — a log collected before names were captured should
+    # re-run, since names are what stop ~20% of real xG being dropped as ambiguous (see
+    # _fetch_teams). But it was applied to the league as a whole, so with any OTHER stage
+    # selected the league fell through to the `else` below and returned immediately.
+    #
+    # Silent, and it cost a real backfill: brasileirao, csl, epl and scottish_prem are exactly
+    # the four leagues with no team_names parquet, and exactly the four that gained ZERO from an
+    # 8,500-call corners backfill that lifted every other league from ~66% to ~92%. The log said
+    # "no game log yet" about files holding 3,800 rows. Corners need only the fixture ids, which
+    # the game log has always had.
+    needs_name_refetch = not names_path.exists()
+    if games_path.exists() and not (needs_name_refetch and "gamelog" in stages):
         games = pd.read_parquet(games_path)
         have = set(games["SEASON"].astype(int).tolist()) if "SEASON" in games else set()
         missing = [s for s in wanted if s not in have]
@@ -539,7 +553,27 @@ def collect_league(league_slug: str, stages: tuple[str, ...] = STAGES) -> None:
         # newly-collected seasons, which is the actual gap.
         covered = games[games["FIXTURE_ID"].astype(str).isin(have)]
         cutoff = pd.to_datetime(covered["GAME_DATE"]).max() if not covered.empty else None
-        candidates = games if cutoff is None else games[pd.to_datetime(games["GAME_DATE"]) > cutoff]
+        if retry_missing_corners:
+            # OPT-IN, and the date bound above exists for a reason that has since expired. It
+            # was chosen when the plan allowed 7,500 requests/day, where re-asking for every
+            # absence cost ~4,973 calls for nine leagues with roughly 4,000 of them re-requesting
+            # data the provider had already declined to supply. On Ultra (75,000/day, confirmed
+            # live) that arithmetic no longer bites: the whole 18-league backfill is ~8,500
+            # calls, about 11% of one day.
+            #
+            # And the absences are NOT all provider-side. Sampling 12 uncovered fixtures across
+            # three leagues, 8 returned real corner counts on a straight re-request — only
+            # Veikkausliiga's 2021 gaps came back genuinely empty, which matches its 35%
+            # coverage being the worst by a wide margin. Those are collection misses, not
+            # missing data.
+            #
+            # Still opt-in rather than the default: the default should stay cheap, and a run
+            # that re-asks for known-absent data is only worth it when the budget is spare.
+            candidates = games
+        elif cutoff is None:
+            candidates = games
+        else:
+            candidates = games[pd.to_datetime(games["GAME_DATE"]) > cutoff]
         missing = [
             fid
             for fid in sorted(candidates["FIXTURE_ID"].unique().tolist())
@@ -613,6 +647,15 @@ def main() -> None:
         default=",".join(STAGES),
         help=f"comma-separated; one or more of {','.join(STAGES)}",
     )
+    parser.add_argument(
+        "--retry-missing-corners",
+        action="store_true",
+        help=(
+            "re-request /fixtures/statistics for EVERY fixture with no corners row, not just "
+            "those newer than the last covered date. ~8,500 calls across all 18 leagues; only "
+            "worth it with spare daily budget (see the comment in collect_league)"
+        ),
+    )
     args = parser.parse_args()
 
     leagues = [s.strip() for s in args.leagues.split(",") if s.strip()]
@@ -627,7 +670,7 @@ def main() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     print(f"leagues={leagues} stages={list(stages)}")
     for league_slug in leagues:
-        collect_league(league_slug, stages)
+        collect_league(league_slug, stages, retry_missing_corners=args.retry_missing_corners)
 
 
 if __name__ == "__main__":

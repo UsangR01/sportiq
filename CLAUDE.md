@@ -20,7 +20,7 @@ Real logic exists for: auth (`POST /auth/register|login|refresh`, Argon2id + JWT
 
 **`GET /stats/model`** (TDD §4.1) returns the currently *active* `models_registry` row per sport (optionally filtered by `sport_slug`), joined to the sport's slug — reflects whichever model version is actually serving predictions right now, matching TDD §3.1's "promotion is a DB update, not a redeploy" design. `ModelRegistry` gained a `roi_simulation` column (nullable — a small-sample, directional backtest metric, not every version will have one) so `ml/training/train_nba.py`'s flat-stake ROI calculation is persisted going forward instead of only printed; the currently-active NBA row was backfilled with its real, already-known value (`0.20873793103448263`, from the training run recorded under "ML training" below) rather than left null or recomputed. Tested in `backend/tests/test_model_stats.py` with real seeded `Sport`/`ModelRegistry` rows (both an active and an inactive version, to confirm only the active one is ever returned).
 
-**`DataSourceAdapter` methods that are real and live-verified**: `BallDontLieAdapter.fetch_fixtures`/`.fetch_team_stats` (NBA), `TheRundownAdapter.fetch_odds` (every sport except football's Brasileirão league — TDD §6.2's "odds is always TheRundown" no longer holds universally, see below), and — since the user obtained a real API-Football **Pro** subscription — `APIFootballAdapter.fetch_fixtures`/`.fetch_team_stats`/`.fetch_injuries`/`.fetch_odds` plus a standalone `fetch_h2h_win_rate` (all sports/leagues; see "Football model + key-player availability" below and the updated "External API research findings" entry). All make real HTTP calls and have been run against the live API end to end. `RotoWireAdapter`, `BallDontLieAdapter.fetch_injuries`, `TheRundownAdapter.fetch_fixtures`/`.fetch_team_stats`, and `SportsDataIOAdapter` entirely remain stubbed. Before ingestion can do anything, run `PYTHONPATH=. python scripts/seed_sports.py` once — nothing seeds a `Sport`/`League` row otherwise (this now seeds football + its 6 leagues too), so `ingest_fixtures`/`ingest_odds` silently have zero sports to iterate.
+**`DataSourceAdapter` methods that are real and live-verified**: `BallDontLieAdapter.fetch_fixtures`/`.fetch_team_stats` (NBA), `TheRundownAdapter.fetch_odds` (every sport except football's Brasileirão league — TDD §6.2's "odds is always TheRundown" no longer holds universally, see below), and — since the user obtained a paid API-Football subscription (now Ultra — see below) — `APIFootballAdapter.fetch_fixtures`/`.fetch_team_stats`/`.fetch_injuries`/`.fetch_odds` plus a standalone `fetch_h2h_win_rate` (all sports/leagues; see "Football model + key-player availability" below and the updated "External API research findings" entry). All make real HTTP calls and have been run against the live API end to end. `RotoWireAdapter`, `BallDontLieAdapter.fetch_injuries`, `TheRundownAdapter.fetch_fixtures`/`.fetch_team_stats`, and `SportsDataIOAdapter` entirely remain stubbed. Before ingestion can do anything, run `PYTHONPATH=. python scripts/seed_sports.py` once — nothing seeds a `Sport`/`League` row otherwise (this now seeds football + its 6 leagues too), so `ingest_fixtures`/`ingest_odds` silently have zero sports to iterate.
 
 **`NBAModel` is a real, trained model** — see "ML training" below. `run_predictions.py` produces genuine `Prediction` rows (verified against the real Pistons-vs-Suns fixture: home_prob 0.565, confidence MEDIUM); `GET /fixtures/{id}` shows real odds and a real prediction joined together. `/picks` itself still won't show that particular fixture — it's `completed` with a January kickoff (a historical fixture kept around for cross-task verification), and `/picks` correctly only returns `scheduled` fixtures in the next 7 days; that's the filter working, not a gap.
 
@@ -76,7 +76,7 @@ Real logic exists for: auth (`POST /auth/register|login|refresh`, Argon2id + JWT
 
 ## Football model + key-player availability (TDD §3.2/§3.3) — real, trained, live-verified
 
-Built once the user obtained a genuine API-Football **Pro** subscription (7,500 req/day; confirmed via `GET /status`: `active: true`, `end: "2026-08-29T08:58:56+00:00"` — **the subscription is time-limited to about a month from when this was built**, a real constraint, not a permanent unlock). This replaced the prior free-tier key that blocked `next`/current-season fixtures entirely (see the updated "External API research findings" entry below).
+Built once the user obtained a paid API-Football subscription. **The plan is now Ultra: 75,000 requests/day, active until 2026-09-29** (confirmed live via `GET /status` on 2026-08-13; usage that day was 2,662). It was **Pro at 7,500/day ending 2026-08-29** when most of the collection scripts below were written, and that lower ceiling is the stated reason for several "cannot afford to collect that" decisions in this file — re-read those against 75,000 before treating them as still binding. It remains time-limited, so it is a deadline rather than a permanent unlock. This replaced the prior free-tier key that blocked `next`/current-season fixtures entirely (see the updated "External API research findings" entry below).
 
 **Deliberate scope decision, not a hidden gap**: the pipeline is built generically (works for any of the 5 domestic leagues — EPL/Ligue1/Bundesliga/LaLiga/SerieA, all seeded via `scripts/seed_sports.py`, all with working fixture/odds ingestion), but **real trained-model historical data collection now covers EPL and Brasileirão** (5 seasons each, 2021–2025 — Brasileirão was added specifically to give retrodiction and the model itself more real data; see "Real historical data + Elo/streaks/richer H2H" below). The other 3 European leagues are still seeded with working fixture/odds ingestion but have no historical training data collected. A full 5-league × 5-season historical lineup-presence collection would run ~8–9k API calls, close to the daily ceiling in one sitting, and the subscription itself is only active for ~1 month — expanding to the remaining 3 leagues is a natural, bounded follow-up.
 
@@ -812,6 +812,60 @@ it is what improved — not calibration, which was already near zero.
   and identical test metrics.
 
 ---
+
+## Corners coverage 66% -> 91%, and the silent gate that had hidden four leagues
+
+Done 2026-08-13, once `GET /status` showed the plan is **Ultra: 75,000 requests/day** rather
+than the Pro/7,500 this file described. That correction is the whole reason the work was
+affordable — several "cannot afford to collect that" decisions here were sized against the old
+ceiling and should be re-read before being treated as binding.
+
+**The date bound on corners collection was a budget decision that had expired.** It only
+re-requested fixtures NEWER than the last covered date, because under 7,500/day re-asking for
+every absence cost ~4,973 calls for nine leagues with roughly 4,000 of them re-requesting data
+the provider had already declined. Sampling 12 uncovered fixtures first, **8 returned real
+corner counts on a straight re-request** — only Veikkausliiga's 2021 gaps came back genuinely
+empty, matching its 35% coverage being the worst by far. Those were collection misses, not
+missing data. `--retry-missing-corners` now opts into the full sweep; the cheap default is
+unchanged.
+
+**A silent bug surfaced only because the backfill measured per league.** Four leagues gained
+EXACTLY ZERO while every other rose ~25 points:
+
+    brasileirao   csl   epl   scottish_prem      +0 each
+    every other league                          +241 to +714
+
+`collect_league` gated on `games_path.exists() and names_path.exists()`, and those four are
+precisely the four with no `football_team_names_*.parquet`. Requiring names is right for the
+GAMELOG stage — they prevent ~20% of real xG being dropped as ambiguous — but it was applied to
+the whole league, so with any other stage selected the league returned immediately, logging
+"no game log yet" about a file holding 3,800 rows. Corners need only fixture ids, which the game
+log has always carried. **EPL, the flagship league, had been silently skipped by every
+non-gamelog stage.** Now gated per stage.
+
+    coverage   66% -> 91%      +6,913 fixtures, 50,540 corner rows
+    training   10,877 -> 14,745 rows      test 3,738 -> 5,047
+
+**Current model `football_xgb_v20260813134423`.** Scoping verified by hashing rather than
+assumed: `layer1_home`/`layer1_away`/`layer2` **byte-identical**, only the corners pair changed,
+so 1X2 holding at 0.5096/0.2098 is correct rather than a broken run.
+
+**Read the corners numbers carefully — the test set grew 35%, so it is a different exam.** MAE
+is 2.120 both before and after and that comparison is not like-for-like; the earlier warning
+about reading corners MAE across a changed test set applies exactly here. What is structural,
+and did improve, is discrimination:
+
+    under 10.5   .516 .547 .579 .627 .665   ->   .409 .545 .587 .621 .686
+                 spread 0.149               ->   spread 0.277, still fully monotonic
+    under  9.5   .447 .442 .477 .525 .564   ->   .411 .474 .468 .522 .577
+                 spread 0.122               ->   spread 0.166
+
+Under-10.5 nearly doubles its spread while staying monotonic. Under-9.5 widens but keeps a small
+inversion in its middle. Brier moved 0.2509 -> 0.2503 and 0.2403 -> 0.2389, which on a larger,
+different test set is not by itself evidence of anything.
+
+**Veikkausliiga stays the real gap at 44%** (from 35%) — its early seasons genuinely have no
+statistics, confirmed by direct re-request. Left as a real absence rather than zero-filled.
 
 ## Corners tuned — and the market it sells had never been measured at all
 
@@ -1774,7 +1828,7 @@ Live-tested against the real keys in `keys.docx` (minimal, quota-conscious calls
 
 - **BallDontLie**: base URL `https://api.balldontlie.io/nba/v1`. Auth header is `Authorization: <raw key>` — **no `Bearer` prefix**. `GET /games` accepts `start_date`/`end_date` (`YYYY-MM-DD`), `seasons[]`, `team_ids[]`, `per_page` (max 100); pagination is **cursor-based** (`meta.next_cursor`), not offset. Each game embeds full `home_team`/`visitor_team` objects, so no separate `/teams` call is needed. `status` has no fixed enum: `"Final"` once done, a start-time string like `"7:00 pm ET"` before tip-off, a period string (`"1st Qtr"`, `"Halftime"`, ...) while live — see `_map_status` in `app/adapters/balldontlie.py`. `/season_averages/*` and `/standings` return 401 on this key's (free) plan — not used by the current implementation.
 - **API-Football**: only reachable via the direct `v3.football.api-sports.io` host with an `x-apisports-key` header — **not RapidAPI**, despite TDD §2.2 saying "API-Football (via RapidAPI)". The *original* Free plan (confirmed via `GET /status`: Free, 100 req/day) blocked the `next` query param and any season after 2024 — no real upcoming/current-season fixtures were reachable at all, which is why `BallDontLieAdapter`, not `APIFootballAdapter`, became the *first* real adapter.
-  **Superseded**: the user later subscribed to a real **Pro** plan (7,500 req/day, confirmed active until 2026-08-29 — time-limited, see "Football model" section above) that unlocks everything the free tier blocked. Confirmed live under Pro: real league IDs via `GET /leagues?name=X&country=Y` — Premier League=**39**, Ligue 1=**61**, Bundesliga=**78**, La Liga=**140**, Serie A=**135** (must match `app/adapters/therundown.py`'s `_RUNDOWN_SPORT_IDS` keys exactly — `epl`/`ligue1`/`bundesliga`/`laliga`/`seriea`). `next=N` and `from`/`to` date-range fixture queries both work for the current (not-yet-started) season. Historical coverage (fixtures/lineups/statistics/players/injuries) is complete back through at least 2021. `/teams/statistics?league=X&season=Y&team=Z` (needs league+season, not just team_id) returns `form` (real "WWDLW..." string), `goals.for/against.average.total`, and `fixtures.wins/played.{home,away}` — but **before a season's first match, the goals-average fields come back as the string `"0.0"`, not `null`** (a real data-quality gotcha, see "Football model" section for the fix); still no `elo_rating`/xG in the response at any tier. `/injuries?league=X&season=Y&date=Z` supports real bulk-by-league-and-date queries (not just by fixture) and is genuinely empty for dates too far in the future. `/players?team=X&season=Y` returns a real per-match `games.rating` plus `games.minutes`/`appearences` — but `statistics` is an array keyed by **competition**, so a player's cup-competition entry can precede their domestic-league one; never assume `statistics[0]`. `/fixtures/headtohead?h2h={id1}-{id2}` is a real, dedicated H2H endpoint (simpler than NBA's own manual-search workaround).
+  **Superseded**: the user later subscribed to a paid plan — **Pro** (7,500/day) at the time most collection scripts were written, **Ultra (75,000/day, active until 2026-09-29)** as of 2026-08-13 — time-limited, see "Football model" section above that unlocks everything the free tier blocked. Confirmed live under Pro: real league IDs via `GET /leagues?name=X&country=Y` — Premier League=**39**, Ligue 1=**61**, Bundesliga=**78**, La Liga=**140**, Serie A=**135** (must match `app/adapters/therundown.py`'s `_RUNDOWN_SPORT_IDS` keys exactly — `epl`/`ligue1`/`bundesliga`/`laliga`/`seriea`). `next=N` and `from`/`to` date-range fixture queries both work for the current (not-yet-started) season. Historical coverage (fixtures/lineups/statistics/players/injuries) is complete back through at least 2021. `/teams/statistics?league=X&season=Y&team=Z` (needs league+season, not just team_id) returns `form` (real "WWDLW..." string), `goals.for/against.average.total`, and `fixtures.wins/played.{home,away}` — but **before a season's first match, the goals-average fields come back as the string `"0.0"`, not `null`** (a real data-quality gotcha, see "Football model" section for the fix); still no `elo_rating`/xG in the response at any tier. `/injuries?league=X&season=Y&date=Z` supports real bulk-by-league-and-date queries (not just by fixture) and is genuinely empty for dates too far in the future. `/players?team=X&season=Y` returns a real per-match `games.rating` plus `games.minutes`/`appearences` — but `statistics` is an array keyed by **competition**, so a player's cup-competition entry can precede their domestic-league one; never assume `statistics[0]`. `/fixtures/headtohead?h2h={id1}-{id2}` is a real, dedicated H2H endpoint (simpler than NBA's own manual-search workaround).
 - **TheRundown**: correctly reached via RapidAPI (`therundown-therundown-v1.p.rapidapi.com`, `x-rapidapi-host`/`x-rapidapi-key` headers) — but the key must be *subscribed* on RapidAPI's site first (a bare "You are not subscribed to this API" 200-with-error response otherwise, even with the exact right host/key — this isn't a wrong-host signal the way it was for API-Football). Real sport IDs confirmed via `GET /sports`: NBA=4; each football league is its own ID, not one combined "football" ID — EPL=11, Ligue1=12, Bundesliga=13, La Liga=14, Serie A=15. Events come from `GET /sports/{id}/events/{date}?include=scores`, one date per call (no range param) — team info is embedded (`teams_normalized`, with a reliable cross-provider `abbreviation` field), so no separate team lookup is needed. **Odds are in American format** (`"format":"American"` in every line block) despite TDD §2.3 saying odds are "normalised to decimal format" at ingest — conversion is on us (`_american_to_decimal`). Confirmed live: only 3 of ~15 bookmaker affiliates (Bovada, Bodog, BetMGM) return real prices on this subscription; the rest (DraftKings, FanDuel, Pinnacle, Unibet, ...) return a masked `0.0001` sentinel for every field — treated as "no line from this book," not an error, and simply skipped. Historical dates have **no season cutoff** (unlike API-Football) but real-price coverage is inconsistent even for the 3 unlocked affiliates — confirmed some dates fully real, others fully masked, seemingly per-game/per-book rather than date-based.
 - **TheRundown rate limiting escalates oddly under load**: a burst of ~60 requests with no delay produced a sustained run of `429`s that then escalated into `401`s on retry — manually confirmed seconds later (plain `curl`, no code involved) that the key was completely fine, so the `401`s were a transient RapidAPI-gateway artifact of the burst, not a real auth or account problem. 5 seconds between requests was confirmed reliably under the threshold; don't reflexively read a `401` from this provider as "key revoked" without checking via a slow, isolated request first.
 - **Silent-wrong-`.env` trap for any one-off script outside `backend/`**: `pydantic-settings`'s `env_file=".env"` resolves against the process's **current working directory**, not the importing file's location. A script in `ml/training/` run from the repo root (rather than from `backend/`) silently loads a blank `.env` and every setting falls back to its default (e.g. `therundown_api_key=""`) — no error, just a confusing downstream `401` that looks exactly like a real auth/rate-limit failure. Fix: `load_dotenv(BACKEND_DIR / ".env")` explicitly before importing anything that calls `get_settings()` — see `ml/training/collect_nba_data.py`/`train_nba.py` for the pattern. If a script outside `backend/` ever gets a mysterious blank-credential failure, check this first.
