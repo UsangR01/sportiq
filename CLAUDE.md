@@ -137,6 +137,80 @@ Built once the user obtained a paid API-Football subscription. **The plan is now
 - **A real simplification fell out of this**: API-Football's `/odds` response carries its own fixture id — the *same* id space as `Fixture.external_id` for any football fixture (since API-Football is also the fixtures/stats provider). `app/workers/ingest_odds.py:_resolve_fixture` now tries a direct `Fixture.external_id` match before falling back to the fuzzy team-abbreviation-plus-kickoff-time join TheRundown-sourced odds still need (a genuinely different ID space, per TDD §6.2's original design) — real Brasileirão odds matched **111 real rows across all 10 fixtures** on the first run with zero fuzzy-match misses, versus needing name-based matching for every European-league fixture.
 - Verified fully live end-to-end, including in the actual mobile app (not just the API): after ingesting real odds and running predictions for the remaining Brasileirão fixtures, `GET /picks?min_odds=1.5&sport_slug=football` returned real picks with real expected-value math (e.g. Internacional vs Flamengo: away @ 1.97, 57.3% model probability, EV +0.13) — confirmed visually in the Picks tab (Expo web, headless-screenshotted) showing 6 real football picks sorted by probability, exactly matching the API response.
 
+## WNBA — a second basketball league under the NBA's own Sport row and model
+
+Added 2026-08-13 on request ("I'd like to have a feel of the basketball model"). Deliberately a
+**LEAGUE under `Sport(slug="nba")`, not a new sport**, so it is served by the already-trained
+`nba_xgb_v20260728142554` with no collection and no retrain — the same one-model-per-sport
+arrangement that has 18 football leagues sharing one artefact. The features it consumes (Elo,
+rolling form, rest days, home advantage) are computed per team from that team's OWN games, so
+they are WNBA-native even though the weights were learned on NBA.
+
+**Everything below was confirmed live before any code was written**, because "we have the APIs"
+is exactly the kind of claim this project has been burned by:
+
+    BallDontLie /wnba/v1/games      200 on the existing key, mid-season, history past 2024
+    TheRundown  sport_id = 8        real WNBA odds
+    season 2025                     312 games   (NBA: ~1,230)
+    /wnba/v1/season_averages        404 — the route does not exist
+    /wnba/v1/standings, /player_injuries   401
+
+**THE NAMESPACES ARE NOT INTERCHANGEABLE, and they look like they are:**
+
+    NBA    home_team_score / visitor_team_score   datetime   status "Final"
+    WNBA   home_score      / away_score           date       status "post" + status_state "final"
+
+`_normalise_game` converts WNBA into the NBA shape ONCE, at the boundary, so every derivation
+below it stays single-shaped and adding this league cannot change what NBA computes
+(`test_wnba_adapter.py` pins that `_normalise_game(game, "nba") is game`).
+- **A scheduled WNBA game reports `period: 0` and `0-0`, not nulls.** Passed through, that
+  renders a live-looking 0-0 on the card before tip-off, so scores are dropped until
+  `status_state != "scheduled"`.
+- **`_map_status` keys off the literal `"Final"`**, so an untranslated WNBA game would read as
+  `scheduled` forever — including ones that had already finished.
+
+**WNBA external ids are PREFIXED `wnba:` and NBA's deliberately are not.** Both leagues share one
+`Sport` row, and `Team`/`Fixture` uniqueness is `(sport_id, external_id)` — *not* `league_id* —
+while both namespaces number their teams from 1. An unprefixed WNBA team 1 would BE NBA team 1:
+one row, two competitions, silently merged Elo and form. Identical hazard to ATP/WTA sharing one
+tennis Sport. The asymmetry is intentional: NBA rows already exist with bare ids and prefixing
+them now would strand every stored team, fixture, prediction and Elo rating.
+
+**Season convention differs too** — the WNBA runs May-September inside one calendar year, so
+`_current_season("wnba")` is simply that year. The NBA's October boundary would report the
+*previous* season for the whole of the WNBA's actual season, the same mistake Brasileirão
+exposed in football.
+
+**`fetch_h2h_win_rate` had to become league-aware**, and this one fails silently rather than
+loudly: sending a `wnba:` id to the NBA namespace returns no meetings, which reads as "these two
+have never played" — a fabricated feature value, not a visible error.
+
+**Verified live end to end**: 40 fixtures with real scores, 15 teams, 36 `TeamFeatures` rows, 18
+real predictions, 45 odds rows across 4 fixtures, and NBA still serving unchanged.
+
+    Connecticut Sun  v Atlanta Dream       home 0.193   HIGH
+    New York Liberty v Los Angeles Sparks  home 0.733   HIGH
+    Indiana Fever    v Dallas Wings        home 0.642 @ 1.4167  (implied 0.706)
+
+Sensible on their face — Connecticut are the league's weakest side, New York the strongest — and
+the model sits *below* the market on both priced fixtures, which is at least not the
+overconfidence failure mode.
+
+**HONEST LIMITS, none of them measured yet:**
+- **Feature completeness is 0.69, and structurally capped there.** `/season_averages` is a 404,
+  so the four key-player features can never populate for the WNBA; the fifth gap is moneyline
+  until odds land. It clears `MIN_FEATURE_COMPLETENESS` (0.35) comfortably.
+- **The weights are NBA's.** WNBA pace, scoring level and home advantage differ, so calibration
+  may well be off. Nothing here has been measured against WNBA outcomes — that is the
+  interesting result, and it needs settled fixtures to accumulate first.
+- **A dedicated model is possible but small**: ~312 games/season against NBA's ~1,230, so five
+  seasons of WNBA is roughly one-and-a-quarter seasons of NBA, on a 12-feature vector. Revisit
+  only if the shared model measures badly.
+- **This is an exception to the recorded "no new leagues until measurement lands" HOLD**, taken
+  knowingly. The argument for it is that a second basketball competition TESTS whether the NBA
+  model generalises rather than merely widening coverage — but it is an exception, not a
+  precedent, and it is logged as one on the Edge Measurement sheet.
+
 ## Tennis (ATP) — real, trained, live-verified end to end; WTA still blocked on tier
 
 Added per direct user request, using BallDontLie's tennis API (the same account/key already

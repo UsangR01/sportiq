@@ -29,6 +29,11 @@ ODDS_REQUEST_DELAY_SECONDS = 2.0
 # first, falling back to sport slug for single-league sports like NBA.
 _RUNDOWN_SPORT_IDS: dict[str, int] = {
     "nba": 4,
+    # Confirmed live via GET /sports on 2026-08-13. The WNBA is its own sport_id here even
+    # though it is a LEAGUE under our own "nba" Sport row — which is exactly why the lookup
+    # below tries league_slug before sport_slug, or every WNBA fixture would be priced against
+    # NBA's id 4.
+    "wnba": 8,
     # Football leagues (PRD 4.1 MVP scope) — recorded now even though no football Sport/
     # League rows are seeded yet, since these are confirmed real IDs and cheap to keep here.
     "epl": 11,

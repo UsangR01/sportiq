@@ -17,6 +17,31 @@ from app.core.config import get_settings
 BASE_URL = "https://api.balldontlie.io/nba/v1"
 MAX_PAGES = 20  # safety cap on cursor-pagination loops
 
+# BallDontLie serves each competition under its own namespace on the same key. Confirmed live
+# 2026-08-13: /wnba/v1/games returns 200, is mid-season, and carries history back past 2024.
+_LEAGUE_PATHS = {"nba": "/nba/v1", "wnba": "/wnba/v1"}
+_API_ROOT = "https://api.balldontlie.io"
+
+# WNBA external ids are PREFIXED and NBA's deliberately are not.
+#
+# Both leagues live under one Sport row (slug "nba"), and Team/Fixture uniqueness is keyed on
+# (sport_id, external_id) — NOT league_id. Both namespaces number their teams from 1, so an
+# unprefixed WNBA team 1 would silently collide with an NBA team 1 and the two competitions
+# would share rows. Same hazard, and the same fix, as ATP/WTA sharing one tennis Sport.
+#
+# The asymmetry is intentional: NBA rows already exist with bare ids, and prefixing them now
+# would orphan every stored team, fixture, prediction and Elo rating.
+_LEAGUE_ID_PREFIXES = {"wnba": "wnba:"}
+
+
+def league_external_id(league: str, raw_id) -> str:
+    return f"{_LEAGUE_ID_PREFIXES.get(league, '')}{raw_id}"
+
+
+def strip_league_prefix(external_id: str) -> str:
+    """The provider only knows its own bare ids, so anything sent back must be unprefixed."""
+    return external_id.split(":", 1)[1] if ":" in external_id else external_id
+
 
 def _current_nba_season(now: datetime | None = None) -> int:
     """BallDontLie labels a season by the year it starts (e.g. 2025 for the 2025-26 season,
@@ -25,10 +50,50 @@ def _current_nba_season(now: datetime | None = None) -> int:
     return now.year if now.month >= 10 else now.year - 1
 
 
+def _current_season(league: str, now: datetime | None = None) -> int:
+    """The WNBA runs May-September inside ONE calendar year, so its season label is simply that
+    year — the NBA's October-boundary rule would report the previous season for most of the
+    WNBA's own season. Exactly the convention split football already handles for Brasileirao
+    via CALENDAR_YEAR_SEASON_LEAGUES."""
+    if league == "wnba":
+        return (now or datetime.now(UTC)).year
+    return _current_nba_season(now)
+
+
+def _normalise_game(game: dict, league: str) -> dict:
+    """Convert a WNBA game into the NBA shape, ONCE, at the boundary.
+
+    The two namespaces are similar enough to look interchangeable and are not:
+
+        NBA      home_team_score / visitor_team_score   datetime   status "Final"
+        WNBA     home_score      / away_score           date       status "post" + state "final"
+
+    Normalising here rather than parameterising every accessor keeps all the derivation below
+    single-shaped, so adding this league cannot change what NBA computes.
+
+    Scores are dropped for a game that has not started: WNBA reports 0-0 rather than null for a
+    scheduled fixture, and storing that as a real score would show a live-looking 0-0 on the
+    card for a game that has not tipped off.
+    """
+    if league != "wnba":
+        return game
+    started = game.get("status_state") != "scheduled"
+    return {
+        **game,
+        "datetime": game.get("date"),
+        "home_team_score": game.get("home_score") if started else None,
+        "visitor_team_score": game.get("away_score") if started else None,
+        # _map_status keys off the literal "Final" and off a truthy period. WNBA scheduled games
+        # carry period 0, which is already falsy, so only the completed marker needs translating.
+        "status": "Final" if game.get("status_state") == "final" else game.get("status", ""),
+    }
+
+
 def _map_status(status: str, period: int | None) -> str:
     """BallDontLie's `status` has no fixed enum: "Final" once done, a start-time string like
     "7:00 pm ET" before tip-off, or a period string ("1st Qtr", "Halftime", ...) while live.
-    Mapped heuristically to our fixtures.status values."""
+    Mapped heuristically to our fixtures.status values. WNBA games reach here already
+    translated by _normalise_game."""
     if status == "Final":
         return "completed"
     if period:
@@ -36,16 +101,19 @@ def _map_status(status: str, period: int | None) -> str:
     return "scheduled"
 
 
-def _map_game_to_fixture_payload(game: dict) -> FixturePayload:
+def _map_game_to_fixture_payload(game: dict, league: str = "nba") -> FixturePayload:
     """Pure, network/DB-free mapping — kept separate so it's directly unit-testable against a
     recorded sample response."""
+    game = _normalise_game(game, league)
     home = game["home_team"]
     away = game["visitor_team"]
     return FixturePayload(
-        external_id=str(game["id"]),
-        league_external_id="nba",
-        home_team_external_id=str(home["id"]),
-        away_team_external_id=str(away["id"]),
+        external_id=league_external_id(league, game["id"]),
+        league_external_id=league,
+        # Prefixed for the same reason the fixture id is: get_or_create_team keys on
+        # (sport_id, external_id), so an unprefixed WNBA team 1 would be the same row as NBA's.
+        home_team_external_id=league_external_id(league, home["id"]),
+        away_team_external_id=league_external_id(league, away["id"]),
         kickoff_utc=datetime.fromisoformat(game["datetime"].replace("Z", "+00:00")),
         season=str(game["season"]),
         home_team_name=home.get("full_name") or home.get("name"),
@@ -170,9 +238,14 @@ class BallDontLieAdapter(DataSourceAdapter):
     def __init__(self) -> None:
         self._api_key = get_settings().balldontlie_api_key
 
-    def _client(self) -> httpx.AsyncClient:
+    def _client(self, league: str = "nba") -> httpx.AsyncClient:
+        path = _LEAGUE_PATHS.get(league)
+        if path is None:
+            # Loud rather than silently falling back to NBA, which would return NBA fixtures
+            # under a WNBA league row and look like real data.
+            raise ValueError(f"BallDontLie has no namespace mapped for league={league!r}")
         return httpx.AsyncClient(
-            base_url=BASE_URL, headers={"Authorization": self._api_key}, timeout=10.0
+            base_url=_API_ROOT + path, headers={"Authorization": self._api_key}, timeout=10.0
         )
 
     async def fetch_odds(
@@ -193,19 +266,28 @@ class BallDontLieAdapter(DataSourceAdapter):
             "end_date": (now + timedelta(days=days_ahead)).date().isoformat(),
             "per_page": 100,
         }
-        async with self._client() as client:
+        async with self._client(league) as client:
             games = await _fetch_all_games(client, params)
-        return [_map_game_to_fixture_payload(g) for g in games]
+        return [_map_game_to_fixture_payload(g, league) for g in games]
 
     async def fetch_team_stats(
         self, team_id: str, n_matches: int, league: str | None = None
     ) -> TeamStats:
-        # league is ignored — NBA has exactly one league, and _current_nba_season() already
-        # derives the season internally from the current date (see its own docstring).
-        params = {"team_ids[]": team_id, "seasons[]": _current_nba_season(), "per_page": 100}
-        async with self._client() as client:
+        # league now SELECTS THE NAMESPACE (nba vs wnba) and the season convention. It used to
+        # be ignored, correctly, while NBA was the only basketball league.
+        league = league or "nba"
+        raw_team_id = strip_league_prefix(team_id)
+        params = {
+            "team_ids[]": raw_team_id,
+            "seasons[]": _current_season(league),
+            "per_page": 100,
+        }
+        async with self._client(league) as client:
             games = await _fetch_all_games(client, params)
-        return _compute_team_stats(team_id, games, n_matches)
+        # Derivations run on the NBA shape, so normalise first; the raw id is what the games
+        # carry, so match on that rather than on our prefixed one.
+        games = [_normalise_game(g, league) for g in games]
+        return _compute_team_stats(raw_team_id, games, n_matches)
 
     async def fetch_injuries(self, sport: str) -> list[InjuryUpdate]:
         """Fallback path when ROTOWIRE_API_KEY is absent (TDD §2.3). Less real-time than
@@ -217,7 +299,9 @@ class BallDontLieAdapter(DataSourceAdapter):
 H2H_SEASONS_BACK = 3  # how many recent seasons to search for head-to-head meetings
 
 
-async def fetch_h2h_win_rate(home_external_id: str, away_external_id: str) -> float | None:
+async def fetch_h2h_win_rate(
+    home_external_id: str, away_external_id: str, league: str = "nba"
+) -> float | None:
     """NBA/BallDontLie-specific helper, not part of the DataSourceAdapter ABC — H2H is
     fixture-specific (needs both teams), not a generic per-team stat, so it doesn't fit
     fetch_team_stats(team_id)'s shape. Used by
@@ -225,15 +309,23 @@ async def fetch_h2h_win_rate(home_external_id: str, away_external_id: str) -> fl
     history for meetings against the away team rather than a dedicated endpoint (BallDontLie
     has none) — each game a team's history includes already embeds both participants."""
     api_key = get_settings().balldontlie_api_key
-    current_season = _current_nba_season()
+    # league selects BOTH the namespace and the season convention. Sending a "wnba:" id to the
+    # NBA namespace returns nothing and reads as "these teams have never met" -- a fabricated
+    # feature value rather than a visible failure.
+    current_season = _current_season(league)
     seasons = [current_season - i for i in range(H2H_SEASONS_BACK)]
+    home_external_id = strip_league_prefix(home_external_id)
+    away_external_id = strip_league_prefix(away_external_id)
 
     async with httpx.AsyncClient(
-        base_url=BASE_URL, headers={"Authorization": api_key}, timeout=10.0
+        base_url=_API_ROOT + _LEAGUE_PATHS[league],
+        headers={"Authorization": api_key},
+        timeout=10.0,
     ) as client:
         games = await _fetch_all_games(
             client, {"team_ids[]": home_external_id, "seasons[]": seasons, "per_page": 100}
         )
+    games = [_normalise_game(g, league) for g in games]
 
     def is_home(g: dict) -> bool:
         return str(g["home_team"]["id"]) == home_external_id

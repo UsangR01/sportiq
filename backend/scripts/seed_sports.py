@@ -43,6 +43,35 @@ async def seed_nba() -> None:
         else:
             print("league already exists: nba")
 
+        # The WNBA is a second LEAGUE under this same Sport, not a sport of its own, so it is
+        # served by the already-trained NBA model — the same one-model-per-sport arrangement
+        # that has 18 football leagues sharing one artefact. Its features (Elo, rolling form,
+        # rest days, home advantage) are computed per team from that team's OWN games, so they
+        # are WNBA-native even though the weights were learned on NBA.
+        #
+        # BallDontLie numbers both competitions' teams from 1, and Team/Fixture uniqueness is
+        # (sport_id, external_id) rather than league_id, so WNBA ids are prefixed "wnba:" in
+        # balldontlie.py. Without that the two leagues share rows.
+        wnba = (
+            await db.execute(
+                select(League).where(League.sport_id == sport.id, League.slug == "wnba")
+            )
+        ).scalar_one_or_none()
+        if wnba is None:
+            db.add(
+                League(
+                    sport_id=sport.id,
+                    slug="wnba",
+                    name="WNBA",
+                    country="USA",
+                    tier=1,
+                    active=True,
+                )
+            )
+            print("created league: wnba")
+        else:
+            print("league already exists: wnba")
+
         await db.commit()
 
 

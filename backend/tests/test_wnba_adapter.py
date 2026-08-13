@@ -1,0 +1,136 @@
+"""The WNBA shares a Sport row with the NBA, which makes id collisions the headline risk.
+
+Both competitions live under Sport(slug="nba") so they share one trained model -- the same
+arrangement that has 18 football leagues sharing one artefact. But BallDontLie numbers each
+namespace's teams and games from 1, and Team/Fixture uniqueness is keyed on
+(sport_id, external_id) rather than league_id, so an unprefixed WNBA team 1 would BE NBA team 1:
+one row, two competitions, silently merged Elo and form. Identical hazard to ATP/WTA sharing one
+tennis Sport, and fixed the same way.
+
+The schemas also differ more than they appear to. Sampled live 2026-08-13:
+
+    NBA      home_team_score / visitor_team_score   datetime   status "Final"
+    WNBA     home_score      / away_score           date       status "post" + state "final"
+
+A scheduled WNBA game reports period 0 and 0-0 rather than nulls, so a naive mapping shows a
+live-looking 0-0 on a card for a game that has not tipped off.
+"""
+
+import pytest
+
+from app.adapters.balldontlie import (
+    _current_season,
+    _map_game_to_fixture_payload,
+    _normalise_game,
+    league_external_id,
+    strip_league_prefix,
+)
+
+# Shapes taken from real responses, not invented.
+WNBA_FINAL = {
+    "id": 3858,
+    "date": "2025-05-16T23:30:00.000Z",
+    "season": 2025,
+    "postseason": False,
+    "status": "post",
+    "status_state": "final",
+    "period": 4,
+    "time": "0.0",
+    "home_team": {"id": 5, "full_name": "Washington Mystics", "abbreviation": "WSH"},
+    "visitor_team": {"id": 1, "full_name": "New York Liberty", "abbreviation": "NYL"},
+    "home_score": 94,
+    "away_score": 90,
+}
+WNBA_SCHEDULED = {
+    "id": 25004,
+    "date": "2026-08-13T23:00:00.000Z",
+    "season": 2026,
+    "postseason": False,
+    "status": "pre",
+    "status_state": "scheduled",
+    "period": 0,
+    "time": "0.0",
+    "home_team": {"id": 11, "full_name": "Dallas Wings", "abbreviation": "DAL"},
+    "visitor_team": {"id": 30, "full_name": "Toronto Tempo", "abbreviation": "TOR"},
+    "home_score": 0,
+    "away_score": 0,
+}
+NBA_FINAL = {
+    "id": 3858,  # DELIBERATELY the same id as WNBA_FINAL -- that is the collision
+    "datetime": "2025-05-16T23:30:00Z",
+    "season": 2024,
+    "status": "Final",
+    "period": 4,
+    "home_team": {"id": 5, "full_name": "Chicago Bulls", "abbreviation": "CHI"},
+    "visitor_team": {"id": 1, "full_name": "Atlanta Hawks", "abbreviation": "ATL"},
+    "home_team_score": 101,
+    "visitor_team_score": 99,
+}
+
+
+def test_the_same_provider_id_in_both_leagues_does_not_collide():
+    """THE GUARD. Both fixtures are id 3858 and both teams are ids 5 and 1. Under one Sport row
+    that is one Team and one Fixture unless the WNBA side is namespaced."""
+    nba = _map_game_to_fixture_payload(NBA_FINAL, "nba")
+    wnba = _map_game_to_fixture_payload(WNBA_FINAL, "wnba")
+    assert nba.external_id != wnba.external_id
+    assert nba.home_team_external_id != wnba.home_team_external_id
+    assert nba.away_team_external_id != wnba.away_team_external_id
+
+
+def test_nba_ids_stay_bare_so_existing_rows_are_not_orphaned():
+    """The asymmetry is deliberate. NBA teams, fixtures, predictions and Elo ratings are already
+    stored against bare ids; prefixing them now would strand every one of them."""
+    nba = _map_game_to_fixture_payload(NBA_FINAL, "nba")
+    assert nba.external_id == "3858"
+    assert nba.home_team_external_id == "5"
+    assert league_external_id("nba", 7) == "7"
+    assert league_external_id("wnba", 7) == "wnba:7"
+    assert strip_league_prefix("wnba:7") == "7"
+    assert strip_league_prefix("7") == "7"
+
+
+def test_a_scheduled_wnba_game_reports_no_score_rather_than_0_0():
+    """WNBA sends 0-0 for a game that has not started. Passing that through would render a
+    live-looking 0-0 on the card before tip-off."""
+    payload = _map_game_to_fixture_payload(WNBA_SCHEDULED, "wnba")
+    assert payload.status == "scheduled"
+    assert payload.home_score is None and payload.away_score is None
+
+
+def test_a_completed_wnba_game_carries_its_real_score():
+    payload = _map_game_to_fixture_payload(WNBA_FINAL, "wnba")
+    assert payload.status == "completed"
+    assert (payload.home_score, payload.away_score) == (94, 90)
+    assert payload.league_external_id == "wnba"
+
+
+def test_the_wnba_status_vocabulary_is_translated_not_guessed():
+    """'post'/'final' and 'pre'/'scheduled' are the real values, sampled live. _map_status keys
+    off the literal 'Final', so an untranslated WNBA game would read as scheduled forever --
+    including ones that had already finished."""
+    assert _normalise_game(WNBA_FINAL, "wnba")["status"] == "Final"
+    assert _normalise_game(WNBA_SCHEDULED, "wnba")["status"] == "pre"
+
+
+def test_normalisation_leaves_nba_untouched():
+    """Adding this league must not change a single thing NBA computes."""
+    assert _normalise_game(NBA_FINAL, "nba") is NBA_FINAL
+
+
+@pytest.mark.parametrize(
+    "league, month, expected",
+    [
+        ("wnba", 8, 2026),  # mid-season, and the NBA rule would say 2025
+        ("wnba", 3, 2026),  # pre-season, still its own calendar year
+        ("nba", 8, 2025),  # NBA's Oct boundary: August belongs to the season that started last
+        ("nba", 11, 2026),
+    ],
+)
+def test_the_season_conventions_differ(league, month, expected):
+    """The WNBA runs May-September inside one calendar year. Applying the NBA's October rule
+    would query the WRONG season for the whole of the WNBA's actual season -- the same mistake
+    Brasileirao exposed in football."""
+    from datetime import UTC, datetime
+
+    assert _current_season(league, datetime(2026, month, 1, tzinfo=UTC)) == expected

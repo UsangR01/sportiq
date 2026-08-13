@@ -210,6 +210,7 @@ async def assemble_from_live_db(db, fixture, home_features, away_features) -> di
     from app.adapters.balldontlie import fetch_h2h_win_rate
     from app.fixtures.models import Team
     from app.odds.models import Odds
+    from app.sports.models import League
 
     rest_days_home = (
         float(home_features.days_since_last_match)
@@ -254,7 +255,16 @@ async def assemble_from_live_db(db, fixture, home_features, away_features) -> di
     ).scalar_one_or_none()
     h2h_win_rate_home = None
     if home_team and away_team and home_team.external_id and away_team.external_id:
-        h2h_win_rate_home = await fetch_h2h_win_rate(home_team.external_id, away_team.external_id)
+        # The league decides which BallDontLie namespace to search. NBA and WNBA share this
+        # Sport row and this model, but not their id spaces -- searching NBA for a WNBA pairing
+        # returns no meetings, which reads as "these two have never played" rather than as the
+        # lookup having gone to the wrong competition.
+        league = (
+            await db.execute(select(League.slug).where(League.id == fixture.league_id))
+        ).scalar_one_or_none() or "nba"
+        h2h_win_rate_home = await fetch_h2h_win_rate(
+            home_team.external_id, away_team.external_id, league
+        )
 
     best_odds = (
         (
