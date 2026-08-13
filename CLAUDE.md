@@ -185,8 +185,33 @@ exposed in football.
 loudly: sending a `wnba:` id to the NBA namespace returns no meetings, which reads as "these two
 have never played" — a fabricated feature value, not a visible error.
 
+**WNBA ODDS NEEDED AN ABBREVIATION ALIAS MAP — the two providers disagree on 4 of 15 teams.**
+Reported as "no odds in the WNBA games". Cross-provider matching keys on the abbreviation
+string, so any fixture involving one of these four could never be priced:
+
+    TheRundown   ours (BallDontLie)
+    CONN         CON    Connecticut Sun
+    GSV          GS     Golden State Valkyries
+    LAS          LV     Las Vegas Aces
+    NYL          NY     New York Liberty
+
+**Measured, not eyeballed**: both providers' full team lists joined on city + mascot (TheRundown
+splits them — `name` is the CITY, "Las Vegas", with the mascot in its own field, which is what
+made a naive join on `name` return nothing at all). 11 of 15 already agreed.
+
+This is exactly the risk CLAUDE.md already recorded in the abstract — abbreviation consistency
+was "confirmed true for BallDontLie vs TheRundown on NBA... not verified for any other provider
+pair". It is not verified for a new team sport until someone diffs the two lists.
+`_WNBA_ABBREVIATION_ALIASES` is scoped to sport_id 8 rather than applied globally: `LAS` and
+`NYL` are free in the NBA today, but a blanket rename silently mis-prices a different league
+later. Result inside the 3-day odds window: **4/10 priced → 8/10**.
+- **The 2 that remain are NOT a matching failure**, checked rather than assumed: TheRundown has
+  both events and **zero affiliates have posted a moneyline** — every book still masked. So 8 of
+  the 8 fixtures that have a price are matched. Fixtures beyond 3 days are outside
+  `ODDS_LOOKAHEAD_DAYS` by design, the same bound football has.
+
 **Verified live end to end**: 40 fixtures with real scores, 15 teams, 36 `TeamFeatures` rows, 18
-real predictions, 45 odds rows across 4 fixtures, and NBA still serving unchanged.
+real predictions, odds on every priced fixture in window, and NBA still serving unchanged.
 
     Connecticut Sun  v Atlanta Dream       home 0.193   HIGH
     New York Liberty v Los Angeles Sparks  home 0.733   HIGH

@@ -98,8 +98,42 @@ def _american_to_decimal(american: float | None) -> float | None:
     return round(1 + 100 / abs(american), 4)
 
 
+# TheRundown and BallDontLie disagree on FOUR of the WNBA's fifteen team abbreviations, and
+# matching is keyed on exactly that string — so any fixture involving one of these four could
+# never be priced. Measured 2026-08-13 by joining both providers' full team lists on
+# city + mascot, not by eye: 11 of 15 already agreed.
+#
+#     TheRundown   ours (BallDontLie)
+#     CONN         CON    Connecticut Sun
+#     GSV          GS     Golden State Valkyries
+#     LAS          LV     Las Vegas Aces
+#     NYL          NY     New York Liberty
+#
+# This is the failure CLAUDE.md already warned about in the abstract: cross-provider
+# abbreviation consistency was verified for NBA and "not verified for any other provider pair".
+# It is not verified for a new team sport until someone diffs the two lists.
+#
+# Keyed by TheRundown's spelling because that is the side being translated. Scoped to the WNBA
+# sport id rather than applied globally: "LAS" and "NYL" are free in the NBA today, but a
+# blanket rename is the kind of thing that silently mis-prices a different league later.
+_WNBA_ABBREVIATION_ALIASES = {
+    "CONN": "CON",
+    "GSV": "GS",
+    "LAS": "LV",
+    "NYL": "NY",
+}
+
+_WNBA_RUNDOWN_SPORT_ID = 8
+
+
+def _apply_abbreviation_aliases(abbr: str | None, rundown_sport_id: int) -> str | None:
+    if abbr is None or rundown_sport_id != _WNBA_RUNDOWN_SPORT_ID:
+        return abbr
+    return _WNBA_ABBREVIATION_ALIASES.get(abbr, abbr)
+
+
 def _map_event_to_odds_payloads(
-    event: dict, *, key_on_full_name: bool = False
+    event: dict, *, key_on_full_name: bool = False, rundown_sport_id: int = 0
 ) -> list[OddsPayload]:
     """Pure, network/DB-free mapping — kept separate so it's directly unit-testable against a
     recorded sample response. Maps the moneyline ("h2h") market and, since this feature was
@@ -116,8 +150,14 @@ def _map_event_to_odds_payloads(
     # would match nothing. For tennis a "team" is one person: TheRundown abbreviates
     # "F. Cobolli" while BallDontLie stores "Flavio Cobolli", and an initial cannot be
     # recovered from a first name, so only the full name can match there.
-    home_abbr = _cross_provider_key(normalized_by_side.get(True, {}), key_on_full_name)
-    away_abbr = _cross_provider_key(normalized_by_side.get(False, {}), key_on_full_name)
+    home_abbr = _apply_abbreviation_aliases(
+        _cross_provider_key(normalized_by_side.get(True, {}), key_on_full_name),
+        rundown_sport_id,
+    )
+    away_abbr = _apply_abbreviation_aliases(
+        _cross_provider_key(normalized_by_side.get(False, {}), key_on_full_name),
+        rundown_sport_id,
+    )
     kickoff_utc = datetime.fromisoformat(event["event_date"].replace("Z", "+00:00"))
 
     payloads: list[OddsPayload] = []
@@ -263,7 +303,11 @@ class TheRundownAdapter(DataSourceAdapter):
                 )
                 for event in response.json().get("events", []):
                     payloads.extend(
-                        _map_event_to_odds_payloads(event, key_on_full_name=sport == "tennis")
+                        _map_event_to_odds_payloads(
+                            event,
+                            key_on_full_name=sport == "tennis",
+                            rundown_sport_id=rundown_sport_id,
+                        )
                     )
                 await asyncio.sleep(ODDS_REQUEST_DELAY_SECONDS)
 

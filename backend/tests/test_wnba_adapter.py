@@ -134,3 +134,57 @@ def test_the_season_conventions_differ(league, month, expected):
     from datetime import UTC, datetime
 
     assert _current_season(league, datetime(2026, month, 1, tzinfo=UTC)) == expected
+
+
+# --- odds: the two providers disagree on four abbreviations ---------------------------------
+
+from app.adapters.therundown import (  # noqa: E402
+    _WNBA_ABBREVIATION_ALIASES,
+    _apply_abbreviation_aliases,
+    _map_event_to_odds_payloads,
+)
+
+WNBA_RUNDOWN_SPORT_ID = 8
+NBA_RUNDOWN_SPORT_ID = 4
+
+
+def test_the_four_measured_mismatches_are_translated():
+    """Matching keys on the abbreviation string, so a fixture involving any of these could
+    never be priced. Measured by joining both providers' full team lists on city + mascot:
+    11 of 15 already agreed, these 4 did not."""
+    for rundown, ours in _WNBA_ABBREVIATION_ALIASES.items():
+        assert _apply_abbreviation_aliases(rundown, WNBA_RUNDOWN_SPORT_ID) == ours
+
+
+def test_agreeing_abbreviations_pass_through_untouched():
+    for abbr in ("ATL", "CHI", "DAL", "IND", "LA", "MIN", "PHX", "POR", "SEA", "TOR", "WSH"):
+        assert _apply_abbreviation_aliases(abbr, WNBA_RUNDOWN_SPORT_ID) == abbr
+
+
+def test_the_aliases_are_scoped_to_the_wnba():
+    """LAS and NYL are free in the NBA today, but a blanket rename is the kind of thing that
+    silently mis-prices a different league later."""
+    assert _apply_abbreviation_aliases("LAS", NBA_RUNDOWN_SPORT_ID) == "LAS"
+    assert _apply_abbreviation_aliases("NYL", NBA_RUNDOWN_SPORT_ID) == "NYL"
+
+
+def test_a_real_wnba_event_maps_onto_our_abbreviations():
+    """Shape taken from a real /sports/8/events response: Las Vegas at home to Washington."""
+    event = {
+        "event_id": "wnba-test-1",
+        "event_date": "2026-08-14T23:00:00Z",
+        "teams_normalized": [
+            {"abbreviation": "WSH", "name": "Washington", "is_home": False},
+            {"abbreviation": "LAS", "name": "Las Vegas", "is_home": True},
+        ],
+        "lines": {
+            "1": {
+                "affiliate": {"affiliate_name": "Bovada"},
+                "moneyline": {"moneyline_home": -250, "moneyline_away": 200},
+            }
+        },
+    }
+    payloads = _map_event_to_odds_payloads(event, rundown_sport_id=WNBA_RUNDOWN_SPORT_ID)
+    assert payloads, "a real moneyline event must produce at least one payload"
+    assert payloads[0].home_team_short_name == "LV"  # not LAS
+    assert payloads[0].away_team_short_name == "WSH"
