@@ -1,13 +1,44 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Every scheme a managed Postgres might hand us, mapped to the async driver this project
+# actually has installed. Render's `fromDatabase: connectionString` yields "postgresql://...",
+# Heroku-style providers still emit the legacy "postgres://", and neither names a driver.
+#
+# WHY THIS IS NOT COSMETIC: requirements.txt carries asyncpg and NO sync driver, so SQLAlchemy
+# resolves a bare "postgresql://" to its default psycopg2 dialect and fails with "The asyncio
+# extension requires an async driver to be used" -- at which point alembic upgrade head dies in
+# Render's preDeployCommand and the web service never starts. It killed the first real deploy.
+#
+# Rewriting here rather than asking the operator to hand-set DATABASE_URL is deliberate: that
+# value is auto-wired from the database resource in the blueprint, so overriding it by hand
+# would mean giving up the wiring (and re-pasting a password by hand on every credential
+# rotation).
+_ASYNC_POSTGRES_SCHEME = "postgresql+asyncpg://"
+_BARE_POSTGRES_SCHEMES = ("postgresql://", "postgres://")
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str = "postgresql+asyncpg://sportiq_user:password@localhost:5432/sportiq"
+
+    @field_validator("database_url")
+    @classmethod
+    def _require_an_async_driver(cls, value: str) -> str:
+        """Normalise a driverless Postgres URL onto asyncpg. See _BARE_POSTGRES_SCHEMES.
+
+        A URL that already names a driver is left exactly as it is -- including a deliberate
+        sync one, which a future script might legitimately want. Only the ambiguous case is
+        rewritten."""
+        for scheme in _BARE_POSTGRES_SCHEMES:
+            if value.startswith(scheme):
+                return _ASYNC_POSTGRES_SCHEME + value[len(scheme) :]
+        return value
+
     redis_url: str = "redis://localhost:6379/0"
 
     jwt_secret_key: str = ""
