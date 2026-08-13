@@ -16,6 +16,7 @@ Usage (from repo root):
     PYTHONPATH=backend python ml/training/train_nba.py
 """
 
+import argparse
 import asyncio
 import os
 import sys
@@ -217,6 +218,13 @@ def _optuna_objective(trial, X_train, y_train, X_val, y_val) -> float:
     return log_loss(y_val, val_preds)
 
 
+
+# Set by --no-activate. A training run is often a MEASUREMENT rather than a promotion, and this
+# script registers-and-activates unconditionally, so the losing arm of an experiment silently
+# becomes the model that serves users. That is not hypothetical: on 2026-08-13 a tennis
+# form-window arm scoring WORSE on both accuracy and RPS promoted itself simply by finishing.
+ACTIVATE_ON_REGISTER = True
+
 async def _register_model(
     artefact_path: Path, rps: float, accuracy: float, roi_simulation: float | None
 ) -> None:
@@ -256,11 +264,14 @@ async def _register_model(
                 accuracy=accuracy,
                 roi_simulation=roi_simulation,
                 trained_at=datetime.now(UTC),
-                is_active=True,
+                is_active=ACTIVATE_ON_REGISTER,
             )
         )
         await db.commit()
-        print(f"registered models_registry row: {version} (is_active=True)")
+        print(
+            f"registered models_registry row: {version} "
+            f"(is_active={ACTIVATE_ON_REGISTER})"
+        )
 
 
 async def main_async() -> None:
@@ -385,6 +396,15 @@ async def main_async() -> None:
 
 
 def main() -> None:
+    global ACTIVATE_ON_REGISTER
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--no-activate",
+        action="store_true",
+        help="Register the artefact but leave is_active False. Use for any run that is a "
+        "MEASUREMENT rather than a promotion.",
+    )
+    ACTIVATE_ON_REGISTER = not parser.parse_args().no_activate
     asyncio.run(main_async())
 
 

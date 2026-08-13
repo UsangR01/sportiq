@@ -35,6 +35,7 @@ handles missing values natively, and inventing e.g. 0.5 for "no H2H history" wou
 model something the data doesn't actually support.
 """
 
+import os
 from datetime import date
 
 import pandas as pd
@@ -58,7 +59,15 @@ FEATURE_NAMES = (
     "moneyline_implied_prob_home",
 )
 
-LAST_N_FORM = 10  # matches app/workers/ingest_fixtures.py's FEATURE_WINDOW_MATCHES
+# The last of the three inherited windows. Football's was 5 because TeamStats already had
+# columns named form_pts_5; NBA copied 10 from nowhere in particular and tennis then copied NBA.
+# Football measured 3/5/10 and moved to 10; tennis measured 5 vs 10 and kept 10.
+#
+# BOUNDED ABOVE BY SERVING, unlike the other two. app/workers/ingest_fixtures.py's
+# FEATURE_WINDOW_MATCHES decides how many matches the adapter actually FETCHES per team, so a
+# window wider than that would train on history the live path can never supply -- a silent
+# train/serve mismatch. Any test above 10 has to move both constants together.
+LAST_N_FORM = int(os.environ.get("SPORTIQ_NBA_LAST_N_FORM", "10"))
 BACK_TO_BACK_MAX_REST_DAYS = 1
 
 
