@@ -1374,6 +1374,27 @@ true record of what was displayed, and it holds 59 rows, **all tennis h2h**: 0 o
 fixtures that passed through the 4-8h window since 2026-08-10 were captured. Not yet diagnosed,
 and too small a sample to call a bug.
 
+**`/history` and `/history/summary` now carry the card verdict too** (`pick_market`,
+`pick_selection`, `pick_line`, `pick_probability`, `pick_odds`, `pick_was_correct`; and
+`card_pick_accuracy`/`card_pick_baseline`/`card_pick_graded`/`card_pick_ungradable`/
+`card_pick_absent` on the summary). Both call the feed's own `_bulk_best_picks` and the shared
+`grade_pick`, so endpoint, notebook and card cannot disagree. Live, matching the notebook
+exactly:
+
+    football   1X2 n=63 acc 0.3651   |   CARD n=62 acc 0.7258 base 0.6391 CI[0.604, 0.821]
+    tennis     1X2 n=85 acc 0.6706   |   CARD n=85 acc 0.6706 base   n/a  CI[0.565, 0.761]
+
+**Tennis agreeing exactly is the consistency check, not a coincidence** — its cards are all
+h2h, so the two verdicts MUST coincide. If they ever diverge for tennis, something is wrong.
+
+**`was_correct` deliberately still means the 1X2 call.** Silently redefining a published field
+hands every consumer a different number with no signal that it moved, so the card verdict is
+new fields alongside rather than a replacement. The original argument for scoring 1X2 also
+still holds and is kept in the schema docstring: best_pick depends on which odds happened to be
+ingested, so its accuracy is partly a function of odds coverage, while 1X2 exists for every
+prediction. What that argument missed is that a track record of something users never see
+cannot build trust in what they do.
+
 ### A tightening guard rewrote published history — settled fixtures are now exempt
 
 Reported 2026-08-13: "a lot of the Scottish league games that were present in the cards days ago

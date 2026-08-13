@@ -7,11 +7,22 @@ from pydantic import BaseModel
 class HistoryEntry(BaseModel):
     """One settled fixture the model made a real call on, with how that call turned out.
 
-    Scored on the 1X2 market only (the model's argmax of home/draw/away) rather than on
-    best_pick's cross-market choice. That is deliberate: best_pick depends on which odds
-    happened to be ingested at the time, so scoring it would make historical accuracy a
-    function of odds coverage rather than of the model. 1X2 is always present for every
-    prediction, which makes this comparable across sports and across time."""
+    TWO VERDICTS, because they answer different questions and only one of them is the product.
+
+    `was_correct` scores the 1X2 market — the model's argmax of home/draw/away. The original
+    reasoning for scoring only this still holds and is worth keeping: best_pick depends on which
+    odds happened to be ingested, so its accuracy is partly a function of odds coverage, while
+    1X2 exists for every prediction and stays comparable across sports and across time.
+
+    `pick_was_correct` scores the pick that was actually ON THE CARD, across all four markets.
+    What the original reasoning missed is that a track record of something users never see
+    cannot build trust in what they do see, and the two genuinely disagree: Hearts v Dundee Utd
+    (2026-08-09) showed UNDER 10.5 CORNERS and won, while its 1X2 call lost. Measured over the
+    settled pre-match population, football's card picks are 43 double chance + 19 corners and
+    ZERO h2h — so `was_correct` describes a market football cards never show.
+
+    Both are returned rather than one replacing the other. Silently changing what `was_correct`
+    means would hand every existing consumer a different number with no signal that it moved."""
 
     fixture_id: uuid.UUID
     sport_slug: str
@@ -31,8 +42,20 @@ class HistoryEntry(BaseModel):
     confidence_tier: str
     predicted_outcome: str  # "home" | "draw" | "away"
     result: str  # the real settled MatchResult
-    was_correct: bool
+    was_correct: bool  # the 1X2 call — see the class docstring
     settled_at: datetime
+
+    # --- the pick that was actually on the card ---------------------------------------------
+    # All null when the feed's own guards left the fixture with no pick at all (the fixture is
+    # still listed, because "we showed nothing here" is itself part of the record).
+    pick_market: str | None = None  # "h2h" | "double_chance" | "goals_total" | "corners_total"
+    pick_selection: str | None = None
+    pick_line: float | None = None
+    pick_probability: float | None = None
+    pick_odds: float | None = None
+    # None means UNVERIFIABLE, never "wrong" — a corners pick on a fixture whose real corner
+    # counts were never captured, or a voided match. See app/predictions/grading.py.
+    pick_was_correct: bool | None = None
 
 
 class HistorySummary(BaseModel):
@@ -76,6 +99,29 @@ class HistorySummary(BaseModel):
     # Predictions excluded because their provenance could not be established — see
     # PredictionKind.UNKNOWN. Reported rather than hidden so the denominator stays auditable.
     excluded_unknown_provenance: int
+
+    # --- the same population, scored on the pick that was actually SHOWN ---------------------
+    # `accuracy` above is the 1X2 call. This is the product's own promise, and the two are not
+    # interchangeable: football card picks are 43 double chance + 19 corners and ZERO h2h, so
+    # the 1X2 number describes a market football cards never show.
+    #
+    # READ THESE TOGETHER WITH card_pick_baseline. Double chance and corners carry much higher
+    # base rates than 1X2, so a higher card accuracy is mostly the market being easier, not the
+    # model being better. Measured 2026-08-13: football 0.3651 on 1X2 against 0.7258 on card
+    # picks, where the no-skill baseline is 0.6391 — an +8.67pp gap, not a +36pp one.
+    card_pick_graded: int
+    card_pick_correct: int
+    card_pick_accuracy: float
+    card_pick_ci_low: float
+    card_pick_ci_high: float
+    # Mean of each shown pick's own measured base rate (MARKET_BASE_RATES). None where the sport
+    # has none — tennis abstains deliberately, since its "home" is a player-id tiebreak rather
+    # than a venue, so borrowing football's rate would be meaningless.
+    card_pick_baseline: float | None
+    # Settled fixtures whose card pick could not be graded (corners with no captured count), and
+    # those the feed's guards left with no pick at all. Counted, never folded into the losses.
+    card_pick_ungradable: int
+    card_pick_absent: int
 
 
 class HistoryQuery(BaseModel):

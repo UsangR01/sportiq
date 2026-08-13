@@ -8,8 +8,15 @@ from sqlalchemy.orm import aliased
 
 from app.core.database import get_db
 from app.fixtures.models import Fixture, FixtureLiveState, Team
+
+# The feed's OWN selection function, imported rather than reimplemented, for the same reason
+# _wilson_interval is shared with the notebook: a second copy of "which pick did we show" would
+# eventually disagree with the card and there would be no way to tell which had moved. Safe
+# from a cycle — app.fixtures.router imports nothing from app.history.
+from app.fixtures.router import _base_rate, _bulk_best_picks, _MarketCandidate
 from app.history.models import MatchResult, Outcome
 from app.history.schemas import HistoryEntry, HistorySummary, ModelStats
+from app.predictions.grading import grade_pick
 from app.predictions.models import ModelRegistry, Prediction, PredictionKind
 from app.sports.models import League, Sport
 
@@ -123,6 +130,61 @@ def _representative_prediction_ids():
     return select(ranked.c.pid).where(ranked.c.rn == 1)
 
 
+# Keeps each bulk query's IN () clause a sane size when the whole settled history is scored.
+_CARD_PICK_CHUNK = 400
+
+
+async def _card_picks_for(db: AsyncSession, fixture_ids: list) -> dict:
+    """The pick each fixture's card actually showed, keyed by fixture id.
+
+    Recomputed, not replayed: best_pick is derived per request and was never stored, so this is
+    what the card shows TODAY against today's odds. pick_snapshots is the only true record of
+    what was displayed at the time and starts 2026-08-10 — see CLAUDE.md."""
+    picks: dict = {}
+    for start in range(0, len(fixture_ids), _CARD_PICK_CHUNK):
+        best, _all = await _bulk_best_picks(db, fixture_ids[start : start + _CARD_PICK_CHUNK])
+        picks.update(best)
+    return picks
+
+
+def _grade_card_pick(pick, outcome: Outcome, live_state_row) -> bool | None:
+    """Was the shown pick right? None when it genuinely cannot be told."""
+    if pick is None:
+        return None
+    home_corners, away_corners, result_type = live_state_row
+    return grade_pick(
+        pick.market,
+        pick.selection,
+        pick.line,
+        outcome.home_score,
+        outcome.away_score,
+        home_corners,
+        away_corners,
+        result_type,
+    )
+
+
+def _pick_base_rate(pick, sport_slug: str) -> float | None:
+    """The share of fixtures this outcome occurs in regardless of who is playing.
+
+    The no-skill alternative for a MIXED-MARKET population. "Always pick home" is meaningless
+    once picks span four markets, so each pick is compared against its own market's measured
+    rate and the population baseline is their mean."""
+    if pick is None:
+        return None
+    return _base_rate(
+        _MarketCandidate(
+            selection=pick.selection,
+            probability=None,
+            odds=None,
+            market=pick.market,
+            line=pick.line,
+            feature_completeness=None,
+        ),
+        sport_slug,
+    )
+
+
 def _history_query(sport_slug: str | None, league_slug: str | None):
     """Settled fixtures the model actually made a call on, newest first.
 
@@ -139,6 +201,11 @@ def _history_query(sport_slug: str | None, league_slug: str | None):
             home_team.name,
             away_team.name,
             FixtureLiveState.result_type,
+            # Needed to grade a corners pick. Outcome carries goals only, so a corners card
+            # cannot be scored without these — and they are nullable, which is why an ungraded
+            # corners pick is reported separately rather than counted as a loss.
+            FixtureLiveState.home_corners,
+            FixtureLiveState.away_corners,
         )
         .join(Fixture, Fixture.id == Outcome.fixture_id)
         .join(Prediction, Prediction.fixture_id == Fixture.id)
@@ -194,15 +261,18 @@ async def get_history(
         .limit(limit)
     )
     rows = (await db.execute(stmt)).all()
+    card_picks = await _card_picks_for(db, [row[2] for row in rows])
 
     entries: list[HistoryEntry] = []
-    for outcome, prediction, fixture_id, sport, league, home, away, _result_type in rows:
+    for outcome, prediction, fixture_id, sport, league, home, away, *live in rows:
         predicted = _predicted_outcome(prediction)
         probability = {
             "home": prediction.home_prob,
             "draw": prediction.draw_prob or 0.0,
             "away": prediction.away_prob,
         }[predicted]
+        result_type, home_corners, away_corners = live
+        pick = card_picks.get(fixture_id)
         entries.append(
             HistoryEntry(
                 fixture_id=fixture_id,
@@ -217,6 +287,14 @@ async def get_history(
                 result=outcome.result.value,
                 was_correct=_RESULT_BY_OUTCOME[predicted] == outcome.result,
                 settled_at=outcome.settled_at,
+                pick_market=pick.market if pick else None,
+                pick_selection=pick.selection if pick else None,
+                pick_line=pick.line if pick else None,
+                pick_probability=pick.probability if pick else None,
+                pick_odds=pick.odds if pick else None,
+                pick_was_correct=_grade_card_pick(
+                    pick, outcome, (home_corners, away_corners, result_type)
+                ),
             )
         )
     return entries
@@ -260,11 +338,24 @@ async def get_history_summary(
     three probability columns against an enum, which is expressible in SQL but markedly less
     readable, and the settled-fixture volume here is thousands, not millions."""
     rows = (await db.execute(_history_query(sport_slug, league_slug))).all()
+    card_picks = await _card_picks_for(db, [row[2] for row in rows])
 
-    totals: dict[str, dict[str, int]] = {}
-    for outcome, prediction, _fixture_id, sport, _league, _home, _away, result_type in rows:
+    totals: dict[str, dict] = {}
+    for outcome, prediction, fixture_id, sport, _league, _home, _away, *live in rows:
+        result_type, home_corners, away_corners = live
         bucket = totals.setdefault(
-            sport, {"settled": 0, "correct": 0, "voided": 0, "excluded_kind": 0}
+            sport,
+            {
+                "settled": 0,
+                "correct": 0,
+                "voided": 0,
+                "excluded_kind": 0,
+                "card_graded": 0,
+                "card_correct": 0,
+                "card_ungradable": 0,
+                "card_absent": 0,
+                "card_base_rates": [],
+            },
         )
         if result_type is not None:
             bucket["voided"] += 1
@@ -278,6 +369,21 @@ async def get_history_summary(
         if _RESULT_BY_OUTCOME[_predicted_outcome(prediction)] == outcome.result:
             bucket["correct"] += 1
 
+        # The same fixture, scored on the pick the card actually showed.
+        pick = card_picks.get(fixture_id)
+        if pick is None:
+            bucket["card_absent"] += 1
+            continue
+        verdict = _grade_card_pick(pick, outcome, (home_corners, away_corners, result_type))
+        if verdict is None:
+            bucket["card_ungradable"] += 1
+            continue
+        bucket["card_graded"] += 1
+        bucket["card_correct"] += int(verdict)
+        rate = _pick_base_rate(pick, sport)
+        if rate is not None:
+            bucket["card_base_rates"].append(rate)
+
     summaries = []
     for sport, counts in sorted(totals.items()):
         n, correct = counts["settled"], counts["correct"]
@@ -285,6 +391,13 @@ async def get_history_summary(
         # real zero denominator, which must not be turned into a fabricated accuracy.
         accuracy = (correct / n) if n else 0.0
         ci_low, ci_high = _wilson_interval(correct, n)
+        card_n, card_correct = counts["card_graded"], counts["card_correct"]
+        card_accuracy = (card_correct / card_n) if card_n else 0.0
+        card_ci_low, card_ci_high = _wilson_interval(card_correct, card_n)
+        # Mean of the shown picks' own base rates, over the picks that HAVE one. Never a
+        # full-population accuracy compared against a baseline drawn from part of it.
+        rates = counts["card_base_rates"]
+        card_baseline = (sum(rates) / len(rates)) if rates else None
         summaries.append(
             HistorySummary(
                 sport_slug=sport,
@@ -302,6 +415,14 @@ async def get_history_summary(
                 # when it only meant "big enough to print". See spec §9.5.
                 conclusive=_detectable_effect(accuracy, n) <= ACCURACY_EDGE_THRESHOLD,
                 excluded_unknown_provenance=counts["excluded_kind"],
+                card_pick_graded=card_n,
+                card_pick_correct=card_correct,
+                card_pick_accuracy=card_accuracy,
+                card_pick_ci_low=card_ci_low,
+                card_pick_ci_high=card_ci_high,
+                card_pick_baseline=card_baseline,
+                card_pick_ungradable=counts["card_ungradable"],
+                card_pick_absent=counts["card_absent"],
             )
         )
     return summaries
