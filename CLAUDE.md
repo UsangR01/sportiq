@@ -1384,6 +1384,50 @@ seed while tuning `subsample`/`colsample_bytree`, so every run sampled different
 — unlike football, whose defaults sat at 1.0 and whose fits were therefore already deterministic.
 `RANDOM_SEED` now seeds the sampler and both estimators.
 
+**NBA's form window measured — the last of the three, and all three converge on 10.** Everything
+else identical and seeded, every arm run with `--no-activate`:
+
+    n=10   accuracy 0.6865   RPS 0.2013   ROI +12.98% (n=27)   <- kept, no change needed
+    n=5    accuracy 0.6873   RPS 0.2039   ROI  -3.68% (n=23)
+    n=3    accuracy 0.6857   RPS 0.2041   ROI +17.32% (n=26)
+
+RPS decides and n=10 wins outright. **Accuracy spans exactly one game** across all three arms
+(0.6857-0.6873 on 1,225 test games) so it separates nothing, and ROI swings -3.7% to +17.3% on
+23-27 staked games — a clean illustration of why ROI is reported as directional and never used to
+choose anything.
+- **The rule is weaker than it looks and is recorded as such**: RPS-primary was written down
+  after two of three arms had been seen, not before. It is this project's existing convention for
+  probabilistic quality and the accuracy spread is one game, so it decided nothing the numbers
+  left open — but it is not the pre-registration used for the corners tuning.
+- **The incumbent `nba_xgb_v20260728142554` stays active** rather than being replaced by the
+  fresh seeded n=10 arm: their metrics are within noise (RPS 0.2002 vs 0.2013) and the incumbent
+  is marginally better, so there is nothing to gain by churning the served model. The seeded
+  artefact is what a future retrain will now reproduce.
+- Football moved UP to 10 from an inherited 5; tennis and NBA both defended 10 against shorter
+  windows. **"Shorter is fresher" is dead in all three sports.**
+- **NBA's window is the only one bounded by serving** — `ingest_fixtures.FEATURE_WINDOW_MATCHES`
+  decides how many matches the adapter fetches per team, so a wider training window would average
+  over history the live path can never supply. `test_form_window_parity.py` pins it.
+
+> **`--no-activate` LEFT NBA WITH NO ACTIVE MODEL AT ALL — a bug I introduced and hit within the
+> hour.** `_register_model` demotes every active row and *then* inserts the new one. Correct when
+> promoting; wrong under `--no-activate`, where the incumbent is demoted and nothing replaces it.
+> Three measurement arms ran back to back and the third left the registry with **zero** active
+> NBA models.
+>
+> **The failure is silent and total.** `runner.py` resolves the serving model from the registry,
+> so a sport with no active row simply stops producing predictions — no exception at training
+> time, nothing at ingest, just a feed that quietly empties. It was caught only because
+> `/stats/model` dropped NBA from its response entirely while I was checking something else.
+>
+> This is the mirror image of the tennis hazard fixed hours earlier: that one promoted a model
+> nobody chose, this one demoted the only one there was. Both come from the same
+> register-and-activate coupling. The demotion now happens only when something is actually
+> replacing the incumbent, across all three scripts, pinned by
+> `test_no_activate_keeps_an_incumbent.py` — which parses the AST for an *unguarded*
+> `is_active = False` rather than matching a string, and was verified to fail against the
+> pre-fix source rather than assumed to.
+
 > **"STRATEGIC: nothing is deployed — no `infra/`" was STALE and had been repeated for weeks.**
 > `infra/render.yaml` is real and complete (three services off one image, managed Postgres and
 > Redis, `preDeployCommand: alembic upgrade head`), `backend/Dockerfile` exists, and there is a

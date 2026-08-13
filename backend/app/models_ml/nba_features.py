@@ -66,7 +66,28 @@ FEATURE_NAMES = (
 # BOUNDED ABOVE BY SERVING, unlike the other two. app/workers/ingest_fixtures.py's
 # FEATURE_WINDOW_MATCHES decides how many matches the adapter actually FETCHES per team, so a
 # window wider than that would train on history the live path can never supply -- a silent
-# train/serve mismatch. Any test above 10 has to move both constants together.
+# train/serve mismatch. Any test above 10 has to move both constants together, which is what
+# test_form_window_parity.py exists to enforce.
+#
+# MEASURED 2026-08-13, everything else identical and seeded, all three arms --no-activate:
+#
+#     n=10   accuracy 0.6865   RPS 0.2013   ROI +12.98% (n=27)   <- kept
+#     n=5    accuracy 0.6873   RPS 0.2039   ROI  -3.68% (n=23)
+#     n=3    accuracy 0.6857   RPS 0.2041   ROI +17.32% (n=26)
+#
+# RPS is the deciding metric and n=10 wins it outright. Accuracy spans ONE GAME across all three
+# arms (0.6857-0.6873 on 1,225 test games), so it separates nothing, and the ROI column swings
+# -3.7% to +17.3% on 23-27 staked games -- a good illustration of why it is reported as
+# directional only and never used to choose anything.
+#
+# HONEST ABOUT THE RULE: RPS-primary was written down after two of the three arms had been seen,
+# not before. It is the convention this project already holds for probabilistic quality, and the
+# accuracy spread is one game, so it did not decide anything the numbers left open -- but it is
+# weaker than the pre-registration used for the corners tuning, and is recorded as such.
+#
+# ALL THREE SPORTS NOW CONVERGE ON 10, which was not the expected outcome: football moved UP to
+# 10 from an inherited 5, while tennis and NBA both defended 10 against shorter windows. The
+# "shorter is fresher" hypothesis is dead in all three.
 LAST_N_FORM = int(os.environ.get("SPORTIQ_NBA_LAST_N_FORM", "10"))
 BACK_TO_BACK_MAX_REST_DAYS = 1
 

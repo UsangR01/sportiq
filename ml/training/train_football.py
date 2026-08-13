@@ -633,8 +633,14 @@ async def _register_model(
             .scalars()
             .all()
         )
-        for row in existing_active:
-            row.is_active = False
+        # Only demote the incumbent when something is actually replacing it. Demoting
+        # unconditionally under --no-activate leaves the sport with NO active model at all, so
+        # run_predictions has nothing to resolve and every prediction for that sport silently
+        # stops -- which is exactly what happened to NBA on 2026-08-13 when three measurement
+        # arms ran back to back and the third left the registry empty.
+        if ACTIVATE_ON_REGISTER:
+            for row in existing_active:
+                row.is_active = False
 
         # DERIVED from the artefact filename, not a fresh timestamp. Minting a second
         # datetime.now() here put the registry version a few seconds ahead of the artefact
