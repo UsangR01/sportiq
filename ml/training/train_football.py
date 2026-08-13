@@ -53,6 +53,7 @@ Usage (from repo root):
     backend/.venv/Scripts/python ml/training/train_football.py
 """
 
+import argparse
 import asyncio
 import math
 import os
@@ -595,6 +596,20 @@ def model_version_for(artefact_path: Path) -> str:
     return f"{ARTEFACT_PREFIX}v{artefact_path.stem.removeprefix(ARTEFACT_PREFIX)}"
 
 
+
+# Set by --no-activate. A training run is often a MEASUREMENT rather than a promotion, and
+# these scripts register-and-activate unconditionally, so the losing arm of an experiment
+# silently becomes the model that serves users.
+#
+# Not hypothetical, and it has now happened twice. The football corners baseline left an
+# inactive row (harmless). Then on 2026-08-13 a tennis form-window experiment at n=5 scored
+# WORSE than the n=10 model on both accuracy (0.6312 vs 0.6377) and RPS (0.2298 vs 0.2275) and
+# activated itself anyway. Worse than a bad number: LAST_N_FORM defaults back to 10 at serving
+# time, so a model trained on 5-match form would have been fed 10-match form -- a silent
+# train/serve mismatch introduced by the measurement itself. Caught before any prediction was
+# generated with it, by luck of timing rather than by design.
+ACTIVATE_ON_REGISTER = True
+
 async def _register_model(
     artefact_path: Path, rps: float, accuracy: float, roi: float | None
 ) -> None:
@@ -639,11 +654,14 @@ async def _register_model(
                 accuracy=accuracy,
                 roi_simulation=roi,
                 trained_at=datetime.now(UTC),
-                is_active=True,
+                is_active=ACTIVATE_ON_REGISTER,
             )
         )
         await db.commit()
-        print(f"registered models_registry row: {version} (is_active=True)")
+        print(
+            f"registered models_registry row: {version} "
+            f"(is_active={ACTIVATE_ON_REGISTER})"
+        )
 
 
 async def main_async() -> None:
@@ -1316,6 +1334,17 @@ async def main_async() -> None:
 
 
 def main() -> None:
+    global ACTIVATE_ON_REGISTER
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--no-activate",
+        action="store_true",
+        help="Register the artefact but leave is_active False. Use for any run that is a "
+        "MEASUREMENT rather than a promotion - an experiment arm must not become the served "
+        "model just by finishing.",
+    )
+    ACTIVATE_ON_REGISTER = not parser.parse_args().no_activate
+
     asyncio.run(main_async())
 
 

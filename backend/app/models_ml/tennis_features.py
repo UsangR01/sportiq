@@ -83,7 +83,21 @@ FEATURE_NAMES = (
 # was the most suspect of the three -- players compete in bursts inside a tournament, so ten
 # matches can reach back across surfaces and months -- and CLAUDE.md already recorded that
 # borrowing NBA's base rates for tennis was indefensible while its window was borrowed in
-# silence. Set from the run recorded in train_tennis.py, not by convention.
+# silence.
+#
+# THE INHERITED VALUE SURVIVED. Everything else identical, seeded, n=5 against n=10:
+#
+#     n=5    test accuracy 0.6312   RPS 0.2298   ranking-baseline gap +1.62pp
+#     n=10   test accuracy 0.6377   RPS 0.2275   ranking-baseline gap +2.15pp
+#
+# 10 wins on all three, so the hypothesis that motivated the test -- players compete in bursts,
+# so a shorter window should be fresher -- is DEAD for tennis, exactly as "shorter is fresher"
+# died for football at n=3. Kept at 10 on evidence now rather than on inheritance.
+#
+# The env override exists so the next such test needs no code edit. Pass --no-activate when
+# running one: this experiment's LOSING arm registered itself as the active tennis model, and
+# because serving reads this default back at 10, it would have fed 10-match form into a model
+# trained on 5.
 LAST_N_FORM = int(os.environ.get("SPORTIQ_TENNIS_LAST_N_FORM", "10"))
 
 

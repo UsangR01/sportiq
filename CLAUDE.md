@@ -1357,6 +1357,28 @@ tournament object — one paginated sweep, no per-fixture lookups. Surfaces come
 LIVE results that the tennis base-rate gate decision is pre-registered against; it previously
 worked only on the test split.
 
+**Tennis `LAST_N_FORM`: the inherited 10 SURVIVED measurement.** It was 10 only because
+`nba_features.py` used 10, which was 10 because football's columns were named `_5`. Tennis was
+the most suspect of the three — players compete in bursts, so ten matches reach across surfaces
+and months. Everything else identical and seeded:
+
+    n=5    accuracy 0.6312   RPS 0.2298   ranking-baseline gap +1.62pp
+    n=10   accuracy 0.6377   RPS 0.2275   ranking-baseline gap +2.15pp
+
+10 wins on all three. "Shorter is fresher" is now dead for tennis as well as for football at
+n=3. Kept on evidence rather than inheritance. NBA's window remains untested.
+
+> **THE EXPERIMENT'S LOSING ARM ACTIVATED ITSELF AS THE SERVED TENNIS MODEL, and this is the
+> second time this hazard has fired.** `train_*.py` register **and activate** unconditionally,
+> so finishing a run promotes it. The football corners baseline left a harmless inactive row;
+> this one went live. Worse than a bad number: `LAST_N_FORM` defaults back to 10 at serving
+> time, so a model trained on 5-match form would have been fed 10-match form — **a silent
+> train/serve mismatch created by the act of measuring**. Caught by checking the registry
+> straight after the run, with **0 predictions** generated against it, which was timing rather
+> than design. Fixed with `--no-activate` on both `train_tennis.py` and `train_football.py`:
+> registers the artefact, leaves `is_active` False. Use it for any run that is a measurement
+> rather than a promotion.
+
 **NBA training was genuinely non-reproducible, and more so than football ever was.** It pinned no
 seed while tuning `subsample`/`colsample_bytree`, so every run sampled different rows and columns
 — unlike football, whose defaults sat at 1.0 and whose fits were therefore already deterministic.
