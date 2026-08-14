@@ -43,7 +43,7 @@ async def test_an_unmapped_league_is_declined_without_a_call(monkeypatch):
         raise AssertionError("must not build a client for an unmapped league")
 
     monkeypatch.setattr(thestatsapi, "_client", _boom)
-    assert await thestatsapi.fetch_corners("nba", "2026", date(2026, 8, 14), 1, 0) is None
+    assert await thestatsapi.fetch_corners("nba", date(2026, 8, 14), 1, 0) is None
     assert called is False
 
 
@@ -101,3 +101,38 @@ def test_an_ambiguous_score_match_is_refused():
 
     source = inspect.getsource(thestatsapi.fetch_corners)
     assert "len(matches) != 1" in source
+
+
+# --- season resolution: the bug this shipped with, and the fix ------------------------------
+
+
+def test_season_is_resolved_from_the_kickoff_date_not_a_label():
+    """THE BUG THIS SHIPPED WITH, caught by querying a real J1 fixture rather than by review.
+
+    The first version matched TheStatsAPI's season NAME against our stored season string. That
+    works for calendar leagues ("Veikkausliiga 2026") and fails for every autumn-spring one,
+    which are named "J1 League 26/27" and "Premier League 26/27" -- most of the pool. It passed
+    its first live test only because the fixtures it filled were all Veikkausliiga.
+
+    Our own labels cannot rescue it either: API-Football calls the EPL's 2026-27 season 2026
+    (start year) and the J1 League's 2026-27 season 2027 (end year). Verified live against both.
+
+    start_year/end_year are structured, so the kickoff date decides and no label is parsed.
+    """
+    import inspect
+
+    source = inspect.getsource(thestatsapi._season_id)
+    assert "start_year" in source and "end_year" in source
+    assert "kickoff.year" in source
+    # The signature must not take a season label at all -- that is what made the bug possible.
+    assert "season: str" not in inspect.signature(thestatsapi._season_id).parameters
+
+
+def test_an_ambiguous_season_is_refused_rather_than_picked():
+    """The J1 League ran a calendar 2026 season AND began a 26/27 season in the same year while
+    switching to the European calendar, so two seasons can claim one date. Picking one would
+    match confidently against a fixture from a different season entirely."""
+    import inspect
+
+    source = inspect.getsource(thestatsapi._season_id)
+    assert "len(spanning) == 1" in source

@@ -68,6 +68,10 @@ COMPETITION_IDS = {
 # day either side and the score does the real discriminating.
 DATE_WINDOW_DAYS = 1
 
+# The month from which a split season is considered to have STARTED rather than ended. Matches
+# _current_football_season's own July boundary in api_football.py.
+SEASON_SPLIT_MONTH = 7
+
 # Season ids are stable for a season and cost a call each to resolve, so they are held for the
 # life of the process. A worker restart re-resolves, which is cheap and self-correcting.
 _SEASON_CACHE: dict[str, str | None] = {}
@@ -91,23 +95,61 @@ def _client() -> httpx.AsyncClient:
     )
 
 
-async def _season_id(client: httpx.AsyncClient, league_slug: str, season: str) -> str | None:
+async def _season_id(client: httpx.AsyncClient, league_slug: str, kickoff: date) -> str | None:
+    """Resolve the season a fixture belongs to FROM ITS KICKOFF DATE, not from a season label.
+
+    THE LABELS CANNOT BE MATCHED ON, and the first version of this tried to. TheStatsAPI names
+    calendar seasons "Veikkausliiga 2026" but split ones "J1 League 26/27" and "Premier League
+    26/27", so a substring search for the year misses every autumn-spring league -- which is
+    most of them. It happened to work for Veikkausliiga and hid the fault.
+
+    API-Football's own labels cannot rescue it either, because they are inconsistent between
+    leagues: the EPL's 2026-27 season is labelled 2026 (its START year) while the J1 League's
+    2026-27 season is labelled 2027 (its END year). Verified live against both.
+
+    start_year/end_year are structured and unambiguous, so the kickoff date decides. Where two
+    seasons overlap a year -- the J1 League ran a calendar 2026 season AND began a 26/27 season
+    in the same year, during its switch to the European calendar -- the month breaks the tie on
+    the usual convention, and is_current settles anything still level.
+    """
     competition = COMPETITION_IDS.get(league_slug)
     if competition is None:
         return None
-    cache_key = f"{league_slug}:{season}"
+    cache_key = f"{league_slug}:{kickoff.year}:{kickoff.month >= SEASON_SPLIT_MONTH}"
     if cache_key in _SEASON_CACHE:
         return _SEASON_CACHE[cache_key]
 
     response = await client.get(f"/competitions/{competition}/seasons")
     resolved = None
     if response.status_code == 200:
-        for row in response.json().get("data", []):
-            # Season labels are free text ("Veikkausliiga 2026", "25/26"), so match on the year
-            # appearing anywhere rather than on an exact label this code would have to predict.
-            if season and season in str(row.get("name") or ""):
-                resolved = row.get("id")
-                break
+        rows = response.json().get("data", [])
+        spanning = [
+            row
+            for row in rows
+            if row.get("start_year") is not None
+            and int(row["start_year"])
+            <= kickoff.year
+            <= int(row.get("end_year") or row["start_year"])
+        ]
+        if len(spanning) > 1:
+            # A season starting in the second half of the year owns fixtures played in that
+            # half; one ending this year owns the first half.
+            preferred = [
+                row
+                for row in spanning
+                if (
+                    int(row["start_year"]) == kickoff.year
+                    if kickoff.month >= SEASON_SPLIT_MONTH
+                    else int(row.get("end_year") or row["start_year"]) == kickoff.year
+                )
+            ]
+            spanning = preferred or spanning
+        if len(spanning) > 1:
+            spanning = [row for row in spanning if row.get("is_current")] or spanning
+        # Still ambiguous means two seasons genuinely claim this date; refusing is safer than
+        # picking one, because the wrong season yields a confident match against another
+        # fixture entirely.
+        resolved = spanning[0].get("id") if len(spanning) == 1 else None
     _SEASON_CACHE[cache_key] = resolved
     return resolved
 
@@ -126,7 +168,6 @@ def _corners_from_stats(payload: dict) -> tuple[int, int] | None:
 
 async def fetch_corners(
     league_slug: str,
-    season: str,
     kickoff: date,
     home_score: int,
     away_score: int,
@@ -141,7 +182,7 @@ async def fetch_corners(
         return None
 
     async with _client() as client:
-        season_id = await _season_id(client, league_slug, season)
+        season_id = await _season_id(client, league_slug, kickoff)
         if season_id is None:
             return None
 

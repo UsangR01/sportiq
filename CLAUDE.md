@@ -2210,6 +2210,30 @@ nothing) and then tries four times a day for seven days.
 **Live result: 7 gaps -> 2**, and both remaining were 4.1h and 9.1h old, correctly skipped by
 the age floor rather than failed. Five Veikkausliiga fixtures now carry real corners in a league
 that previously had none.
+
+> **THAT FIRST RESULT WAS PARTLY LUCK, AND QUERYING THE TWO LEFTOVERS EXPOSED IT.** Asked to
+> check whether the two remaining fixtures were available yet, one came back with real corners
+> immediately and the other did not — for completely different reasons.
+>
+> `_season_id` originally matched TheStatsAPI's season NAME against our stored season string.
+> That works for calendar leagues ("Veikkausliiga 2026") and **fails for every autumn-spring
+> league**, which are named "J1 League 26/27" and "Premier League 26/27" — most of the pool. It
+> passed its first live test only because every fixture it filled happened to be Veikkausliiga.
+>
+> **Our own labels could not have rescued it either**: API-Football calls the EPL's 2026-27
+> season **2026** (start year) and the J1 League's 2026-27 season **2027** (end year). Verified
+> live against both — the same provider, two conventions.
+>
+> Fixed by resolving the season from the **KICKOFF DATE** against `start_year`/`end_year`, which
+> are structured, so no label is parsed at all. Verified across seven cases including the J1
+> League mid-transition (it ran a calendar 2026 season AND began 26/27 in the same year) and the
+> EPL in both halves of its season, which correctly resolve to different ids. An genuinely
+> ambiguous date is refused rather than picked, because the wrong season matches confidently
+> against a different fixture.
+>
+> **Result: Tokyo Verdy v Kashiwa Reysol filled immediately, corners 3-5** — it was never
+> latency. VPS v Turku PS at 7.9h genuinely was not published, which also tightens the lag bound:
+> J1 had data at 12.9h, Veikkausliiga did not at 7.9h, so the 12h age floor is about right.
 - **Matched on DATE + SCORE**, names only as a tiebreak — the same join the offline collector
   uses, because an exact scoreline inside a three-day window is far stronger than two team names
   spelled by different providers. An ambiguous window is refused, never guessed.

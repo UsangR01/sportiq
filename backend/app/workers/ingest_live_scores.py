@@ -328,7 +328,6 @@ async def _backfill_corners_from_thestatsapi() -> None:
             try:
                 corners = await fetch_corners(
                     league_slug,
-                    fixture.season or "",
                     fixture.kickoff_utc.date(),
                     live_state.home_score,
                     live_state.away_score,
