@@ -2128,6 +2128,54 @@ match. Root-caused to two independent, stacking issues:
   two the user specifically flagged as still-broken, SHANGHAI SIPG vs Shandong Luneng
   (98% → 85.7%) and Chengdu Better City vs Wuhan Three Towns (99% → 90.8%).
 
+## Tennis timing: nine real matches were shown as POSTPONED, and it was ours (2026-08-14)
+
+Reported as discomfort with "TBC and all" and whether the API is good enough. The API is
+genuinely weak here; the visible damage was not the API's.
+
+**Measured before touching anything**: 33 tennis fixtures POSTPONED, **100% of them Time-TBC** —
+too clean to be a coincidence. Checked every visible one against the provider: **all nine still
+existed as `scheduled`**, Djokovic, Zverev and Shapovalov among them. We invented all nine.
+
+**THE MECHANISM IS THE TOURNAMENT START DATE, not the missing time.** BallDontLie's tennis match
+object carries no date of its own — confirmed field by field: `scheduled_time` (null for the
+overwhelming majority), and the tournament's `start_date`/`end_date`. So `_match_kickoff_utc`
+falls back to the TOURNAMENT'S START, which puts **every timeless match in a ten-day draw on day
+one**. A third-round match is "30 hours late" before it was ever going to be played, and the
+clock-based sweep retires it. That is why the wall of grey was exactly the top seeds: later
+rounds sit furthest from the opening day.
+
+**THE TIME WAS ALREADY IN THE BUILDING.** TheRundown returns real, distinct per-match times for
+ATP (00:10, 02:40, 15:00, 16:30 on one sampled day) — and we already fetch that endpoint every
+two hours for tennis odds, and already match those events to our fixtures. Measured: **16 of 16**
+Time-TBC fixtures were joined to an event carrying a real time. It was arriving, being used to
+price the match, and thrown away.
+
+**Two fixes, no new provider and no new spend:**
+- `ingest_odds._adopt_real_kickoff` takes the odds provider's time when ours is a placeholder.
+  Only ever REPLACES A PLACEHOLDER — a kickoff the stats provider actually reported is left
+  alone, since that provider owns the schedule. A correction further than
+  `MAX_KICKOFF_CORRECTION_DAYS` is refused as a bad MATCH rather than a bad placeholder.
+- **The clock no longer judges a fixture whose clock we never knew.** `_mark_abandoned_fixtures`
+  drops its estimated-kickoff branch entirely. This is the FOURTH time a clock rule has been
+  wrong about a vanished fixture and the threshold had already been nudged twice — the
+  instrument was wrong, not its calibration. `_reconcile_vanished_fixtures` decides on POSITIVE
+  EVIDENCE and correctly hid 33 genuinely-withdrawn fixtures on the same day the clock invented
+  these nine.
+
+**Result, live:**
+
+    Time-TBC upcoming        27/33  ->  12/33
+    visible POSTPONED cards      9  ->   2   (and those 2 had real kickoffs, so they are honest)
+    fixtures on the right day   all piled on 08-13  ->  22 correctly on 08-14 with real times
+
+**RESIDUAL, stated plainly: 9 fixtures still sit on the wrong DAY.** They are later-round
+Cincinnati matches that no provider has scheduled yet — TheRundown does not list them either.
+The "Time TBC" label is honest about the time, but placing them on the tournament's opening day
+is still wrong, and they will move to their real day as soon as either provider schedules them.
+Fixing that properly means either not day-grouping an unscheduled fixture at all, or hiding it
+until a time exists — a product decision rather than a data one.
+
 ## The default minimum-odds filter is 1.01, not 1.50 (2026-08-14)
 
 Direct request. The old 1.50 default was doing more damage than it looked, and this is the third

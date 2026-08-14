@@ -243,6 +243,39 @@ async def _fetch_odds_payloads(
     return payloads
 
 
+# How far an odds provider's kickoff may sit from our own before we refuse to trust it as a
+# correction. Generous, because the case this exists for is a placeholder that can be days out;
+# tight enough that a mis-matched event cannot silently move a fixture into another week.
+MAX_KICKOFF_CORRECTION_DAYS = 10
+
+
+def _adopt_real_kickoff(fixture: Fixture, payload: OddsPayload) -> bool:
+    """Take a REAL kickoff time from the odds provider when our own is only a placeholder.
+
+    WHY THIS IS WORTH DOING AT ALL: BallDontLie's tennis match object carries no date of its
+    own -- only scheduled_time, which is null for the overwhelming majority of matches, and the
+    tournament's start/end. So a timeless match is stored at the TOURNAMENT'S START, which puts
+    a third-round match on day one of a ten-day draw. TheRundown returns real, distinct times
+    for the same matches (00:10, 02:40, 15:00, 16:30 on one sampled day), and we already fetch
+    and already match those events in order to price them -- 16 of 16 Time-TBC fixtures were
+    joined to one when this was measured. The time was arriving and being thrown away.
+
+    Only ever REPLACES A PLACEHOLDER. A fixture whose kickoff the stats provider actually
+    reported is left alone: that provider owns the schedule, and letting an odds feed overwrite
+    a real time would trade a known-good value for a second-hand one.
+    """
+    if not fixture.kickoff_is_estimated or payload.kickoff_utc is None:
+        return False
+    drift = abs((payload.kickoff_utc - fixture.kickoff_utc).total_seconds())
+    if drift > MAX_KICKOFF_CORRECTION_DAYS * 86400:
+        # Almost certainly a bad match rather than a bad placeholder. Refusing is safe: the
+        # fixture keeps its placeholder and stays flagged as estimated.
+        return False
+    fixture.kickoff_utc = payload.kickoff_utc
+    fixture.kickoff_is_estimated = False
+    return True
+
+
 async def _ingest_odds_for_league(
     sport: Sport, league: League, adapters: list | None = None, dates: list | None = None
 ) -> None:
@@ -250,6 +283,7 @@ async def _ingest_odds_for_league(
 
     async with async_session_factory() as db:
         payloads = await _fetch_odds_payloads(sport, league, adapters, dates)
+        corrected = 0
 
         for payload in payloads:
             # Events for a game we haven't ingested fixtures for yet (or can't match) are
@@ -258,6 +292,8 @@ async def _ingest_odds_for_league(
             if fixture is None:
                 continue
             payload = await _orient_payload(db, fixture, payload)
+            if _adopt_real_kickoff(fixture, payload):
+                corrected += 1
 
             db.add(
                 Odds(
@@ -277,6 +313,16 @@ async def _ingest_odds_for_league(
                 f"odds:{fixture.id}:{payload.bookmaker}:{payload.market}",
                 payload.home_odds or "",
                 ex=ODDS_CACHE_TTL_SECONDS,
+            )
+        if corrected:
+            # Worth a log line rather than silence: this is the mechanism that stops Time-TBC
+            # cards existing at all, so a run that suddenly corrects nothing is the signal that
+            # the odds join has broken.
+            logger.info(
+                "Adopted a real kickoff for %d %s/%s fixture(s) that had only a placeholder",
+                corrected,
+                sport.slug,
+                league.slug,
             )
         await db.commit()
 

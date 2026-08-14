@@ -12,7 +12,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 import httpx
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import func, select
 
 from app.adapters.base import FixturePayload
 from app.adapters.factory import AdapterFactory
@@ -119,20 +119,28 @@ async def _ingest_live_scores_for_league(sport: Sport, league: League) -> None:
 # fixture is re-seen and its real status restored.
 ABANDONED_AFTER_HOURS = 12
 
-# 30, and it is DERIVED rather than picked. A placeholder kickoff is stored at midnight and
-# means "some time on day D", so the last moment a real match could still be underway is the
-# end of day D (24h) plus a late finish (6h). Anything still SCHEDULED after that was not
-# played on the day it claims.
+# ESTIMATED KICKOFFS ARE NO LONGER RETIRED BY THE CLOCK AT ALL, and this constant survives
+# only to size the staleness warning below.
 #
-# It was 48, which is 24 hours of slack AFTER the day already ended, and that is exactly the
-# bug reported three times: a Time-TBC fixture from yesterday sitting in the feed all through
-# today with a live-looking pick. The old value was a guess; this one follows from what the
-# placeholder represents.
+# The derivation was sound and the input was not. A placeholder was assumed to mean "some time
+# on day D", so 24h for the day plus 6h for a late finish bounded when a real match could still
+# be underway. But for tennis the placeholder is the TOURNAMENT'S START DATE -- BallDontLie's
+# match object carries no date of its own, only scheduled_time (null for the overwhelming
+# majority) and the tournament's start/end. So every timeless match in a ten-day draw is stored
+# on day one, and a third-round match is "30 hours late" before it was ever going to be played.
 #
-# Safe because a revised estimate resets the clock: ingest accepts a corrected kickoff even
-# when the new one is also an estimate, so a fixture the provider moves to a later day is
-# re-dated rather than retired. And ingest_fixtures backfills 7 days, so a match we merely
-# failed to poll is re-seen and restored.
+# MEASURED 2026-08-14: nine Cincinnati fixtures were showing POSTPONED -- Djokovic, Zverev,
+# Shapovalov among them. All nine were checked against the provider and all nine still existed
+# as `scheduled`. Every one of those postponements was ours, not the provider's.
+#
+# This is the FOURTH time a clock-based rule has been wrong about a vanished fixture, and the
+# threshold has been nudged twice already. The instrument is wrong, not its calibration:
+# _reconcile_vanished_fixtures decides on POSITIVE EVIDENCE -- the provider's own current list
+# no longer containing the fixture -- and it correctly hid 33 genuinely-withdrawn Cincinnati
+# fixtures on the same day the clock invented these nine.
+#
+# A real kickoff time still gets the clock treatment (ABANDONED_AFTER_HOURS), because there the
+# input means what it says.
 ABANDONED_DAY_HOURS = 24
 ABANDONED_LATE_FINISH_GRACE_HOURS = 6
 ABANDONED_AFTER_HOURS_ESTIMATED = ABANDONED_DAY_HOURS + ABANDONED_LATE_FINISH_GRACE_HOURS
@@ -177,17 +185,12 @@ async def _mark_abandoned_fixtures() -> None:
                         .where(FixtureLiveState.fixture_id == Fixture.id)
                         .exists(),
                         ~select(Outcome.id).where(Outcome.fixture_id == Fixture.id).exists(),
-                        or_(
-                            and_(
-                                Fixture.kickoff_is_estimated.is_(True),
-                                Fixture.kickoff_utc
-                                < now - timedelta(hours=ABANDONED_AFTER_HOURS_ESTIMATED),
-                            ),
-                            and_(
-                                Fixture.kickoff_is_estimated.is_(False),
-                                Fixture.kickoff_utc < now - timedelta(hours=ABANDONED_AFTER_HOURS),
-                            ),
-                        ),
+                        # A CLOCK CAN ONLY JUDGE A FIXTURE WHOSE CLOCK WE ACTUALLY KNOW.
+                        # Estimated kickoffs are excluded outright -- see the block comment on
+                        # ABANDONED_AFTER_HOURS_ESTIMATED for the nine real matches this
+                        # invented postponements for.
+                        Fixture.kickoff_is_estimated.is_(False),
+                        Fixture.kickoff_utc < now - timedelta(hours=ABANDONED_AFTER_HOURS),
                     )
                 )
             )
