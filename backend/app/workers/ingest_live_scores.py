@@ -270,6 +270,90 @@ async def _roll_forward_stale_placeholders() -> None:
         )
 
 
+# The second corner source runs on its OWN, SLOWER schedule rather than inside the 5-minute
+# sweep, and the reason is quota rather than correctness.
+#
+# Measured: a match 3.4 hours past kickoff was already `finished` and its statistics endpoint
+# returned 404; every sampled match five or more days old carried real corners. TheStatsAPI
+# publishes statistics late, and it bills against a monthly cap. Asking every five minutes
+# would spend a few hundred calls per fixture learning "not yet".
+#
+# So: fire as soon as the data plausibly exists, then keep asking a handful of times a day
+# until it does or the fixture ages out. Seven days because the measured upper bound was around
+# five, with margin.
+THESTATSAPI_LOOKBACK_DAYS = 7
+THESTATSAPI_MAX_PER_RUN = 30
+# Nothing is asked about before this: the measured 404 at 3.4h means an earlier attempt is a
+# call spent to be told nothing.
+THESTATSAPI_MIN_AGE_HOURS = 12
+
+
+async def _backfill_corners_from_thestatsapi() -> None:
+    """Second pass at the corner counts API-Football never supplied.
+
+    Only ever fills a GAP -- a fixture that already has counts is never re-fetched and never
+    overwritten, so API-Football stays the primary and this cannot silently disagree with it.
+    """
+    from app.adapters.thestatsapi import (
+        COMPETITION_IDS,
+        TheStatsAPINotConfigured,
+        fetch_corners,
+    )
+
+    now = datetime.now(UTC)
+    async with async_session_factory() as db:
+        rows = (
+            await db.execute(
+                select(Fixture, FixtureLiveState, League.slug)
+                .join(Sport, Sport.id == Fixture.sport_id)
+                .join(League, League.id == Fixture.league_id)
+                .join(FixtureLiveState, FixtureLiveState.fixture_id == Fixture.id)
+                .where(
+                    Sport.slug == "football",
+                    Fixture.status == FixtureStatus.COMPLETED,
+                    FixtureLiveState.home_corners.is_(None),
+                    FixtureLiveState.home_score.is_not(None),
+                    League.slug.in_(list(COMPETITION_IDS)),
+                    Fixture.kickoff_utc > now - timedelta(days=THESTATSAPI_LOOKBACK_DAYS),
+                    Fixture.kickoff_utc < now - timedelta(hours=THESTATSAPI_MIN_AGE_HOURS),
+                )
+                .limit(THESTATSAPI_MAX_PER_RUN)
+            )
+        ).all()
+        if not rows:
+            return
+
+        filled = 0
+        for fixture, live_state, league_slug in rows:
+            try:
+                corners = await fetch_corners(
+                    league_slug,
+                    fixture.season or "",
+                    fixture.kickoff_utc.date(),
+                    live_state.home_score,
+                    live_state.away_score,
+                )
+            except TheStatsAPINotConfigured as exc:
+                # A deployment gap, not a provider problem, and it applies to every row -- so
+                # say it once and stop rather than repeating it thirty times.
+                logger.warning("%s", exc)
+                return
+            except httpx.HTTPError:
+                continue
+            if corners is None:
+                continue
+            live_state.home_corners, live_state.away_corners = corners
+            filled += 1
+
+        if filled:
+            await db.commit()
+            logger.info(
+                "Filled corner counts for %d fixture(s) from TheStatsAPI that API-Football "
+                "never supplied",
+                filled,
+            )
+
+
 async def _mark_abandoned_fixtures() -> None:
     """Retire fixtures that were scheduled, never played, and have quietly vanished.
 
@@ -445,3 +529,10 @@ def _looks_underway(fixture: Fixture, payload: FixturePayload) -> bool:
         return False
     scored = (payload.home_score or 0) > 0 or (payload.away_score or 0) > 0
     return scored or payload.match_minute is not None
+
+
+@celery_app.task(name="app.workers.ingest_live_scores.backfill_corners_from_thestatsapi")
+def backfill_corners_from_thestatsapi() -> None:
+    """Own schedule, not the 5-minute sweep -- see THESTATSAPI_LOOKBACK_DAYS for why the
+    cadence is a quota decision rather than a correctness one."""
+    run_task(_backfill_corners_from_thestatsapi())

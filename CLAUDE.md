@@ -2176,6 +2176,51 @@ is still wrong, and they will move to their real day as soon as either provider 
 Fixing that properly means either not day-grouping an unscheduled fixture at all, or hiding it
 until a time exists — a product decision rather than a data one.
 
+## A second corner source, and why it is not a LIVE fallback (2026-08-14)
+
+Grey badges on finished matches traced to missing corner counts. Measured across every settled
+football fixture, API-Football's live coverage is **165/190 (86.8%)** and the misses are
+concentrated rather than spread:
+
+    veikkausliiga    0/7    0.0%    <- API-Football has NO corner statistics for this league
+    brasileirao     17/32  53.1%    <- the bigger absolute gap, 15 fixtures
+    j1_league       10/11  90.9%    <- an OUTLIER, not a systemic gap
+    every other league      100%
+
+**NO NEW VENDOR WAS NEEDED.** TheStatsAPI is already provisioned, already paid for and already
+used for xG, and its match response carries `corners` alongside `shots`, `sot`, `big_chances`
+and `possession` — 99.8% coverage for both Veikkausliiga and Brasileirão across the 19,075
+matches already cached. A recommendation to go shopping would have been wrong.
+
+**LATENCY IS THE ONLY CONSTRAINT, AND IT IS WHY THIS IS NOT LIVE.** Measured against the real
+API: a Veikkausliiga match **3.4 hours** past kickoff was already marked `finished` and its
+`/stats` endpoint returned **HTTP 404**, while every sampled match five or more days old carried
+real corners. Status is prompt; STATISTICS lag.
+- The lag could not be pinned tighter than **">3.4h and <=~5 days"**, because no sampled league
+  had a match in that window. An attempt to widen the sample used competition ids that were
+  INVENTED rather than read from the collector's own config — all three 404'd, and that result
+  was discarded rather than reported.
+
+**So the six-hourly cadence is a QUOTA decision, not a correctness one** — the honest answer to
+"why does it need to be delayed". It does not: it fires as soon as the data exists. Asking every
+five minutes would simply spend hundreds of metered calls per fixture learning "not yet", so it
+waits 12h before the first attempt (earlier than the measured 404 is a call spent to be told
+nothing) and then tries four times a day for seven days.
+
+**Live result: 7 gaps -> 2**, and both remaining were 4.1h and 9.1h old, correctly skipped by
+the age floor rather than failed. Five Veikkausliiga fixtures now carry real corners in a league
+that previously had none.
+- **Matched on DATE + SCORE**, names only as a tiebreak — the same join the offline collector
+  uses, because an exact scoreline inside a three-day window is far stronger than two team names
+  spelled by different providers. An ambiguous window is refused, never guessed.
+- **Fills only a NULL.** API-Football stays primary and is never overwritten, so the two sources
+  cannot silently disagree about the same fixture.
+- **`THESTATSAPI_KEY` now has to exist in the environment.** It previously lived only in
+  `keys.docx`, read at point of use by an offline script — `infra/render.yaml` said so
+  explicitly. A worker reads it now, so the blueprint lists it and that comment was corrected
+  rather than deleted. **Unset means the fallback warns once and does nothing** — a silent gap,
+  not a crash.
+
 ### Two follow-ups from the same screenshot pair
 
 **Time-TBC matches were stranded in the PAST as actionable picks.** Nine Cincinnati fixtures --

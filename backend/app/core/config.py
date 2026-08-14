@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     balldontlie_api_key: str = ""
     rotowire_api_key: str = ""
     highlightly_api_key: str = ""
+    # Second corner-statistics source behind API-Football, and the ONLY one for
+    # Veikkausliiga (API-Football has 0% there). Previously read from keys.docx by an
+    # offline collector, so a deployed worker never had it -- see infra/render.yaml.
+    thestatsapi_key: str = ""
 
     expo_access_token: str = ""
 

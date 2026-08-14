@@ -83,13 +83,25 @@ services:
         sync: false
       - key: SENTRY_DSN_BACKEND
         sync: false
+      # Second corner-statistics source, and the ONLY one for Veikkausliiga (API-Football has
+      # 0% corner coverage there, so that league can otherwise never grade a corners pick).
+      # NOTE this key previously lived ONLY in keys.docx, read at point of use by an offline
+      # training script -- this file used to say explicitly that nothing in the deployed image
+      # read it. A worker does now, so leaving it unset means the fallback logs a warning and
+      # does nothing, which is a silent gap rather than a crash.
+      - key: THESTATSAPI_KEY
+        sync: false
       - key: CORS_ORIGINS
         sync: false           # the deployed mobile/web origin, not a localhost default
       # Deliberately absent: ROTOWIRE_API_KEY and HIGHLIGHTLY_API_KEY (never provisioned; their
       # adapters are stubs that degrade gracefully), ACCESS_TOKEN_EXPIRE_MINUTES and
-      # REFRESH_TOKEN_EXPIRE_DAYS (code defaults are correct). THESTATSAPI_KEY is not here
-      # either: it is read from keys.docx by an offline training script, and nothing in the
-      # deployed image reads it — listing it would imply a setting that does not exist.
+      # REFRESH_TOKEN_EXPIRE_DAYS (code defaults are correct).
+      #
+      # THESTATSAPI_KEY USED TO BE ABSENT HERE for exactly the reason this comment gave: it was
+      # read from keys.docx by an offline training script and nothing in the image touched it.
+      # That stopped being true on 2026-08-14, when a worker began using it as a second corner
+      # source, so it is listed above. Left as a correction rather than deleted, because the
+      # reasoning was right and only the fact changed.
 
   # ---------------------------------------------------------------- Celery worker
   - type: worker
