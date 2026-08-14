@@ -146,6 +146,130 @@ ABANDONED_LATE_FINISH_GRACE_HOURS = 6
 ABANDONED_AFTER_HOURS_ESTIMATED = ABANDONED_DAY_HOURS + ABANDONED_LATE_FINISH_GRACE_HOURS
 
 
+# How far back to keep retrying a missing corner count, and how many per run. Corner capture is
+# otherwise ONE-SHOT at settlement: _maybe_settle_outcome fetches once behind its idempotency
+# guard and degrades to (None, None) on any HTTP error, so a single rate limit or timeout loses
+# that fixture's corners permanently. Measured 2026-08-14: 5 of 6 recently-completed football
+# fixtures had no counts, and re-requesting found real data for 3 of them -- the other 2 have
+# none upstream, which is a real gap rather than a missed fetch.
+#
+# Without a count, corners_total cannot be graded, so the card shows a neutral GREY badge on a
+# finished match instead of the green tick or red cross it earned. That was the reported symptom.
+CORNER_BACKFILL_LOOKBACK_DAYS = 3
+CORNER_BACKFILL_MAX_PER_RUN = 25
+
+
+async def _backfill_missing_corner_counts() -> None:
+    """Retry the corner fetch for recently-completed football fixtures that have none.
+
+    Bounded per run so a backlog cannot spend the day's API allowance in one sweep, and scoped
+    to a few days back because a fixture whose counts were genuinely never published upstream
+    should stop being asked about. A fixture the provider has no statistics for simply stays
+    ungraded -- null is the honest answer, and it is what the mobile card already renders as a
+    neutral badge rather than a fabricated verdict.
+    """
+    from app.adapters.api_football import fetch_corner_stats
+
+    now = datetime.now(UTC)
+    async with async_session_factory() as db:
+        rows = (
+            await db.execute(
+                select(Fixture, FixtureLiveState, Sport.slug)
+                .join(Sport, Sport.id == Fixture.sport_id)
+                .join(FixtureLiveState, FixtureLiveState.fixture_id == Fixture.id)
+                .where(
+                    Sport.slug == "football",
+                    Fixture.status == FixtureStatus.COMPLETED,
+                    Fixture.kickoff_utc > now - timedelta(days=CORNER_BACKFILL_LOOKBACK_DAYS),
+                    FixtureLiveState.home_corners.is_(None),
+                    Fixture.external_id.is_not(None),
+                )
+                .limit(CORNER_BACKFILL_MAX_PER_RUN)
+            )
+        ).all()
+        if not rows:
+            return
+
+        filled = 0
+        for fixture, live_state, _slug in rows:
+            try:
+                by_team = await fetch_corner_stats(fixture.external_id)
+            except httpx.HTTPError:
+                # Same reasoning as at settlement: an enrichment must not break the sweep.
+                continue
+            home = await _team_external_id(db, fixture.home_team_id)
+            away = await _team_external_id(db, fixture.away_team_id)
+            home_corners = by_team.get(str(home)) if home else None
+            away_corners = by_team.get(str(away)) if away else None
+            if home_corners is None or away_corners is None:
+                continue
+            live_state.home_corners = home_corners
+            live_state.away_corners = away_corners
+            filled += 1
+        if filled:
+            await db.commit()
+            logger.info("Backfilled corner counts for %d completed fixture(s)", filled)
+
+
+async def _team_external_id(db, team_id) -> str | None:
+    return (
+        await db.execute(select(Team.external_id).where(Team.id == team_id))
+    ).scalar_one_or_none()
+
+
+async def _roll_forward_stale_placeholders() -> None:
+    """Move a PLACEHOLDER kickoff that has fallen into the past up to today.
+
+    THE REPORTED SYMPTOM: nine Cincinnati fixtures -- Djokovic and Zverev among them -- sat
+    under "Yesterday" showing a blue, actionable pick badge. They are real upcoming matches; the
+    date was ours.
+
+    A tennis fixture with no scheduled_time inherits the TOURNAMENT'S start date, because
+    BallDontLie's match object carries no date of its own. So every timeless match in a ten-day
+    draw is stamped day one, and each day that passes strands more of them further in the past
+    while they are still perfectly playable.
+
+    "Not before today" is strictly more accurate than a date already known to be wrong: the
+    fixture is still SCHEDULED, has never been observed underway and has never settled, so the
+    earliest it can now be played is today. kickoff_is_estimated stays TRUE, so the card still
+    says Time TBC and nothing claims a start time it does not have. The placeholder simply
+    follows the day forward until a real time arrives -- from the provider, or from the odds
+    feed via _adopt_real_kickoff.
+
+    Only ever moves a placeholder FORWARD, and only one whose day has already ended. A real
+    kickoff is never touched: that provider owns the schedule, and a genuinely missed match
+    should be retired by the clock sweep, not quietly rescheduled.
+    """
+    today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    async with async_session_factory() as db:
+        stale = (
+            (
+                await db.execute(
+                    select(Fixture).where(
+                        Fixture.status == FixtureStatus.SCHEDULED,
+                        Fixture.kickoff_is_estimated.is_(True),
+                        Fixture.kickoff_utc < today,
+                        ~select(FixtureLiveState.fixture_id)
+                        .where(FixtureLiveState.fixture_id == Fixture.id)
+                        .exists(),
+                        ~select(Outcome.id).where(Outcome.fixture_id == Fixture.id).exists(),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not stale:
+            return
+        for fixture in stale:
+            fixture.kickoff_utc = today
+        await db.commit()
+        logger.info(
+            "Rolled %d placeholder kickoff(s) forward to today; they remain Time-TBC",
+            len(stale),
+        )
+
+
 async def _mark_abandoned_fixtures() -> None:
     """Retire fixtures that were scheduled, never played, and have quietly vanished.
 
@@ -289,6 +413,8 @@ async def _ingest_live_scores() -> None:
     # After the polling pass, so a fixture that just reported a score this cycle is already
     # LIVE/COMPLETED and can never be swept. Costs one query and no API calls.
     await _mark_abandoned_fixtures()
+    await _roll_forward_stale_placeholders()
+    await _backfill_missing_corner_counts()
 
 
 @celery_app.task(name="app.workers.ingest_live_scores.ingest_live_scores")

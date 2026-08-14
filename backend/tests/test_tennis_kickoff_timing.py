@@ -112,3 +112,55 @@ def test_adoption_never_fabricates_a_time(estimated):
     fixture = _fixture(original, estimated=estimated)
     _adopt_real_kickoff(fixture, _odds(None))
     assert fixture.kickoff_utc == original
+
+
+# --- a stale placeholder must not strand a real match in the past ---------------------------
+
+
+def test_the_roll_forward_only_ever_moves_placeholders_and_only_forward():
+    """THE SECOND REPORTED SYMPTOM: nine Cincinnati fixtures -- Djokovic and Zverev among them --
+    sat under "Yesterday" showing a blue, actionable pick badge. They are real upcoming matches;
+    the date was ours, inherited from the tournament's start.
+
+    Read structurally so it survives a rewrite of the query. Three properties must hold, and the
+    dangerous one is the third: rescheduling a fixture whose kickoff we actually KNOW would hide
+    a genuinely missed match instead of retiring it.
+    """
+    import inspect
+
+    from app.workers import ingest_live_scores
+
+    source = inspect.getsource(ingest_live_scores._roll_forward_stale_placeholders)
+    assert "kickoff_is_estimated.is_(True)" in source, "must only touch placeholders"
+    assert "Fixture.kickoff_utc < today" in source, "must only move a day that has ended"
+    assert "FixtureStatus.SCHEDULED" in source, "must not touch a played or settled fixture"
+    # It must not clear the flag: the card should still say Time TBC, because a rolled-forward
+    # placeholder is still not a real start time.
+    assert "kickoff_is_estimated = False" not in source
+
+
+def test_corner_backfill_is_bounded_and_recent_only():
+    """Corner capture is otherwise ONE-SHOT at settlement -- a single rate limit or timeout
+    loses that fixture's corners permanently, and corners_total then cannot be graded, so a
+    finished match shows a neutral grey badge instead of the tick or cross it earned.
+
+    Bounded per run so a backlog cannot spend the day's allowance in one sweep, and recent-only
+    so a fixture whose statistics were never published stops being asked about."""
+    from app.workers.ingest_live_scores import (
+        CORNER_BACKFILL_LOOKBACK_DAYS,
+        CORNER_BACKFILL_MAX_PER_RUN,
+    )
+
+    assert 0 < CORNER_BACKFILL_MAX_PER_RUN <= 50
+    assert 0 < CORNER_BACKFILL_LOOKBACK_DAYS <= 7
+
+
+def test_the_backfill_never_writes_a_partial_corner_pair():
+    """Both sides or neither. One real count and one missing would grade a corners pick against
+    a total that is wrong by however much the absent side contributed."""
+    import inspect
+
+    from app.workers import ingest_live_scores
+
+    source = inspect.getsource(ingest_live_scores._backfill_missing_corner_counts)
+    assert "if home_corners is None or away_corners is None:" in source

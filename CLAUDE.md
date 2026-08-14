@@ -2176,6 +2176,32 @@ is still wrong, and they will move to their real day as soon as either provider 
 Fixing that properly means either not day-grouping an unscheduled fixture at all, or hiding it
 until a time exists — a product decision rather than a data one.
 
+### Two follow-ups from the same screenshot pair
+
+**Time-TBC matches were stranded in the PAST as actionable picks.** Nine Cincinnati fixtures --
+Djokovic and Zverev among them -- sat under "Yesterday" showing a blue pick badge. Same root
+cause as above: a timeless match inherits the TOURNAMENT'S start date, so each passing day
+strands more of them further back while they remain perfectly playable.
+`ingest_live_scores._roll_forward_stale_placeholders` moves a placeholder whose day has ENDED up
+to today. "Not before today" is strictly more accurate than a date already known to be wrong,
+and `kickoff_is_estimated` stays TRUE so the card still reads Time TBC and claims no start time
+it does not have. It only ever moves a PLACEHOLDER, only FORWARD, and never a fixture that has
+been observed underway or settled -- a genuinely missed match must be retired by the clock
+sweep, not quietly rescheduled. **11 rolled forward, 0 left stranded.**
+
+**Completed matches showed a GREY badge instead of the tick or cross they earned.** Measured: 5
+of 6 recently-completed football fixtures had no corner counts, so `corners_total` could not be
+graded. **Corner capture was ONE-SHOT at settlement** -- `_maybe_settle_outcome` fetches once
+behind its idempotency guard and degrades to `(None, None)` on any HTTP error, so a single rate
+limit or timeout loses that fixture's corners permanently.
+
+Re-requesting found **real data for 3 of the 5**; the other two genuinely have none upstream.
+`_backfill_missing_corner_counts` retries on the existing 5-minute beat, bounded per run so a
+backlog cannot spend the day's allowance, and recent-only so a fixture whose statistics were
+never published stops being asked about. Writes both sides or neither -- one real count and one
+missing would grade a corners pick against a total wrong by whatever the absent side
+contributed. **5 missing -> 2**, and those two stay honestly ungraded rather than guessed.
+
 ## The default minimum-odds filter is 1.01, not 1.50 (2026-08-14)
 
 Direct request. The old 1.50 default was doing more damage than it looked, and this is the third
