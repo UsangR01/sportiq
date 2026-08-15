@@ -158,9 +158,28 @@ ABANDONED_AFTER_HOURS_ESTIMATED = ABANDONED_DAY_HOURS + ABANDONED_LATE_FINISH_GR
 CORNER_BACKFILL_LOOKBACK_DAYS = 3
 CORNER_BACKFILL_MAX_PER_RUN = 25
 
+# How long after kickoff a count that is ALREADY STORED keeps being re-read.
+#
+# CORNERS ARE CAPTURED ONCE, AT SETTLEMENT, AND THE PROVIDER'S STATISTICS ARE NOT FINAL AT THAT
+# MOMENT. Measured 2026-08-15 against 45 recently-settled fixtures: 8 stored counts disagreed
+# with the provider (18%), EVERY ONE AN UNDERCOUNT, and 4 of them flipped a shown verdict --
+# a red cross on a corners pick that actually won. Reported as "Austria league had 10 corners
+# and over 9.5 predicted... shows success in local but failed in the mobile app": production
+# held 5+4, both providers say 6+4.
+#
+# Until now nothing could ever correct that: _maybe_fetch_corner_stats reads once behind the
+# settlement idempotency guard, and the sweep below only ever filled a NULL. A provisional
+# count was frozen permanently.
+#
+# 48 hours because the undercounts come from reading DURING or just after play, and a
+# provider that has published a final figure does not revise it days later. Re-reading past
+# that spends calls to be told what we already know.
+CORNER_RECHECK_HOURS = 48
+CORNER_RECHECK_MAX_PER_RUN = 25
+
 
 async def _backfill_missing_corner_counts() -> None:
-    """Retry the corner fetch for recently-completed football fixtures that have none.
+    """Fetch corner counts that are missing, AND re-read ones that may have been read too early.
 
     Bounded per run so a backlog cannot spend the day's API allowance in one sweep, and scoped
     to a few days back because a fixture whose counts were genuinely never published upstream
@@ -172,9 +191,9 @@ async def _backfill_missing_corner_counts() -> None:
 
     now = datetime.now(UTC)
     async with async_session_factory() as db:
-        rows = (
+        missing = (
             await db.execute(
-                select(Fixture, FixtureLiveState, Sport.slug)
+                select(Fixture, FixtureLiveState)
                 .join(Sport, Sport.id == Fixture.sport_id)
                 .join(FixtureLiveState, FixtureLiveState.fixture_id == Fixture.id)
                 .where(
@@ -187,11 +206,28 @@ async def _backfill_missing_corner_counts() -> None:
                 .limit(CORNER_BACKFILL_MAX_PER_RUN)
             )
         ).all()
-        if not rows:
+        # Fixtures whose counts are already stored but young enough that the figure read at
+        # settlement may have been provisional. See CORNER_RECHECK_HOURS.
+        recheck = (
+            await db.execute(
+                select(Fixture, FixtureLiveState)
+                .join(Sport, Sport.id == Fixture.sport_id)
+                .join(FixtureLiveState, FixtureLiveState.fixture_id == Fixture.id)
+                .where(
+                    Sport.slug == "football",
+                    Fixture.status == FixtureStatus.COMPLETED,
+                    Fixture.kickoff_utc > now - timedelta(hours=CORNER_RECHECK_HOURS),
+                    FixtureLiveState.home_corners.is_not(None),
+                    Fixture.external_id.is_not(None),
+                )
+                .limit(CORNER_RECHECK_MAX_PER_RUN)
+            )
+        ).all()
+        if not missing and not recheck:
             return
 
-        filled = 0
-        for fixture, live_state, _slug in rows:
+        filled = corrected = 0
+        for fixture, live_state in missing + recheck:
             try:
                 by_team = await fetch_corner_stats(fixture.external_id)
             except httpx.HTTPError:
@@ -202,13 +238,32 @@ async def _backfill_missing_corner_counts() -> None:
             home_corners = by_team.get(str(home)) if home else None
             away_corners = by_team.get(str(away)) if away else None
             if home_corners is None or away_corners is None:
+                # NEVER clears a stored count. A provider that has stopped answering must not
+                # erase a real figure we already hold -- and for Veikkausliiga, whose counts
+                # come from TheStatsAPI because API-Football has none, every re-read looks
+                # exactly like this.
+                continue
+            was = (live_state.home_corners, live_state.away_corners)
+            now_is = (home_corners, away_corners)
+            if was == now_is:
                 continue
             live_state.home_corners = home_corners
             live_state.away_corners = away_corners
-            filled += 1
-        if filled:
+            if was == (None, None):
+                filled += 1
+            else:
+                corrected += 1
+                logger.info(
+                    "Corrected corner counts for fixture %s: %s -> %s (a verdict may change)",
+                    fixture.external_id,
+                    was,
+                    now_is,
+                )
+        if filled or corrected:
             await db.commit()
-            logger.info("Backfilled corner counts for %d completed fixture(s)", filled)
+            logger.info(
+                "Corner counts: %d filled, %d corrected after an early read", filled, corrected
+            )
 
 
 async def _team_external_id(db, team_id) -> str | None:
