@@ -54,6 +54,7 @@ along with the ones actually worth upgrading. A real backfill of specifically th
 retrodictions would need that provenance distinction added first.
 """
 
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -75,8 +76,16 @@ from app.predictions.service import confidence_tier_for_probability, feature_com
 from app.sports.models import League, Sport
 from app.workers.celery import celery_app, run_task
 
+logger = logging.getLogger(__name__)
+
 _model_runner = ModelRunner()
 
+# Resolves to <repo>/ml/data in a checkout. IN THE DEPLOYED IMAGE IT RESOLVES TO /ml/data AND
+# DOES NOT EXIST -- the Dockerfile copies backend/ to /app and ml/artifacts/deployed/ to
+# /app/models, never ml/data. That is not a bug in itself (the cache is a training artefact and
+# _load_cached_history degrades to DB-only history by design) but it does mean EVERY retrodicted
+# fixture in production takes the live fetch_lineup_presence path, which is why per-fixture
+# error isolation below matters far more in production than it does locally.
 DATA_DIR = Path(__file__).resolve().parents[3] / "ml" / "data"
 
 
@@ -271,68 +280,128 @@ async def _retrodict_league(sport: Sport, league: League) -> None:
 
         model = await _model_runner.get_model(db, sport.id)
 
-        for fixture, _live_state, home_ext, away_ext in rows:
-            if fixture.id in existing_prediction_fixture_ids:
-                continue
+        candidates = [r for r in rows if r[0].id not in existing_prediction_fixture_ids]
+        written = failed = 0
 
-            season = int(fixture.season)
-            fixture_ext = fixture.external_id
-
-            played_by_team = await _lineup_presence_for_fixture(cached_lineups, fixture_ext)
-            # historical_key_player_availability expects a (fixture_id, team_id) -> names
-            # index, not a per-fixture dict — build a tiny one-fixture index inline rather than
-            # importing index_played_names for a shape that's already resolved.
-            played_names_index = {
-                (fixture_ext, team_id): names for team_id, names in played_by_team.items()
-            }
-
-            key_avail_home, key_per_home = historical_key_player_availability(
-                played_names_index, team_key_players_by_team_season, home_ext, season, fixture_ext
-            )
-            key_avail_away, key_per_away = historical_key_player_availability(
-                played_names_index, team_key_players_by_team_season, away_ext, season, fixture_ext
-            )
-
-            elo_home = elo_history.get((fixture_ext, home_ext))
-            elo_away = elo_history.get((fixture_ext, away_ext))
-            elo_diff = (
-                (elo_home - elo_away) if elo_home is not None and elo_away is not None else None
-            )
-
-            features = assemble_from_game_log(
-                game_log,
-                fixture.kickoff_utc.date(),
-                home_ext,
-                away_ext,
-                moneyline_implied_prob_home=None,
-                key_players_available_home=key_avail_home,
-                key_players_available_away=key_avail_away,
-                key_players_per_combined_home=key_per_home,
-                key_players_per_combined_away=key_per_away,
-                elo_diff=elo_diff,
-            )
-            result = model.predict(features)
-            probability = max(result.home_prob, result.away_prob, result.draw_prob or 0.0)
-            db.add(
-                Prediction(
-                    fixture_id=fixture.id,
-                    model_version=model.version,
-                    home_prob=result.home_prob,
-                    draw_prob=result.draw_prob,
-                    away_prob=result.away_prob,
-                    confidence_tier=confidence_tier_for_probability(probability),
-                    feature_completeness=feature_completeness(features),
-                    # Produced after the result was known — legitimate for the feed,
-                    # never evidence of skill. See PredictionKind.
-                    kind=PredictionKind.RETRODICTION,
-                    xg_home=result.xg_home,
-                    xg_away=result.xg_away,
-                    corners_xg_home=result.corners_xg_home,
-                    corners_xg_away=result.corners_xg_away,
-                    created_at=datetime.now(UTC),
+        for fixture, _live_state, home_ext, away_ext in candidates:
+            try:
+                written += await _retrodict_one(
+                    db,
+                    model,
+                    fixture,
+                    home_ext,
+                    away_ext,
+                    game_log,
+                    cached_lineups,
+                    elo_history,
+                    team_key_players_by_team_season,
                 )
-            )
+            except Exception:  # noqa: BLE001 - see below
+                # ONE FIXTURE MUST NOT COST THE LEAGUE. Until 2026-08-15 this loop had no
+                # per-fixture guard and db.commit() sat after it, so a single failure -- a live
+                # fetch_lineup_presence timeout, an unparseable season, a feature the model
+                # rejects -- discarded every prediction the league had just produced. The
+                # exception then surfaced to _ingest_fixtures's per-league
+                # `except (httpx.HTTPError, ValueError)` as one warning line, and the next
+                # day's run failed the same way.
+                #
+                # Measured cost of that silence in production: 96 completed football fixtures
+                # across 13 of 18 leagues showing no pick at all -- 35% of every finished card.
+                failed += 1
+                logger.warning(
+                    "retrodiction failed for fixture %s (%s) — continuing with the league",
+                    fixture.external_id,
+                    league.slug,
+                    exc_info=True,
+                )
+
         await db.commit()
+
+        # ALWAYS LOGGED, including the zero case. A retrodiction that produces nothing is
+        # indistinguishable from one that had nothing to do, and that is exactly how this went
+        # unnoticed: nothing errored, nothing logged, and a third of finished cards were blank.
+        log = logger.warning if (candidates and not written) else logger.info
+        log(
+            "retrodiction %s: %d completed, %d needed a prediction, %d written, %d failed",
+            league.slug,
+            len(rows),
+            len(candidates),
+            written,
+            failed,
+        )
+
+
+async def _retrodict_one(
+    db,
+    model,
+    fixture,
+    home_ext: str,
+    away_ext: str,
+    game_log,
+    cached_lineups,
+    elo_history: dict,
+    team_key_players_by_team_season: dict,
+) -> int:
+    """One fixture's retrodicted prediction, added to the session. Returns 1 when written.
+
+    Split out of _retrodict_league solely so a failure can be caught per fixture — the body is
+    otherwise unchanged."""
+    season = int(fixture.season)
+    fixture_ext = fixture.external_id
+
+    played_by_team = await _lineup_presence_for_fixture(cached_lineups, fixture_ext)
+    # historical_key_player_availability expects a (fixture_id, team_id) -> names index, not a
+    # per-fixture dict — build a tiny one-fixture index inline rather than importing
+    # index_played_names for a shape that's already resolved.
+    played_names_index = {
+        (fixture_ext, team_id): names for team_id, names in played_by_team.items()
+    }
+
+    key_avail_home, key_per_home = historical_key_player_availability(
+        played_names_index, team_key_players_by_team_season, home_ext, season, fixture_ext
+    )
+    key_avail_away, key_per_away = historical_key_player_availability(
+        played_names_index, team_key_players_by_team_season, away_ext, season, fixture_ext
+    )
+
+    elo_home = elo_history.get((fixture_ext, home_ext))
+    elo_away = elo_history.get((fixture_ext, away_ext))
+    elo_diff = (elo_home - elo_away) if elo_home is not None and elo_away is not None else None
+
+    features = assemble_from_game_log(
+        game_log,
+        fixture.kickoff_utc.date(),
+        home_ext,
+        away_ext,
+        moneyline_implied_prob_home=None,
+        key_players_available_home=key_avail_home,
+        key_players_available_away=key_avail_away,
+        key_players_per_combined_home=key_per_home,
+        key_players_per_combined_away=key_per_away,
+        elo_diff=elo_diff,
+    )
+    result = model.predict(features)
+    probability = max(result.home_prob, result.away_prob, result.draw_prob or 0.0)
+    db.add(
+        Prediction(
+            fixture_id=fixture.id,
+            model_version=model.version,
+            home_prob=result.home_prob,
+            draw_prob=result.draw_prob,
+            away_prob=result.away_prob,
+            confidence_tier=confidence_tier_for_probability(probability),
+            feature_completeness=feature_completeness(features),
+            # Produced after the result was known — legitimate for the feed, never evidence of
+            # skill. See PredictionKind.
+            kind=PredictionKind.RETRODICTION,
+            xg_home=result.xg_home,
+            xg_away=result.xg_away,
+            corners_xg_home=result.corners_xg_home,
+            corners_xg_away=result.corners_xg_away,
+            created_at=datetime.now(UTC),
+        )
+    )
+    return 1
 
 
 async def _backfill_predictions() -> None:

@@ -162,6 +162,24 @@ celery_app.conf.beat_schedule = {
         # 0/7 for Veikkausliiga -- a league that otherwise can never grade a corners pick.
         "schedule": 6 * 3600.0,
     },
+    "backfill-retrodictions-every-2-hours": {
+        "task": "app.workers.backfill_predictions.backfill_predictions",
+        # A COMPLETED FIXTURE WITH NO PREDICTION SHOWS A BLANK CARD, and until 2026-08-15 the
+        # only thing that ever retrodicted one was the tail of the daily 02:00 ingest. One
+        # failure there meant waiting a full day for the next attempt, and the failure was
+        # silent. Measured in production: 96 completed football fixtures across 13 of 18
+        # leagues with no pick at all, 35% of every finished card.
+        #
+        # Cheap to repeat: it writes nothing for a fixture that already has a prediction, so a
+        # run with nothing to do is a handful of queries and no API calls at all. The live
+        # fetch_lineup_presence call fires only for a fixture being retrodicted for the first
+        # time, which is bounded by how many matches actually finished.
+        "schedule": 2 * 3600.0,
+    },
+    "backfill-tennis-retrodictions-every-2-hours": {
+        "task": "app.workers.backfill_tennis_predictions.backfill_tennis_predictions",
+        "schedule": 2 * 3600.0,
+    },
     "check-push-receipts-every-30-minutes": {
         "task": "app.workers.notify_users.check_push_receipts",
         # An Expo push ticket only means ACCEPTED. The delivery outcome arrives later in a
