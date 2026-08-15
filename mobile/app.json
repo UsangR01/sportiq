@@ -73,6 +73,12 @@
         "projectId": "ce90c4de-9b8f-4e69-9cc6-d3453a917c61"
       }
     },
-    "owner": "usangr01"
+    "owner": "usangr01",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/ce90c4de-9b8f-4e69-9cc6-d3453a917c61"
+    }
   }
 }
