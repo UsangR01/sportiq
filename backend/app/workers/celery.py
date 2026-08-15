@@ -34,6 +34,7 @@ celery_app = Celery(
         # is called on it, defeating their own docstrings' "standalone entry point" promise.
         "app.workers.backfill_predictions",
         "app.workers.backfill_tennis_predictions",
+        "app.workers.backfill_basketball_predictions",
         "app.workers.snapshot_picks",
         "app.workers.check_market_signal",
     ],
@@ -178,6 +179,14 @@ celery_app.conf.beat_schedule = {
     },
     "backfill-tennis-retrodictions-every-2-hours": {
         "task": "app.workers.backfill_tennis_predictions.backfill_tennis_predictions",
+        "schedule": 2 * 3600.0,
+    },
+    "backfill-basketball-retrodictions-every-2-hours": {
+        "task": ("app.workers.backfill_basketball_predictions.backfill_basketball_predictions"),
+        # Basketball had NO retrodiction path at all before 2026-08-15, so this is new coverage
+        # rather than a cadence change: 23 completed NBA/WNBA fixtures were showing a blank
+        # card with no way to ever get a prediction. Costs no API calls -- the game log is
+        # rebuilt from fixtures already in our own database.
         "schedule": 2 * 3600.0,
     },
     "check-push-receipts-every-30-minutes": {

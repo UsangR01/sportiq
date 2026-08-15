@@ -545,6 +545,13 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
         from app.workers.backfill_tennis_predictions import _retrodict_tennis_league
 
         await _retrodict_tennis_league(sport, league)
+    if sport.slug == "nba":
+        # Basketball had no retrodiction path at all until 2026-08-15, so a fixture first seen
+        # already-finished could never get a prediction and its card stayed blank forever.
+        # Measured: 23 completed NBA/WNBA fixtures in that state in production.
+        from app.workers.backfill_basketball_predictions import _retrodict_basketball_league
+
+        await _retrodict_basketball_league(sport, league)
 
 
 async def _ingest_fixtures() -> None:
