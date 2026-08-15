@@ -510,9 +510,10 @@ async def assemble_from_live_db(db, fixture, home_features, away_features) -> di
     """
     from sqlalchemy import select
 
-    from app.adapters.api_football import fetch_h2h_stats
+    from app.adapters.api_football import LEAGUE_IDS, fetch_h2h_stats
     from app.fixtures.models import Team
     from app.odds.models import Odds
+    from app.sports.models import League
 
     home_team = (
         await db.execute(select(Team).where(Team.id == fixture.home_team_id))
@@ -520,11 +521,21 @@ async def assemble_from_live_db(db, fixture, home_features, away_features) -> di
     away_team = (
         await db.execute(select(Team).where(Team.id == fixture.away_team_id))
     ).scalar_one_or_none()
+    # The competition this fixture belongs to, so H2H is drawn from the same competition
+    # _h2h_stats sees during training rather than from every friendly and cup tie the two
+    # clubs have ever played. None for a league not in LEAGUE_IDS, which degrades to the old
+    # unfiltered behaviour rather than dropping the three features.
+    league = (
+        await db.execute(select(League).where(League.id == fixture.league_id))
+    ).scalar_one_or_none()
+    league_external_id = LEAGUE_IDS.get(league.slug) if league else None
     h2h_win_rate_home = None
     h2h_avg_goals_scored_home = None
     h2h_avg_goals_allowed_home = None
     if home_team and away_team and home_team.external_id and away_team.external_id:
-        h2h = await fetch_h2h_stats(home_team.external_id, away_team.external_id)
+        h2h = await fetch_h2h_stats(
+            home_team.external_id, away_team.external_id, league_external_id
+        )
         if h2h is not None:
             h2h_win_rate_home = h2h.win_rate_home
             h2h_avg_goals_scored_home = h2h.avg_goals_scored_home
