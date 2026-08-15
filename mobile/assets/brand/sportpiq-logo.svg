@@ -1,0 +1,36 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@800&amp;display=swap');
+      .sport-text { font-family: 'Space Grotesk', Arial, Helvetica, sans-serif; font-weight: 800; }
+      .piq-text { font-family: 'Space Grotesk', Arial, Helvetica, sans-serif; font-weight: 800; }
+    </style>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0A1022"/>
+      <stop offset="100%" stop-color="#131C36"/>
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00F5A0"/>
+      <stop offset="100%" stop-color="#00C2FF"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00F5A0" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#00F5A0" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="textGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect x="0" y="0" width="1024" height="1024" rx="224" ry="224" fill="url(#bgGrad)"/>
+
+  <ellipse cx="512" cy="512" rx="340" ry="260" fill="url(#glow)"/>
+
+  <text x="512" y="475" text-anchor="middle" class="sport-text" font-size="260" letter-spacing="8" fill="#B7C6DE">sport</text>
+
+  <text x="512" y="734" text-anchor="middle" class="piq-text" font-size="260" letter-spacing="14" fill="url(#accentGrad)" filter="url(#textGlow)">PIQ</text>
+</svg>
