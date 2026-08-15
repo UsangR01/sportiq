@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 import uuid
 from dataclasses import dataclass, replace
@@ -10,14 +11,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.core.database import get_db
+from app.fixtures.match_stats_cache import get_cached_match_stats, set_cached_match_stats
 from app.fixtures.models import Fixture, FixtureLiveState, FixtureStatus, Team, TeamFeatures
 from app.fixtures.schemas import (
     BestPick,
+    ComparisonStat,
     ExtraMarketsResponse,
     FixtureDetail,
     FixtureSummary,
     HeadToHeadResponse,
-    HeadToHeadStat,
     LiveStateResponse,
     OddsLineResponse,
     PredictionResponse,
@@ -995,7 +997,7 @@ async def _balldontlie_head_to_head(
         draws=panel.draws,
         away_wins=panel.away_wins,
         stats=[
-            HeadToHeadStat(label=s.label, home=s.home, away=s.away, suffix=s.suffix)
+            ComparisonStat(label=s.label, home=s.home, away=s.away, suffix=s.suffix)
             for s in panel.stats
         ],
     )
@@ -1044,7 +1046,7 @@ async def _football_head_to_head(home_team: Team, away_team: Team) -> HeadToHead
         # three integers. The client rounds for display anyway, so this is about the payload
         # being readable rather than about what a user sees.
         stats=[
-            HeadToHeadStat(
+            ComparisonStat(
                 label=label,
                 home=None if home is None else round(home, 1),
                 away=None if away is None else round(away, 1),
@@ -1054,6 +1056,182 @@ async def _football_head_to_head(home_team: Team, away_team: Team) -> HeadToHead
             if home is not None or away is not None
         ],
     )
+
+
+async def _fetch_match_stats(
+    db: AsyncSession,
+    sport_slug: str,
+    league_slug: str | None,
+    fixture: Fixture,
+    live_state: FixtureLiveState | None,
+) -> list[ComparisonStat]:
+    """What actually happened in THIS match, so a settled prediction can be read against the
+    result rather than taken on trust.
+
+    The card already shows a tick or a cross; this is the evidence behind it. A corners pick
+    that settled at 9 and one that settled at 14 both render as one green tick, and only one of
+    them was close.
+
+    COMPLETED FIXTURES ONLY, and that gate is load-bearing rather than cosmetic: the rows are
+    cached for 30 days on the grounds that a played match's statistics are immutable, which
+    stops being true the moment a live fixture is allowed in -- it would freeze a score
+    mid-match. See match_stats_cache.py.
+
+        football   4 rows   API-Football /fixtures/statistics, plus goals from our own settled
+                            live_state (already stored, so no call is spent on it)
+        tennis     6 rows   BallDontLie /match_stats -- the same serve and return measures the
+                            H2H panel shows, for this one match
+        NBA/WNBA   none     /stats is 401 on this plan, so the final score is the only real
+                            per-match number and it is already displayed above the panel
+
+    Returns [] rather than raising for every unhappy path -- an unplayed fixture, a provider
+    outage, a competition with no published statistics. The panel is an enrichment; losing it
+    must not fail the fixture screen, which is exactly what the H2H panel had to learn when a
+    daily quota ran out.
+    """
+    # Basketball has no per-match statistics at any price we hold, so there is nothing to fetch
+    # and nothing worth caching -- returning before the cache also keeps its keyspace to the
+    # sports that actually use it.
+    if (
+        fixture.status != FixtureStatus.COMPLETED
+        or not fixture.external_id
+        or sport_slug not in ("football", "tennis")
+    ):
+        return []
+
+    try:
+        if sport_slug == "football":
+            return await _football_match_stats(db, fixture, live_state)
+        return await _tennis_match_stats(db, league_slug, fixture)
+    except httpx.HTTPError:
+        logger.warning("Match-stats fetch failed; rendering the fixture without the panel")
+        return []
+
+
+async def _cached_provider_payload(sport_slug: str, fixture_external_id: str, fetch):
+    """Fetch-through cache for the PROVIDER'S answer about one completed match.
+
+    Deliberately caches the raw provider payload rather than the rendered rows, because the
+    rows are not purely remote: goals and corners are read from our own fixture_live_state,
+    which keeps changing after the match. `_backfill_corners_from_thestatsapi` fills corner
+    counts for up to seven days afterwards, and caching the finished panel would freeze that
+    absence for the full 30-day TTL and permanently hide a count that arrived on day three.
+    """
+    from app.core.redis import get_redis
+
+    redis = get_redis()
+    hit, cached = await get_cached_match_stats(redis, sport_slug, fixture_external_id)
+    if hit:
+        return cached
+    payload = await fetch()
+    await set_cached_match_stats(redis, sport_slug, fixture_external_id, payload)
+    return payload
+
+
+async def _football_match_stats(
+    db: AsyncSession, fixture: Fixture, live_state: FixtureLiveState | None
+) -> list[ComparisonStat]:
+    from app.adapters.api_football import fetch_match_stats
+
+    async def fetch():
+        stats_by_team = await fetch_match_stats(fixture.external_id)
+        return {team_id: dataclasses.asdict(s) for team_id, s in stats_by_team.items()}
+
+    stats_by_team = await _cached_provider_payload("football", fixture.external_id, fetch)
+    home_team = (
+        await db.execute(select(Team).where(Team.id == fixture.home_team_id))
+    ).scalar_one_or_none()
+    away_team = (
+        await db.execute(select(Team).where(Team.id == fixture.away_team_id))
+    ).scalar_one_or_none()
+    return _football_stat_rows(
+        stats_by_team.get(home_team.external_id) if home_team else None,
+        stats_by_team.get(away_team.external_id) if away_team else None,
+        live_state,
+    )
+
+
+def _football_stat_rows(
+    home: dict | None, away: dict | None, live_state: FixtureLiveState | None
+) -> list[ComparisonStat]:
+    """Pure row assembly, split out from the fetch so it is testable without a provider, a
+    database or Redis — the precedence rules below are the part worth pinning."""
+
+    # Goals come from our OWN settled live_state, not from the statistics call: it is already
+    # stored, it is what the tick or cross was graded against, and a panel that disagreed with
+    # the score printed directly above it would be worse than no panel.
+    rows: list[tuple[str, float | None, float | None, str]] = [
+        (
+            "Goals",
+            live_state.home_score if live_state else None,
+            live_state.away_score if live_state else None,
+            "",
+        ),
+        (
+            "Corners",
+            _stat_or_stored(home, "corners", live_state, "home_corners"),
+            _stat_or_stored(away, "corners", live_state, "away_corners"),
+            "",
+        ),
+        ("Total shots", _stat(home, "shots"), _stat(away, "shots"), ""),
+        ("Shots on goal", _stat(home, "shots_on_goal"), _stat(away, "shots_on_goal"), ""),
+        ("Possession", _stat(home, "possession_pct"), _stat(away, "possession_pct"), "%"),
+    ]
+    return [
+        ComparisonStat(label=label, home=home_value, away=away_value, suffix=suffix)
+        for label, home_value, away_value, suffix in rows
+        if home_value is not None or away_value is not None
+    ]
+
+
+def _stat(stats: dict | None, field: str) -> float | None:
+    """stats is the cached provider payload, so a plain dict rather than a MatchStats — the
+    cache round-trips through JSON and reviving the dataclass would buy nothing here."""
+    value = stats.get(field) if stats else None
+    return None if value is None else float(value)
+
+
+def _stat_or_stored(stats: dict | None, field: str, live_state, stored_field: str) -> float | None:
+    """Corners exist in two places and they must not disagree.
+
+    fixture_live_state already holds the real counts, captured at settlement and, where
+    API-Football never supplied them, backfilled from TheStatsAPI -- which is the only source
+    for whole leagues (Veikkausliiga has 0% API-Football corner coverage). Those stored counts
+    are also what graded the corners pick, so they win; the live call fills a gap rather than
+    overriding a settled fact."""
+    stored = getattr(live_state, stored_field, None) if live_state else None
+    if stored is not None:
+        return float(stored)
+    return _stat(stats, field)
+
+
+async def _tennis_match_stats(
+    db: AsyncSession, league_slug: str | None, fixture: Fixture
+) -> list[ComparisonStat]:
+    from app.adapters.balldontlie_tennis import fetch_match_stat_panel
+
+    home_team = (
+        await db.execute(select(Team).where(Team.id == fixture.home_team_id))
+    ).scalar_one_or_none()
+    away_team = (
+        await db.execute(select(Team).where(Team.id == fixture.away_team_id))
+    ).scalar_one_or_none()
+    if not home_team or not away_team or not home_team.external_id or not away_team.external_id:
+        return []
+
+    async def fetch():
+        panel = await fetch_match_stat_panel(
+            fixture.external_id,
+            home_team.external_id,
+            away_team.external_id,
+            league_slug or "atp",
+        )
+        return [dataclasses.asdict(s) for s in panel]
+
+    # Tennis has no local component the way football's goals and corners do -- every row comes
+    # from /match_stats -- so here the cached payload IS the rows.
+    rows = await _cached_provider_payload("tennis", fixture.external_id, fetch)
+    return [ComparisonStat(**row) for row in rows]
 
 
 async def _load_fixture_or_404(fixture_id: uuid.UUID, db: AsyncSession):
@@ -1101,6 +1279,7 @@ async def get_fixture(fixture_id: uuid.UUID, db: AsyncSession = Depends(get_db))
     ).scalar_one_or_none()
 
     head_to_head = await _fetch_head_to_head(db, sport_slug, fixture)
+    match_stats = await _fetch_match_stats(db, sport_slug, league_slug, fixture, live_state_row)
 
     return FixtureDetail(
         **_to_summary(
@@ -1148,6 +1327,7 @@ async def get_fixture(fixture_id: uuid.UUID, db: AsyncSession = Depends(get_db))
             else None
         ),
         head_to_head=head_to_head,
+        match_stats=match_stats,
     )
 
 

@@ -157,7 +157,7 @@ export interface TeamFeaturesResponse {
  *              only real per-meeting number that exists
  *
  * The screen renders whatever rows it is given, so a new sport needs no change here. */
-export interface HeadToHeadStat {
+export interface ComparisonStat {
   label: string;
   home: number | null;
   away: number | null;
@@ -170,7 +170,7 @@ export interface HeadToHeadResponse {
   home_wins: number;
   draws: number;
   away_wins: number;
-  stats: HeadToHeadStat[];
+  stats: ComparisonStat[];
 }
 
 export interface FixtureDetail extends FixtureSummary {
@@ -179,6 +179,12 @@ export interface FixtureDetail extends FixtureSummary {
   home_team_form: TeamFeaturesResponse | null;
   away_team_form: TeamFeaturesResponse | null;
   head_to_head: HeadToHeadResponse | null;
+  /** What happened in THIS match, for a fixture that has been played — so the prediction can
+   * be read against the result. Empty until the fixture is completed, and empty for basketball
+   * at any time (BallDontLie's /stats is 401 on this plan, so the final score shown above is
+   * the only real per-match number). Same row shape as the H2H panel, so both render through
+   * the same component. */
+  match_stats: ComparisonStat[];
 }
 
 // Shared across BestPick (GET /fixtures, the merged Picks feed) and the still-live GET /picks

@@ -4,7 +4,7 @@ import { ScrollView, Text, View } from "react-native";
 
 import { LiveBadge } from "@/components/fixtures/LiveBadge";
 import { getFixture } from "@/lib/api/fixtures";
-import type { ExtraMarketsResponse, HeadToHeadResponse } from "@/lib/api/types";
+import type { ComparisonStat, ExtraMarketsResponse, HeadToHeadResponse } from "@/lib/api/types";
 
 export default function FixtureDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -64,6 +64,14 @@ export default function FixtureDetailScreen() {
               .join(" · ")}
           </Text>
         </View>
+      )}
+
+      {fixture.match_stats.length > 0 && (
+        <MatchStats
+          stats={fixture.match_stats}
+          homeTeam={fixture.home_team}
+          awayTeam={fixture.away_team}
+        />
       )}
 
       {fixture.prediction && (
@@ -198,6 +206,72 @@ function StatRow({
   );
 }
 
+/** The two team names above a stat comparison, so a bare pair of numbers is attributable to a
+ * side. Shared by the match-stats and head-to-head panels rather than duplicated, since both
+ * render the same left/centre/right row shape underneath. */
+function TeamNameHeader({ homeTeam, awayTeam }: { homeTeam: string; awayTeam: string }) {
+  return (
+    <View className="mb-1 flex-row">
+      <Text
+        className="flex-1 text-left text-xs font-semibold text-gray-500 dark:text-gray-400"
+        numberOfLines={1}
+      >
+        {homeTeam}
+      </Text>
+      <View className="flex-1" />
+      <Text
+        className="flex-1 text-right text-xs font-semibold text-gray-500 dark:text-gray-400"
+        numberOfLines={1}
+      >
+        {awayTeam}
+      </Text>
+    </View>
+  );
+}
+
+/** What actually happened in the match that was just played, so the prediction below can be
+ * read against the result instead of taken on trust. The card already shows a tick or a cross;
+ * this is the evidence behind it — a corners pick that settled at 9 and one that settled at 14
+ * both render as one green tick, and only one of them was close.
+ *
+ * Rendered only for a COMPLETED fixture, and only when the provider actually published
+ * something:
+ *
+ *   football   goals, corners, total shots, shots on goal, possession   (API-Football)
+ *   tennis     aces, double faults, serve and return percentages        (BallDontLie)
+ *   NBA/WNBA   nothing — /stats is 401 on this plan, so the final score already shown above
+ *              is the only real per-match number
+ *
+ * WHOLE NUMBERS, unlike the H2H panel directly below it. These are one match's actual counts,
+ * not averages over several, so "Corners 9" is right and "Corners 9.0" invites the reader to
+ * wonder what the decimal is hiding. */
+function MatchStats({
+  stats,
+  homeTeam,
+  awayTeam,
+}: {
+  stats: ComparisonStat[];
+  homeTeam: string;
+  awayTeam: string;
+}) {
+  return (
+    <View className="mb-6">
+      <Text className="mb-2 text-sm font-semibold uppercase text-gray-400">Match Stats</Text>
+      <TeamNameHeader homeTeam={homeTeam} awayTeam={awayTeam} />
+      {stats.map((stat) => (
+        <StatRow
+          key={stat.label}
+          label={stat.label}
+          homeValue={stat.home}
+          awayValue={stat.away}
+          suffix={stat.suffix}
+          decimals={0}
+        />
+      ))}
+    </View>
+  );
+}
+
 /** Real head-to-head history between the two teams — replaces the raw bookmaker-odds table
  * per direct user request ("Users don't find the Odds section useful... replaced with H2H
  * statistics"). Per a follow-up ask, shows average goals/corners/shots/shots-on-goal/
@@ -259,15 +333,7 @@ function HeadToHead({
         Averages over last {headToHead.meetings_count} meeting
         {headToHead.meetings_count === 1 ? "" : "s"}
       </Text>
-      <View className="mb-1 flex-row">
-        <Text className="flex-1 text-left text-xs font-semibold text-gray-500 dark:text-gray-400" numberOfLines={1}>
-          {homeTeam}
-        </Text>
-        <View className="flex-1" />
-        <Text className="flex-1 text-right text-xs font-semibold text-gray-500 dark:text-gray-400" numberOfLines={1}>
-          {awayTeam}
-        </Text>
-      </View>
+      <TeamNameHeader homeTeam={homeTeam} awayTeam={awayTeam} />
 
       {/* Whatever rows the backend sends, in its order. Football gets five, tennis six,
           basketball one -- each sport's provider exposes a different depth, and hardcoding

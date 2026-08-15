@@ -143,9 +143,12 @@ class PredictionResponse(BaseModel):
     extra_markets: ExtraMarketsResponse | None = None
 
 
-class HeadToHeadStat(BaseModel):
-    """One labelled comparison row: the same measure for each side, averaged over the counted
-    meetings.
+class ComparisonStat(BaseModel):
+    """One labelled comparison row: the same measure for each side.
+
+    Named for the SHAPE rather than for head-to-head, because two panels now use it — the H2H
+    averages over past meetings, and the stats of a single completed match. The JSON is
+    identical either way; only the meaning of the number changes with the panel it sits in.
 
     A LIST rather than named fields, because the three sports genuinely do not share a stat
     vocabulary and their providers do not expose the same depth:
@@ -191,7 +194,7 @@ class HeadToHeadResponse(BaseModel):
     home_wins: int
     draws: int
     away_wins: int
-    stats: list[HeadToHeadStat] = []
+    stats: list[ComparisonStat] = []
 
 
 class FixtureDetail(FixtureSummary):
@@ -200,3 +203,13 @@ class FixtureDetail(FixtureSummary):
     home_team_form: TeamFeaturesResponse | None = None
     away_team_form: TeamFeaturesResponse | None = None
     head_to_head: HeadToHeadResponse | None = None
+    # What actually happened in THIS match, for a fixture that has been played — so the
+    # prediction above can be read against the result rather than taken on trust. The card
+    # already shows a tick or a cross; this is the evidence behind it (a corners pick that
+    # settled at 9 is a very different read from one that settled at 14).
+    #
+    # EMPTY, never fabricated, until there is something real to show: the fixture must be
+    # COMPLETED, and each row is dropped when neither side has a value. Basketball is empty by
+    # nature -- BallDontLie's /stats is 401 on this plan, so the final score is the only real
+    # per-match number and it is already displayed above.
+    match_stats: list[ComparisonStat] = []

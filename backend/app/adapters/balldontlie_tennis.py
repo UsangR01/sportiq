@@ -988,6 +988,36 @@ async def fetch_h2h_panel(
     )
 
 
+async def fetch_match_stat_panel(
+    match_external_id: str,
+    home_external_id: str,
+    away_external_id: str,
+    league: str = "atp",
+) -> list[H2HPanelStat]:
+    """Serve and return stats for ONE completed match, for the fixture-detail result panel.
+
+    Deliberately reuses _serve_return_averages with a single-element list rather than growing a
+    parallel parser: the mean of one value IS that value, so the same field mapping, the same
+    whole-match set_number filter, and the same "a measure missing everywhere stays None"
+    behaviour all apply unchanged. The alternative is two readers of one endpoint that drift.
+
+    Returns [] rather than raising when the match has no published stats -- a walkover, or a
+    match too recent for the provider to have filled in.
+    """
+    api_key = get_settings().balldontlie_api_key
+    async with httpx.AsyncClient(
+        base_url=f"https://api.balldontlie.io{_tour_prefix(league)}",
+        headers={"Authorization": api_key},
+        timeout=15.0,
+    ) as client:
+        return await _serve_return_averages(
+            client,
+            [{"id": _strip_tour_prefix(match_external_id)}],
+            _strip_tour_prefix(home_external_id),
+            _strip_tour_prefix(away_external_id),
+        )
+
+
 async def _recent_meetings(client, home_raw: str, away_raw: str) -> list[dict]:
     """Their most recent completed meetings, newest first."""
     current_season = _current_tennis_season()
