@@ -61,10 +61,17 @@ def test_the_reported_fixture_keeps_its_pick():
 
 def test_the_completeness_floor_still_protects_upcoming_fixtures():
     """The floor exists for a real reason -- Tottenham v Newcastle served 1X at 99.7% off 3 of
-    31 features. Exempting settled fixtures must not weaken the case it was built for."""
+    31 features.
+
+    CORRECTED 2026-08-16. This used to assert that a 0.10 vector DID surface once settled, which
+    was the first fix overshooting: it exempted settled fixtures from the floor entirely, so it
+    also revealed picks that never cleared the OLD floor and were therefore shown to nobody
+    while they were live. Production carried five of those, worst being away at 1.00 on a 0.23
+    vector. A settled fixture is now judged against the floor that applied when it WAS live --
+    see SETTLED_FEATURE_COMPLETENESS_FLOOR."""
     empty_vector = _candidate(0.997, completeness=0.10, market="h2h", selection="home", line=None)
     assert _pick_best([empty_vector]) is None
-    assert _pick_best([empty_vector], is_settled=True) is not None
+    assert _pick_best([empty_vector], is_settled=True) is None
 
 
 def test_the_other_guards_are_deliberately_NOT_exempted():
@@ -97,6 +104,20 @@ def test_the_users_own_slider_still_applies_to_settled_fixtures():
     assert _pick_best([candidate], min_probability=0.60, is_settled=True) is not None
 
 
-@pytest.mark.parametrize("completeness", [MIN_FEATURE_COMPLETENESS - 0.01, 0.0])
-def test_any_completeness_passes_once_the_result_is_known(completeness):
+@pytest.mark.parametrize("completeness", [MIN_FEATURE_COMPLETENESS - 0.01, 0.30, 0.25])
+def test_a_settled_pick_that_cleared_the_old_floor_still_shows(completeness):
+    """Everything the pre-raise product actually published stays published.
+
+    RENAMED from test_any_completeness_passes_once_the_result_is_known, and 0.0 dropped from the
+    parameters: "any completeness" was the overshoot. Zero features is not a pick that was ever
+    shown, so restoring it is inventing history rather than preserving it."""
     assert _pick_best([_candidate(0.71, completeness=completeness, odds=2.05)], is_settled=True)
+
+
+@pytest.mark.parametrize("completeness", [0.24, 0.10, 0.0])
+def test_a_settled_pick_below_the_old_floor_stays_hidden(completeness):
+    """It was suppressed for its entire live life, so no user ever saw it."""
+    assert (
+        _pick_best([_candidate(0.71, completeness=completeness, odds=2.05)], is_settled=True)
+        is None
+    )

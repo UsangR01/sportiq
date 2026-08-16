@@ -492,6 +492,28 @@ MIN_EDGE_OVER_BASE_RATE = 0.05
 # erase every prediction made before that migration.
 MIN_FEATURE_COMPLETENESS = 0.35
 
+# The floor a SETTLED fixture is judged against. This is the value MIN_FEATURE_COMPLETENESS held
+# before it was raised on 2026-08-13, and that is exactly why it exists.
+#
+# The settled exemption was introduced because RAISING the floor reached backwards and deleted
+# published results -- the Hearts v Dundee Utd card at 0.32, a corners pick that had been shown
+# and had won. But it was implemented as "settled fixtures skip the floor entirely", which
+# overshot: it also surfaced picks that never cleared the OLD floor either, and so were
+# suppressed the whole time they were live and were never shown to anybody.
+#
+# Measured in production 2026-08-16, five such cards, the worst of them:
+#
+#     Chongqing Tongliang Long v SHANGHAI SIPG   away 1.00   completeness 0.23
+#
+# An away side at 100% off a vector that was 77% missing. ADDING a pick nobody saw is the same
+# defect as deleting one they did -- the principle this module already states, applied against
+# itself.
+#
+# So a settled fixture is judged against the floor that applied WHEN IT WAS LIVE, not against no
+# floor at all. 0.25 restores everything the pre-raise product actually published while still
+# refusing what it never did.
+SETTLED_FEATURE_COMPLETENESS_FLOOR = 0.25
+
 
 def _base_rate(candidate: _MarketCandidate, sport_slug: str | None = None) -> float | None:
     """The share of real fixtures this outcome occurs in regardless of who is playing.
@@ -608,12 +630,15 @@ def _pick_best(
     A candidate whose market has no measured base rate is NOT dropped — we can't judge its
     informativeness, and discarding it silently would be worse than admitting that.
 
-    is_settled exempts a DECIDED fixture from MIN_FEATURE_COMPLETENESS, and from that guard
-    ONLY. Reported by a user: a Hearts v Dundee Utd card from 2026-08-09 had shown under-10.5
-    corners at 2.05, the match finished 7-2 on corners so the pick WON, and days later the card
-    carried no pick at all. Nothing about the fixture changed. The floor was raised 0.25 -> 0.35
-    on 2026-08-13, that prediction sits at 0.32, and best_pick is recomputed per request — so a
-    guard tightened after the fact reached backwards and deleted a published result.
+    is_settled judges a DECIDED fixture against SETTLED_FEATURE_COMPLETENESS_FLOOR — the floor
+    that applied while it was live — instead of the current MIN_FEATURE_COMPLETENESS, and
+    touches that guard ONLY.
+
+    Reported by a user: a Hearts v Dundee Utd card from 2026-08-09 had shown under-10.5 corners
+    at 2.05, the match finished 7-2 on corners so the pick WON, and days later the card carried
+    no pick. Nothing about the fixture changed. The floor was raised 0.25 -> 0.35 on 2026-08-13,
+    that prediction sits at 0.32, and best_pick is recomputed per request — so a guard tightened
+    after the fact reached backwards and deleted a published result.
 
     THE BIAS IS THE ARGUMENT, not tidiness. Retroactive filtering is not neutral: sub-0.35
     picks measure 0.2857 accuracy against 0.5263 at or above it, so dropping them from history
@@ -662,10 +687,14 @@ def _pick_best(
         )
         # A vector that was mostly missing at inference time cannot say anything about THIS
         # fixture, however confident the number looks. See MIN_FEATURE_COMPLETENESS.
+        #
+        # A settled fixture is judged against the floor that applied WHEN IT WAS LIVE rather
+        # than exempted outright -- see SETTLED_FEATURE_COMPLETENESS_FLOOR for why the outright
+        # exemption overshot and surfaced picks nobody was ever shown.
         and (
-            is_settled
-            or c.feature_completeness is None
-            or c.feature_completeness >= MIN_FEATURE_COMPLETENESS
+            c.feature_completeness is None
+            or c.feature_completeness
+            >= (SETTLED_FEATURE_COMPLETENESS_FLOOR if is_settled else MIN_FEATURE_COMPLETENESS)
         )
     ]
     priced = [c for c in candidates if c.probability is not None and c.odds is not None]
