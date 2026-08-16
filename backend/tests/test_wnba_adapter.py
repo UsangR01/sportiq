@@ -188,3 +188,55 @@ def test_a_real_wnba_event_maps_onto_our_abbreviations():
     assert payloads, "a real moneyline event must produce at least one payload"
     assert payloads[0].home_team_short_name == "LV"  # not LAS
     assert payloads[0].away_team_short_name == "WSH"
+
+
+# --- the two expansion teams the provider ships with no city ------------------------------
+
+
+def test_the_expansion_teams_get_their_full_names():
+    """BallDontLie ships Portland Fire and Toronto Tempo with an EMPTY city and a mascot-only
+    full_name, so `full_name or name` correctly produced "Fire" and "Tempo" and that is what
+    the cards read. Confirmed live 2026-08-16 against /wnba/v1/teams."""
+    game = {
+        **WNBA_FINAL,
+        "home_team": {"id": 31, "full_name": "Fire", "name": "Fire", "abbreviation": "POR"},
+        "visitor_team": {"id": 30, "full_name": "Tempo", "name": "Tempo", "abbreviation": "TOR"},
+    }
+    payload = _map_game_to_fixture_payload(game, "wnba")
+
+    assert payload.home_team_name == "Portland Fire"
+    assert payload.away_team_name == "Toronto Tempo"
+
+
+def test_a_team_the_provider_names_properly_is_left_alone():
+    game = {
+        **WNBA_FINAL,
+        "home_team": {
+            "id": 4,
+            "full_name": "Atlanta Dream",
+            "name": "Dream",
+            "abbreviation": "ATL",
+        },
+        "visitor_team": {
+            "id": 9,
+            "full_name": "Seattle Storm",
+            "name": "Storm",
+            "abbreviation": "SEA",
+        },
+    }
+    payload = _map_game_to_fixture_payload(game, "wnba")
+
+    assert payload.home_team_name == "Atlanta Dream"
+    assert payload.away_team_name == "Seattle Storm"
+
+
+def test_the_override_cannot_rename_an_nba_team():
+    """POR is Portland Trail Blazers in the NBA namespace and Portland Fire in the WNBA one, and
+    the two share a Sport row -- so the override is keyed on the provider id AND the league."""
+    game = {
+        **NBA_FINAL,
+        "home_team": {"id": 31, "full_name": "Portland Trail Blazers", "abbreviation": "POR"},
+    }
+    payload = _map_game_to_fixture_payload(game, "nba")
+
+    assert payload.home_team_name == "Portland Trail Blazers"

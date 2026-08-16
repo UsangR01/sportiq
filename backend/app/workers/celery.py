@@ -150,18 +150,27 @@ celery_app.conf.beat_schedule = {
         # returns immediately when nothing sits in the window.
         "schedule": 3600.0,
     },
-    "backfill-corners-second-source-every-6-hours": {
+    "backfill-corners-second-source-every-15-minutes": {
         "task": "app.workers.ingest_live_scores.backfill_corners_from_thestatsapi",
-        # SIX HOURLY, AND THAT IS A QUOTA DECISION rather than a correctness one. TheStatsAPI
-        # publishes statistics late -- measured: a match 3.4h past kickoff was already
-        # `finished` and its stats endpoint 404'd, while everything five days old carried real
-        # corners -- and it bills against a monthly cap. Asking every five minutes would spend
-        # hundreds of calls per fixture being told "not yet". Four attempts a day over a
-        # seven-day window is enough to catch the data whenever it lands.
+        # WAS SIX-HOURLY, AND THAT WAS SIZED AGAINST A QUOTA THAT NO LONGER APPLIES. The comment
+        # below reasoned about spending "hundreds of calls per fixture being told not yet" --
+        # true at the 12 requests/minute this key started on, wrong at the 120/minute it now
+        # carries (the same plan change ml/training/collect_thestatsapi_xg.py already adapts to
+        # by reading x-ratelimit-limit rather than hardcoding a constant).
         #
+        # The cost of the slow cadence was real: a fixture whose corners exist in TheStatsAPI
+        # waited up to six extra hours for the next run. Measured 2026-08-16, three of the four
+        # grey corners cards in production had their counts sitting in TheStatsAPI already and
+        # were purely waiting on this schedule.
+        #
+        # Cheap at 15 minutes because the work is bounded by what is MISSING, not by the
+        # fixture list: the query selects only settled fixtures with null corners inside the
+        # lookback, which is ~7 at any moment, and each leaves the pool the first time it
+        # succeeds. The 12-hour age floor still applies, so nothing is asked before the data
+        # can plausibly exist.
         # It fills ONLY what API-Football never supplied, which is 165/190 covered overall but
         # 0/7 for Veikkausliiga -- a league that otherwise can never grade a corners pick.
-        "schedule": 6 * 3600.0,
+        "schedule": 15 * 60.0,
     },
     "backfill-retrodictions-every-2-hours": {
         "task": "app.workers.backfill_predictions.backfill_predictions",

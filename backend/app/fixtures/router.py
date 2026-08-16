@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.core.database import get_db
+from app.fixtures.corners_availability import offers_corners
 from app.fixtures.match_stats_cache import get_cached_match_stats, set_cached_match_stats
 from app.fixtures.models import Fixture, FixtureLiveState, FixtureStatus, Team, TeamFeatures
 from app.fixtures.schemas import (
@@ -795,18 +796,24 @@ async def _bulk_best_picks(
     # team ids and the kickoff time, so both come from one query.
     fixture_rows = (
         await db.execute(
-            select(Fixture, Sport.slug)
+            select(Fixture, Sport.slug, League.slug)
             .join(Sport, Sport.id == Fixture.sport_id)
+            .join(League, League.id == Fixture.league_id)
             .where(Fixture.id.in_(fixture_ids))
         )
     ).all()
-    sport_by_fixture: dict = {fixture.id: slug for fixture, slug in fixture_rows}
+    sport_by_fixture: dict = {fixture.id: sport for fixture, sport, _ in fixture_rows}
+    # Needed for the corners-availability rule: whether this league can settle a corners pick at
+    # full time at all. See corners_availability.py.
+    league_by_fixture: dict = {fixture.id: league for fixture, _, league in fixture_rows}
     # A decided fixture is reviewed, not backed — see _pick_best's is_settled. POSTPONED is not
     # settled: it has no result, and list_fixtures already nulls its best_pick outright.
     settled_fixtures: set = {
-        fixture.id for fixture, _ in fixture_rows if fixture.status == FixtureStatus.COMPLETED
+        fixture.id for fixture, _, _ in fixture_rows if fixture.status == FixtureStatus.COMPLETED
     }
-    reference_corners = await bulk_corners_reference(db, [fixture for fixture, _ in fixture_rows])
+    reference_corners = await bulk_corners_reference(
+        db, [fixture for fixture, _, _ in fixture_rows]
+    )
 
     prediction_rows = (
         (await db.execute(select(Prediction).where(Prediction.fixture_id.in_(fixture_ids))))
@@ -847,6 +854,20 @@ async def _bulk_best_picks(
             # fixture's pick outright, while this one only decides which market wins the
             # headline, and it decides that the same way on every day at once.
             candidates = [c for c in candidates if c.market not in NO_DEMONSTRATED_SIGNAL_MARKETS]
+
+        # A corners pick in a league that cannot settle corners at full time sits GREY through
+        # the whole window users open the app in -- half a day, structurally, because
+        # API-Football does not cover it and the second source lags ~12h. Measured per league;
+        # see corners_availability.py, including how to switch this off entirely once a richer
+        # provider is in place.
+        #
+        # Applied to settled fixtures too, matching NO_DEMONSTRATED_SIGNAL_MARKETS: it decides
+        # which market wins the headline rather than deleting a fixture's pick, and it decides
+        # it the same way on every day at once, so it creates no ratchet. Those cards fall back
+        # to a market that settles from the score and can always be graded.
+        if not offers_corners(league_by_fixture.get(fixture_id)):
+            candidates = [c for c in candidates if c.market != "corners_total"]
+
         best = _pick_best(
             candidates,
             min_probability=min_probability,

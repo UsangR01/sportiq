@@ -103,6 +103,34 @@ def _map_status(status: str, period: int | None) -> str:
     return "scheduled"
 
 
+# THE PROVIDER SHIPS TWO WNBA TEAMS WITH NO CITY AT ALL, so there is nothing to compose a
+# display name from. Read live 2026-08-16 from /wnba/v1/teams:
+#
+#     id 31  POR  name "Fire"    full_name "Fire"            city ""
+#     id 30  TOR  name "Tempo"   full_name "Tempo"           city ""
+#     id  4  ATL  name "Dream"   full_name "Atlanta Dream"   city "Atlanta"
+#
+# Every established team carries both fields; only the two 2026 EXPANSION sides are incomplete.
+# So `full_name or name` was behaving correctly and the cards genuinely read "Fire" and "Tempo".
+#
+# KEYED ON THE PROVIDER ID, NOT THE ABBREVIATION. "POR" is Portland Trail Blazers in the NBA
+# namespace and Portland Fire in the WNBA one, and the two share a Sport row -- an
+# abbreviation-keyed override would rename the wrong team. Same collision that forces the
+# league-scoped game log in backfill_basketball_predictions.
+#
+# Delete an entry the moment the provider fills its own data in; this is a gap-filler, not a
+# preference about naming.
+_WNBA_TEAM_NAME_OVERRIDES = {31: "Portland Fire", 30: "Toronto Tempo"}
+
+
+def _team_display_name(team: dict, league: str) -> str | None:
+    if league == "wnba":
+        override = _WNBA_TEAM_NAME_OVERRIDES.get(team.get("id"))
+        if override:
+            return override
+    return team.get("full_name") or team.get("name")
+
+
 def _map_game_to_fixture_payload(game: dict, league: str = "nba") -> FixturePayload:
     """Pure, network/DB-free mapping — kept separate so it's directly unit-testable against a
     recorded sample response."""
@@ -118,8 +146,8 @@ def _map_game_to_fixture_payload(game: dict, league: str = "nba") -> FixturePayl
         away_team_external_id=league_external_id(league, away["id"]),
         kickoff_utc=datetime.fromisoformat(game["datetime"].replace("Z", "+00:00")),
         season=str(game["season"]),
-        home_team_name=home.get("full_name") or home.get("name"),
-        away_team_name=away.get("full_name") or away.get("name"),
+        home_team_name=_team_display_name(home, league),
+        away_team_name=_team_display_name(away, league),
         home_team_short_name=home.get("abbreviation"),
         away_team_short_name=away.get("abbreviation"),
         status=_map_status(game.get("status", ""), game.get("period")),
