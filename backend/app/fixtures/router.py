@@ -34,7 +34,7 @@ from app.picks.service import (
     best_totals_odds,
     latest_price_per_bookmaker,
 )
-from app.predictions.models import Prediction
+from app.predictions.models import Prediction, PredictionKind
 from app.sports.models import League, Sport
 
 logger = logging.getLogger(__name__)
@@ -686,6 +686,27 @@ def _pick_best(
     return None
 
 
+def _prediction_precedence(prediction: Prediction) -> tuple:
+    """Which of a fixture's predictions the card should show.
+
+    A REAL PRE-KICKOFF FORECAST ALWAYS BEATS A RETRODICTION, however much later the
+    retrodiction was written. Picking purely by created_at -- which this did until 2026-08-16 --
+    means running the retrodiction backfill silently REWRITES the pick on every past card that
+    already had a genuine forecast.
+
+    That is not hypothetical. Reported the day it happened: three WNBA cards from Friday, all
+    winners, came back as a different set with a loss among them. Las Vegas Aces v Washington
+    Mystics 83-76 had been HOME 0.64 (a win) and became AWAY 0.85 (a loss) -- same fixture, same
+    score, a pick the user never saw. Locally that league held 16 PRE_MATCH predictions and 22
+    RETRODICTION ones, and the newer rows won.
+
+    Retrodiction exists to fill fixtures that never had a forecast, not to restate ones that
+    did. Within the same kind the newest row still wins, which is how a forecast revised as
+    injuries and odds landed keeps its final pre-kickoff value.
+    """
+    return (prediction.kind == PredictionKind.PRE_MATCH, prediction.created_at)
+
+
 async def _bulk_best_picks(
     db: AsyncSession,
     fixture_ids: list,
@@ -766,7 +787,7 @@ async def _bulk_best_picks(
     latest_prediction_by_fixture: dict = {}
     for p in prediction_rows:
         existing = latest_prediction_by_fixture.get(p.fixture_id)
-        if existing is None or p.created_at > existing.created_at:
+        if existing is None or _prediction_precedence(p) > _prediction_precedence(existing):
             latest_prediction_by_fixture[p.fixture_id] = p
 
     best_picks: dict = {}
@@ -1261,7 +1282,9 @@ async def get_fixture(fixture_id: uuid.UUID, db: AsyncSession = Depends(get_db))
         .scalars()
         .all()
     )
-    latest_prediction = max(prediction_rows, key=lambda p: p.created_at, default=None)
+    # Same precedence the feed uses, so the detail screen cannot disagree with the card it was
+    # opened from -- see _prediction_precedence.
+    latest_prediction = max(prediction_rows, key=_prediction_precedence, default=None)
 
     home_features = (
         await db.execute(
