@@ -18,8 +18,22 @@ __pycache__/
 .claude/settings.local.json
 
 # ML: generated/regeneratable — real source is ml/training/*.py, ml/notebooks/, ml/evaluation/
-ml/data/
+# `ml/data/*` rather than `ml/data/`: git cannot re-include a file whose PARENT DIRECTORY is
+# excluded, so the trailing-slash form makes the negation below silently do nothing.
+ml/data/*
 ml/mlruns/
+
+# EXCEPT the football game logs, which must ship inside the image. Retrodiction rebuilds a past
+# fixture's features from this multi-season history; without it, production falls back to the
+# ~7 days of fixtures in its own database, most teams have too few prior matches to compute a
+# rolling stat, and every retrodicted prediction comes out as the model's flat prior
+# (H0.454 D0.294 A0.252 on every fixture, measured in production 2026-08-16). Those then fail
+# MIN_EDGE_OVER_BASE_RATE -- correctly, since they say nothing -- and 97 finished cards showed
+# no pick at all.
+#
+# 0.5MB for all 18 leagues, and only the GAME LOGS: the lineup and odds parquets stay ignored,
+# being far larger and feeding features the model no longer has (see d0a24d9).
+!ml/data/football_game_log_*.parquet
 
 # ml/artifacts holds every training run ever (27MB, mostly superseded), EXCEPT deployed/, which
 # holds only what models_registry marks active (~2.6MB) and must ship inside the image — a

@@ -22,6 +22,19 @@ COPY backend/ .
 COPY ml/artifacts/deployed/ /app/models/
 ENV MODELS_DIR=/app/models
 
+# The multi-season football game logs (~0.5MB, all 18 leagues). Retrodiction rebuilds a past
+# fixture's features from these; without them the container falls back to the ~7 days of
+# fixtures in its own database, which is far too little to compute a rolling stat for most
+# teams. Measured in production before this line existed: every retrodicted prediction came out
+# as the model's flat prior (H0.454 D0.294 A0.252 on every fixture in every league), those
+# correctly failed MIN_EDGE_OVER_BASE_RATE because they said nothing, and 97 finished cards
+# showed no pick at all.
+#
+# Game logs ONLY. The lineup parquets are much larger and feed the key-player features, which
+# d0a24d9 pruned from the model vector -- confirmed against FEATURE_NAMES, not assumed.
+COPY ml/data/football_game_log_*.parquet /app/ml_data/
+ENV FOOTBALL_DATA_DIR=/app/ml_data
+
 # One image, three roles (web / worker / beat); render.yaml overrides the command per service.
 # Beat is easy to leave out, and this project has already lost hours to exactly that — four
 # workers running and no beat, so nothing executed on the schedule at all.

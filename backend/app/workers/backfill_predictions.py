@@ -29,11 +29,11 @@ forecast (explicit user go-ahead; adopted from the Big5/Big3 approach in the use
 NBA notebook). See app/models_ml/historical_key_players.py's module docstring for why this is
 a clearly separate code path from the live Stage 2 lookup, mirroring the same
 historical-label-vs-live-Stage-2 separation already established for NBA
-(ml/training/train_nba.py vs app/models_ml/key_player_availability.py). Lineup presence for a
-fixture not already in the cached parquet is fetched live, once, via
-app/adapters/api_football.py:fetch_lineup_presence — a real API call, but only ever made for a
-fixture whose outcome has already happened, same "retrodiction can afford real per-fixture
-calls that live serving can't" tradeoff as this whole rebuild.
+(ml/training/train_nba.py vs app/models_ml/key_player_availability.py). Lineup presence is read
+from the cached parquet ONLY -- the live per-fixture fetch was removed 2026-08-16 because the
+four key-player features it feeds were pruned from the model vector in d0a24d9, so it spent a
+real API call per retrodicted fixture to compute values nothing reads, and added a network
+failure to a loop whose failures used to discard a whole league.
 
 elo_diff now uses the same real, persistent Elo state serving does (app/models_ml/elo.py,
 Team.elo_rating) rather than being omitted — a completed fixture's two teams' CURRENT Elo
@@ -55,13 +55,13 @@ retrodictions would need that provenance distinction added first.
 """
 
 import logging
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
 from sqlalchemy import select
 
-from app.adapters.api_football import fetch_lineup_presence
 from app.core.database import async_session_factory
 from app.fixtures.models import Fixture, FixtureLiveState, FixtureStatus, Team
 from app.models_ml.elo import compute_elo_history
@@ -80,13 +80,21 @@ logger = logging.getLogger(__name__)
 
 _model_runner = ModelRunner()
 
-# Resolves to <repo>/ml/data in a checkout. IN THE DEPLOYED IMAGE IT RESOLVES TO /ml/data AND
-# DOES NOT EXIST -- the Dockerfile copies backend/ to /app and ml/artifacts/deployed/ to
-# /app/models, never ml/data. That is not a bug in itself (the cache is a training artefact and
-# _load_cached_history degrades to DB-only history by design) but it does mean EVERY retrodicted
-# fixture in production takes the live fetch_lineup_presence path, which is why per-fixture
-# error isolation below matters far more in production than it does locally.
-DATA_DIR = Path(__file__).resolve().parents[3] / "ml" / "data"
+# Where the multi-season game logs live. The path-relative default is right for a checkout; the
+# deployed image sets FOOTBALL_DATA_DIR because the default resolves to /ml/data there and does
+# not exist.
+#
+# THAT ABSENCE WAS NOT HARMLESS, though it was designed to be. _load_cached_history degrades to
+# DB-only history rather than raising, and the database holds ~7 days of fixtures -- too few
+# prior matches for most teams to have a rolling stat at all. So every retrodicted prediction in
+# production came out as the model's flat prior: H0.454 D0.294 A0.252, identical across every
+# fixture in every league. Those then failed MIN_EDGE_OVER_BASE_RATE, correctly, because a
+# prediction equal to the base rate says nothing -- and 97 finished cards showed no pick.
+#
+# The blank card was the guard working. The defect was upstream, in the features.
+DATA_DIR = Path(
+    os.getenv("FOOTBALL_DATA_DIR") or Path(__file__).resolve().parents[3] / "ml" / "data"
+)
 
 
 def _build_game_log_df(
@@ -202,7 +210,13 @@ async def _lineup_presence_for_fixture(
             by_team.setdefault(str(team_id), set()).add(name)
         return by_team
 
-    return await fetch_lineup_presence(fixture_external_id)
+    # NO LIVE FETCH. This used to fall back to fetch_lineup_presence, one real API call per
+    # uncached fixture -- which in production meant EVERY fixture, since no lineup parquet ships
+    # in the image. It bought nothing: the four key-player features it feeds were pruned from
+    # the model vector in d0a24d9, confirmed against FEATURE_NAMES rather than assumed. So the
+    # call spent quota to compute values nothing reads, while adding a per-fixture network
+    # failure to a loop whose failures used to discard a whole league.
+    return {}
 
 
 async def _retrodict_league(sport: Sport, league: League) -> None:
