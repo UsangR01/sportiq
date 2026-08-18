@@ -26,6 +26,7 @@ from sqlalchemy import select  # noqa: E402
 
 from app.core.database import async_session_factory  # noqa: E402
 from app.predictions.models import ModelRegistry  # noqa: E402
+
 # Imported for SQLAlchemy FK metadata only — flushing ModelRegistry resolves the sports
 # table through the mapper registry, and a script that never imports Sport crashes with
 # NoReferencedTableError (same trap repair_wnba_team_names.py documents).

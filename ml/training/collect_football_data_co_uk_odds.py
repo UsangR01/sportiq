@@ -52,6 +52,7 @@ MAIN_SEASON_CODES = ["2122", "2223", "2324", "2425", "2526", "2627"]
 
 MAIN_LEAGUES = {
     "epl": "E0",
+    "championship": "E1",
     "scottish_prem": "SC0",
     "bundesliga": "D1",
     "seriea": "I1",

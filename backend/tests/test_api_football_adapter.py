@@ -68,6 +68,8 @@ def test_league_ids_match_therundown_slugs_where_covered():
         "liga_i",
         "czech_first",
         "austria_bundesliga",
+        # probed 2026-08-18: TheRundown has no EFL entry at all — API-Football is its odds source
+        "championship",
     }
     assert set(LEAGUE_IDS.keys()) == {
         "epl",
@@ -88,6 +90,7 @@ def test_league_ids_match_therundown_slugs_where_covered():
         "j1_league",
         "czech_first",
         "austria_bundesliga",
+        "championship",
     }
     for league_slug in LEAGUE_IDS:
         if league_slug in no_rundown_coverage:

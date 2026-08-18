@@ -134,6 +134,7 @@ LEAGUES = [
     "mls",
     "csl",
     "scottish_prem",
+    "championship",
     "bundesliga",
     "seriea",
     "laliga",

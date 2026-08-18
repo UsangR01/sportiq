@@ -71,6 +71,10 @@ LEAGUE_CONFIGS: dict[str, dict] = {
     "mls": {"league_id": LEAGUE_IDS["mls"], "rundown_sport_id": 10},
     "csl": {"league_id": LEAGUE_IDS["csl"], "rundown_sport_id": None},
     "scottish_prem": {"league_id": LEAGUE_IDS["scottish_prem"], "rundown_sport_id": None},
+    # EFL Championship — investor/user demand for UK coverage (2026-08-18). TheRundown has
+    # no EFL entry (probed), so rundown_sport_id is None; live odds come from
+    # API-Football's own /odds, whose coverage flag is true for its current season.
+    "championship": {"league_id": LEAGUE_IDS["championship"], "rundown_sport_id": None},
     # The four remaining MVP-scope European leagues. Unlike the three above, these are NOT
     # being added to fix a measured out-of-distribution problem — they sit at roughly 2.5-3.2
     # goals/match against EPL's 2.93, so they are not scoring outliers the way Brasileirão

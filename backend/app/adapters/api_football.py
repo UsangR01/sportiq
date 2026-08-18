@@ -40,7 +40,12 @@ LEAGUE_IDS: dict[str, int] = {
     "laliga": 140,
     "seriea": 135,
     "brasileirao": 71,  # Brazil Serie A ("Brasileirão Betano") — confirmed live: id 71
-    "scottish_prem": 179,  # Scottish Premiership — confirmed live: id 179, country=Scotland
+    "scottish_prem": 179,
+    # EFL Championship — confirmed live 2026-08-18: id 40, country=England, Aug-May
+    # (2026 season 2026-08-14..2027-05-01, already underway), coverage: stats/lineups/
+    # injuries all true AND odds=true for 2026 — API-Football is its odds source, since
+    # TheRundown has no EFL entry at all (probed; only UEFACHAMP matches "champ").
+    "championship": 40,  # Scottish Premiership — confirmed live: id 179, country=Scotland
     "mls": 253,  # Major League Soccer (USA) — confirmed live: id 253, NOT "MLS" by name search
     "csl": 169,  # Chinese Super League — confirmed live: id 169, country=China
     # The nine Tier-1 leagues the model is now trained on (see ml/training/train_football.py's

@@ -88,6 +88,7 @@ FOOTBALL_LEAGUES = [
     ("seriea", "Serie A", "Italy"),
     ("brasileirao", "Série A", "Brazil"),
     ("scottish_prem", "Scottish Premiership", "Scotland"),
+    ("championship", "Championship", "England"),
     ("mls", "Major League Soccer", "USA"),
     ("csl", "Chinese Super League", "China"),
     # The nine Tier-1 leagues pooled into the trained model (train_football.py's LEAGUES).
