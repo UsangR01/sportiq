@@ -305,15 +305,42 @@ def _map_fixture_to_payload(fixture: dict, league_slug: str) -> FixturePayload:
 
 def _parse_form_points(form: str | None) -> float | None:
     """Converts API-Football's real "WWDLW..." form string (most-recent last) into a
-    3/1/0-points-per-game average — the actual convention form_pts_5's name always implied
-    but NBA's own win/loss-only implementation never used (NBA has no draws)."""
+    3/1/0-points-per-game average over the LAST LAST_N_FORM MATCHES.
+
+    THE WINDOW IS THE WHOLE POINT, and it was missing until 2026-08-18. This averaged the
+    ENTIRE form string, which is the team's season to date, while training computes the same
+    feature over a rolling LAST_N_FORM window (football_features._rolling_form). A train/serve
+    mismatch on one of the model's core inputs, and one that grows with every match played --
+    invisible in a league that has just kicked off, worst in a long season.
+
+    Caught from a real report of MLS predictions. Philadelphia Union, 19 matches in, form
+    string LLLLLLWDDLDLLDLWWWW:
+
+        season-wide         5W 4D 10L = 19 points / 19 = 1.0   <- what the model was told
+        last 10 LDLLDLWWWW        14 points / 10 = 1.4          <- what training means
+        last 4              four straight wins, confirmed against their real fixtures
+
+    So a side on a four-game winning run was described to the model as the worst in the
+    league, while win_streak_home said 4.0 -- two features flatly contradicting each other.
+    Across a mid-season league this compresses every team's form toward the same mid-table
+    number, the feature stops separating anybody, and the model falls back on home advantage:
+    MLS away-win probability collapsed to a mean of 0.048 and all 30 cards showed 1X at ~95%.
+
+    LAST_N_FORM is imported rather than redeclared so the two definitions cannot drift; the
+    import is function-level because football_features imports this module back.
+    """
     if not form:
         return None
+    from app.models_ml.football_features import LAST_N_FORM
+
     points = {"W": 3, "D": 1, "L": 0}
     values = [points[c] for c in form if c in points]
     if not values:
         return None
-    return sum(values) / len(values)
+    # Most-recent LAST, verified live: Philadelphia's string ends WWWW and their real last four
+    # fixtures are four wins. So the tail is the recent window.
+    recent = values[-LAST_N_FORM:]
+    return sum(recent) / len(recent)
 
 
 def _parse_streaks(form: str | None) -> tuple[float | None, float | None]:
