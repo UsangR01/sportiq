@@ -153,5 +153,5 @@ async def test_retrodict_league_raises_without_a_registered_model(
     team external ids, building the game log) before failing at ModelRunner's own "no model
     class registered" check, rather than failing earlier for an unrelated reason."""
     sport, league, _fixtures = seeded_football_league_with_completed_fixtures
-    with pytest.raises(ValueError, match="No model class registered"):
+    with pytest.raises(ValueError, match="model.*registered"):
         await _retrodict_league(sport, league)

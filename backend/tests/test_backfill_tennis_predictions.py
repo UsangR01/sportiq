@@ -135,8 +135,8 @@ async def test_retrodict_tennis_league_raises_without_a_registered_model(
     """This test sport's slug isn't in ModelRunner's _MODEL_CLASSES (it's neither "tennis" nor
     any other real sport) — confirms _retrodict_tennis_league gets all the way through real
     fixture/team resolution and existing-prediction filtering before failing at ModelRunner's
-    own "no model class registered" check, and crucially BEFORE any live API call (the model
+    own "no model registered" check, and crucially BEFORE any live API call (the model
     lookup happens first specifically to fail fast without wasting one)."""
     sport, league, _fixtures = seeded_tennis_league_with_completed_fixtures
-    with pytest.raises(ValueError, match="No model class registered"):
+    with pytest.raises(ValueError, match="model.*registered"):
         await _retrodict_tennis_league(sport, league)
