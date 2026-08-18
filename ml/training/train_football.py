@@ -450,6 +450,7 @@ def build_training_examples(
     odds: pd.DataFrame,
     corners: pd.DataFrame,
     team_codes: dict[str, str],
+    market_by_fixture: dict | None = None,
 ) -> pd.DataFrame:
     """One row per fixture (from the home team's perspective) — features via
     assemble_from_game_log (the same function run_predictions.py's live path calls through
@@ -542,12 +543,16 @@ def build_training_examples(
         elo_away = elo_history.get((fixture_id, away_id))
         elo_diff = (elo_home - elo_away) if elo_home is not None and elo_away is not None else None
 
+        market = (market_by_fixture or {}).get(fixture_id)
         features = assemble_from_game_log(
             games,
             game_date,
             home_id,
             away_id,
             moneyline_prob,
+            market_implied_home=(market[0] if market else None),
+            market_implied_away=(market[1] if market else None),
+            market_implied_over25=(market[2] if market else None),
             key_players_available_home=None,
             key_players_available_away=None,
             key_players_per_combined_home=None,
@@ -729,6 +734,24 @@ async def main_async() -> None:
     # excluding the leagues.
     xg = _load_optional("xg", ["FIXTURE_ID", "TEAM_ID", "XG_FOR"])
     games = merge_xg_into_game_log(games, xg)
+    # Market-implied features (see FEATURE_NAMES' adoption block in football_features.py).
+    # Keyed by FIXTURE_ID; the collector's resolve stage already dropped anything ambiguous.
+    # Refresh football-data.co.uk before a training run — the files are appended upstream:
+    #   python ml/training/collect_football_data_co_uk_odds.py --refresh
+    market_frame = _load_optional(
+        "market_odds",
+        ["FIXTURE_ID", "MARKET_IMPLIED_HOME", "MARKET_IMPLIED_AWAY", "MARKET_IMPLIED_OVER25"],
+    )
+    market_by_fixture = {
+        row.FIXTURE_ID: (
+            row.MARKET_IMPLIED_HOME,
+            row.MARKET_IMPLIED_AWAY,
+            row.MARKET_IMPLIED_OVER25,
+        )
+        for row in market_frame.itertuples()
+    }
+    if market_by_fixture:
+        print(f"  market odds resolved for {len(market_by_fixture)} fixtures")
     if not xg.empty:
         covered = games["XG_FOR"].notna().sum()
         print(f"  xG merged: {covered}/{len(games)} game-log rows carry a real xG value")
@@ -758,7 +781,7 @@ async def main_async() -> None:
         "assembling training examples "
         "(leakage-safe: every stat filtered to GAME_DATE < fixture date)..."
     )
-    examples = build_training_examples(games, odds, corners, team_codes)
+    examples = build_training_examples(games, odds, corners, team_codes, market_by_fixture)
     print(
         f"{len(examples)} examples, moneyline available for {examples['home_odds'].notna().sum()}"
     )

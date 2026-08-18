@@ -106,6 +106,33 @@ FEATURE_NAMES = (
     # result, the pre-registered criteria, and the honest read on how small the gain is.
     "league_avg_goals",
     "league_home_win_rate",
+    # ADOPTED 2026-08-18 for the 1X2 MARKET, after failing a goals bar — the honest history:
+    # these three (devigged market-implied probabilities; historical source football-data.co.uk
+    # via collect_football_data_co_uk_odds.py, live source our own Odds table, see
+    # assemble_from_live_db) were first run as a GOALS experiment and FAILED its pre-registered
+    # primary (goals r +0.177 -> +0.183, bar +0.192), so they were reverted. The guard metric
+    # is what earned them their place: 1X2 RPS 0.2095 -> 0.2063 and accuracy 0.5088 -> 0.5103,
+    # the best 1X2 result ever measured on this project (arms football_xgb_v20260818195635 /
+    # ...200900, identical data and seeds, only these features differ).
+    #
+    # NOT a blind retry of the pruned moneyline_implied_prob_home: that was 0.7% populated;
+    # these are ~95% populated in training (25,912 resolved fixtures).
+    #
+    # STATED IN ADVANCE, before any live number exists:
+    #   - Training saw CLOSING prices at ~95% coverage. Serving sees earlier prices from our
+    #     own ingested odds, at whatever coverage the odds window provides. The live gain is
+    #     expected to be SMALLER than the test gain.
+    #   - LIVE REVOCATION CONDITION: once >=200 settled PRE_MATCH predictions exist on a
+    #     version carrying these features, its live 1X2 accuracy must not sit below the
+    #     incumbent-era live figure over a comparable window. If it does, reactivate the
+    #     incumbent (scripts/activate_model.py) — the test-set evidence cannot overrule a live
+    #     regression, exactly as the goals bar could not be lifted on test evidence.
+    #   - Model probabilities will drift TOWARD market prices, so measured EV edges shrink by
+    #     construction. That is a product trade-off (probability trustworthiness over edge
+    #     size), chosen deliberately by the user on 2026-08-18.
+    "market_implied_home",
+    "market_implied_away",
+    "market_implied_over25",
 )
 
 # RE-ENABLED 2026-08-11, AFTER a clear negative result at a third of the training data. The
@@ -381,6 +408,9 @@ def assemble_from_game_log(
     elo_diff: float | None = None,
     league_avg_goals: float | None = None,
     league_home_win_rate: float | None = None,
+    market_implied_home: float | None = None,
+    market_implied_away: float | None = None,
+    market_implied_over25: float | None = None,
 ) -> dict:
     """games_df: one row per team per fixture (ml/training/collect_football_data.py's own
     shape — TEAM_ID/OPPONENT_ID/GAME_DATE/GF/GA/WDL/HOME_AWAY), analogous to nba_features.py's
@@ -443,6 +473,12 @@ def assemble_from_game_log(
         "corners_against_home": corners_against_home,
         "corners_for_away": corners_for_away,
         "corners_against_away": corners_against_away,
+        # The fixture's OWN pre-match odds, passed by the caller (training reads the resolved
+        # football-data.co.uk parquets; retrodiction passes nothing and gets None). Not subject
+        # to the GAME_DATE < as_of_date guard: odds are published before kickoff.
+        "market_implied_home": market_implied_home,
+        "market_implied_away": market_implied_away,
+        "market_implied_over25": market_implied_over25,
     }
 
 
@@ -487,6 +523,70 @@ async def _corners_rolling_live(
     return float(sum(corners_for) / len(corners_for)), float(
         sum(corners_against) / len(corners_against)
     )
+
+
+def devig_1x2(home: float | None, draw: float | None, away: float | None):
+    """Decimal 1X2 prices -> overround-free implied probabilities, or None when incomplete.
+
+    Training's counterpart lives in collect_football_data_co_uk_odds.py; the math must match
+    or the feature means different things at train and serve time. Requires all three prices:
+    normalising two legs of a three-way market fabricates a probability."""
+    prices = (home, draw, away)
+    if any(not isinstance(v, (int, float)) or not v or v <= 1.0 for v in prices):
+        return None
+    inverses = [1.0 / v for v in prices]
+    total = sum(inverses)
+    return tuple(inv / total for inv in inverses)
+
+
+def devig_over(over: float | None, under: float | None) -> float | None:
+    """Decimal Over/Under prices -> implied P(over), overround removed."""
+    if any(not isinstance(v, (int, float)) or not v or v <= 1.0 for v in (over, under)):
+        return None
+    inv_over, inv_under = 1.0 / over, 1.0 / under
+    return inv_over / (inv_over + inv_under)
+
+
+async def _market_implied_live(db, fixture_id):
+    """(implied_home, implied_away, implied_over25) from the latest ingested odds.
+
+    Latest complete row PER BOOKMAKER, devigged individually, then averaged — the live
+    analogue of training's market-average fallback (training preferred Pinnacle closing,
+    which live ingestion does not reliably carry). Odds rows are snapshots, never upserted,
+    so "latest per bookmaker" is an ORDER BY updated_at walk keeping first-seen."""
+    from sqlalchemy import select
+
+    from app.odds.models import Odds
+
+    rows = (
+        (
+            await db.execute(
+                select(Odds)
+                .where(Odds.fixture_id == fixture_id, Odds.market.in_(["h2h", "total"]))
+                .order_by(Odds.updated_at.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    h2h_probs, over_probs = [], []
+    seen_h2h, seen_total = set(), set()
+    for row in rows:
+        market = getattr(row.market, "value", row.market)
+        if market == "h2h" and row.bookmaker not in seen_h2h:
+            seen_h2h.add(row.bookmaker)
+            devigged = devig_1x2(row.home_odds, row.draw_odds, row.away_odds)
+            if devigged is not None:
+                h2h_probs.append(devigged)
+        elif market == "total" and row.line == 2.5 and row.bookmaker not in seen_total:
+            seen_total.add(row.bookmaker)
+            p_over = devig_over(row.over_odds, row.under_odds)
+            if p_over is not None:
+                over_probs.append(p_over)
+    implied_home = sum(p[0] for p in h2h_probs) / len(h2h_probs) if h2h_probs else None
+    implied_away = sum(p[2] for p in h2h_probs) / len(h2h_probs) if h2h_probs else None
+    implied_over25 = sum(over_probs) / len(over_probs) if over_probs else None
+    return implied_home, implied_away, implied_over25
 
 
 async def assemble_from_live_db(db, fixture, home_features, away_features) -> dict:
@@ -563,6 +663,9 @@ async def assemble_from_live_db(db, fixture, home_features, away_features) -> di
         .scalars()
         .first()
     )
+    market_implied_home, market_implied_away, market_implied_over25 = await _market_implied_live(
+        db, fixture.id
+    )
     moneyline_implied_prob_home = (
         (1 / best_odds.home_odds) if best_odds and best_odds.home_odds else None
     )
@@ -630,4 +733,11 @@ async def assemble_from_live_db(db, fixture, home_features, away_features) -> di
         "corners_against_home": corners_against_home,
         "corners_for_away": corners_for_away,
         "corners_against_away": corners_against_away,
+        # From our own ingested Odds rows (see _market_implied_live): the live counterpart of
+        # training's closing-odds features. None outside the odds window or in a league with
+        # no odds coverage — a fixture without market information IS less informed, so the
+        # completeness dip this causes is signal, not noise.
+        "market_implied_home": market_implied_home,
+        "market_implied_away": market_implied_away,
+        "market_implied_over25": market_implied_over25,
     }

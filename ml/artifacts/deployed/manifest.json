@@ -1,12 +1,12 @@
 [
   {
     "sport_slug": "football",
-    "version": "football_xgb_v20260813153115",
-    "artefact_path": "football_xgb_20260813153115.joblib",
-    "accuracy": 0.5095680699835976,
-    "rps_score": 0.20984704535797388,
-    "roi_simulation": 0.021412820512820438,
-    "trained_at": "2026-08-13T15:31:17.987890+00:00"
+    "version": "football_xgb_v20260818200900",
+    "artefact_path": "football_xgb_20260818200900.joblib",
+    "accuracy": 0.5102970657918717,
+    "rps_score": 0.20626207546717967,
+    "roi_simulation": -0.05066153846153845,
+    "trained_at": "2026-08-18T20:09:02.651194+00:00"
   },
   {
     "sport_slug": "nba",
