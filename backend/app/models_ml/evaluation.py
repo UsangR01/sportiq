@@ -239,3 +239,62 @@ def per_league_market_metrics(
 # the model. Higher than MIN_BUCKET_ROWS_TO_REPORT because this cut slices twice (league AND
 # market) and the corners subset is thinner again.
 MIN_LEAGUE_ROWS_FOR_MARKET = 100
+
+
+def btts_signal_report(rows: pd.DataFrame) -> tuple[dict[str, float], list[str]]:
+    """Would a Both-Teams-To-Score market carry signal? Measured every run, shipped never (yet).
+
+    ASKED FOR 2026-08-18 and measured before any build: P(BTTS) is pure arithmetic on the
+    per-side xG the model already outputs -- (1 - e^-xg_home)(1 - e^-xg_away) -- so the only
+    question is whether that number tracks reality. On the 2025 test season it did not: pooled
+    r=+0.091 (below even the barred goals_total's +0.105), NO league of 18 cleared the
+    admission bar that let goals into four leagues, Brasileirao was negative, and 60% of all
+    fixtures landed in a 0.45-0.55 prediction band. BTTS is dominated by whether the WEAKER
+    side scores at all, and the model's per-side split is not good enough for that question
+    even where its total is.
+
+    So the market stays unbuilt, and THIS function is the re-measure condition: it runs on
+    every training run's saved rows, against the same pre-registered thresholds as the goals
+    re-admission trigger (market_signal.py -- imported, not reimplemented, so the two bars
+    cannot drift apart). The day a league clears it here, building the market is a half-day of
+    arithmetic; until then the number is in every run's output so nobody has to remember to ask.
+    """
+    from app.predictions.market_signal import MIN_CI_LOW, MIN_N, MIN_R, pearson_with_ci
+
+    predicted = (1 - np.exp(-rows["xg_home_pred"])) * (1 - np.exp(-rows["xg_away_pred"]))
+    actual = ((rows["home_goals"] >= 1) & (rows["away_goals"] >= 1)).astype(float)
+
+    def _clears(n: int, r: float | None, ci_low: float | None) -> bool:
+        if r is None or ci_low is None:
+            return False
+        return n >= MIN_N and r >= MIN_R and ci_low > MIN_CI_LOW
+
+    metrics: dict[str, float] = {}
+    r, lo, hi = pearson_with_ci(predicted.tolist(), actual.tolist())
+    lines = ["BTTS signal (measured every run, market deliberately NOT built — see docstring):"]
+    if r is not None:
+        metrics["btts_signal_r"] = r
+        lines.append(
+            f"  pooled       n={len(rows):5d}  r={r:+.3f}  CI [{lo:+.3f}, {hi:+.3f}]"
+            f"  base rate {actual.mean():.3f}"
+        )
+    cleared: list[str] = []
+    for league, group in rows.groupby("league"):
+        gp = (1 - np.exp(-group["xg_home_pred"])) * (1 - np.exp(-group["xg_away_pred"]))
+        gy = ((group["home_goals"] >= 1) & (group["away_goals"] >= 1)).astype(float)
+        gr, glo, _ghi = pearson_with_ci(gp.tolist(), gy.tolist())
+        if _clears(len(group), gr, glo):
+            cleared.append(f"{league} (n={len(group)}, r={gr:+.3f}, CI-low {glo:+.3f})")
+    if cleared:
+        lines.append(
+            "  *** LEAGUES CLEARING THE ADMISSION BAR — a BTTS build is now justified: "
+            + "; ".join(cleared)
+        )
+        metrics["btts_leagues_clearing_bar"] = float(len(cleared))
+    else:
+        lines.append(
+            f"  no league clears the bar (r>={MIN_R}, CI-low>{MIN_CI_LOW}, n>={MIN_N})"
+            " — market stays unbuilt"
+        )
+        metrics["btts_leagues_clearing_bar"] = 0.0
+    return metrics, lines

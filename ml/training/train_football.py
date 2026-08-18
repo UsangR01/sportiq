@@ -87,6 +87,7 @@ from app.models_ml.football_features import (  # noqa: E402
     merge_xg_into_game_log,
 )
 from app.models_ml.evaluation import (  # noqa: E402
+    btts_signal_report,
     build_test_prediction_rows,
     multiclass_calibration,
     per_league_market_metrics,
@@ -1270,6 +1271,12 @@ async def main_async() -> None:
         print("PER LEAGUE x PER MARKET (Brier, lower is better; leagues under 100 rows omitted):")
         print(league_market.sort_values("league").to_string(index=False))
 
+    # BTTS: measured every run, deliberately not built — see btts_signal_report's docstring for
+    # the 2026-08-18 measurement that kept it out and the bar that would let it in.
+    btts_metrics, btts_lines = btts_signal_report(test_predictions)
+    print()
+    print("\n".join(btts_lines))
+
     predictions_path = (
         EVALUATION_DIR / f"test_predictions_{model_version_for(artefact_path)}.parquet"
     )
@@ -1313,6 +1320,8 @@ async def main_async() -> None:
         # a TUNING diagnostic on uncalibrated validation probabilities and should not be read
         # as a test metric; these are the held-out ones.
         for metric_name, metric_value in one_x_two_metrics.items():
+            mlflow.log_metric(metric_name, metric_value)
+        for metric_name, metric_value in btts_metrics.items():
             mlflow.log_metric(metric_name, metric_value)
         if flat_stake_roi is not None:
             mlflow.log_metric("flat_stake_roi_home_picks", flat_stake_roi)
