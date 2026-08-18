@@ -137,3 +137,48 @@ async def measure_goals_total_signal(db: AsyncSession) -> MarketSignal:
     ys = [float(row[1]) for row in rows]
     r, lo, hi = pearson_with_ci(xs, ys)
     return MarketSignal(market="goals_total", n=len(rows), r=r, ci_low=lo, ci_high=hi)
+
+
+async def measure_goals_total_signal_by_league(db: AsyncSession) -> list[MarketSignal]:
+    """The same measurement, cut per league — the audit trail for the per-league goals gate.
+
+    goals_availability.py admits four leagues on TEST-split evidence because their live seasons
+    had only just opened; this is the live counterpart that accumulates alongside. Two verdicts
+    matter, both pre-registered there:
+      - a gated league whose live interval settles BELOW the bar (n >= MIN_N and
+        ci_high < MIN_R) should be revoked;
+      - an ungated league that clears the full trigger live is a candidate to admit.
+    """
+    rows = (
+        await db.execute(
+            text("""
+                select l.slug,
+                       (p.xg_home + p.xg_away) as predicted,
+                       (o.home_score + o.away_score) as actual
+                from predictions p
+                join fixtures f on f.id = p.fixture_id
+                join leagues l on l.id = f.league_id
+                join sports s on s.id = f.sport_id
+                join outcomes o on o.fixture_id = f.id
+                where s.slug = 'football'
+                  and p.kind = 'PRE_MATCH'
+                  and p.xg_home is not null
+                  and p.xg_away is not null
+                  and p.model_version >= :min_version
+                """),
+            {"min_version": MIN_MODEL_VERSION},
+        )
+    ).all()
+    by_league: dict[str, tuple[list[float], list[float]]] = {}
+    for slug, predicted, actual in rows:
+        xs, ys = by_league.setdefault(slug, ([], []))
+        xs.append(float(predicted))
+        ys.append(float(actual))
+    signals = []
+    for slug in sorted(by_league):
+        xs, ys = by_league[slug]
+        r, lo, hi = pearson_with_ci(xs, ys)
+        signals.append(
+            MarketSignal(market=f"goals_total[{slug}]", n=len(xs), r=r, ci_low=lo, ci_high=hi)
+        )
+    return signals

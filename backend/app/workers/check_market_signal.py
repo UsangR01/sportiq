@@ -16,7 +16,13 @@ Costs one query and no API calls.
 import logging
 
 from app.core.database import async_session_factory
-from app.predictions.market_signal import measure_goals_total_signal
+from app.fixtures.goals_availability import LEAGUES_WITH_DEMONSTRATED_GOALS_SIGNAL
+from app.predictions.market_signal import (
+    MIN_N,
+    MIN_R,
+    measure_goals_total_signal,
+    measure_goals_total_signal_by_league,
+)
 from app.workers.celery import celery_app, run_task
 
 logger = logging.getLogger(__name__)
@@ -25,6 +31,40 @@ logger = logging.getLogger(__name__)
 async def _check_market_signals() -> None:
     async with async_session_factory() as db:
         signal = await measure_goals_total_signal(db)
+        per_league = await measure_goals_total_signal_by_league(db)
+
+    # The per-league goals gate was admitted on test-split evidence (goals_availability.py);
+    # this is its live audit. Both conditions were fixed there before any live number existed.
+    for league_signal in per_league:
+        slug = league_signal.market.split("[", 1)[1].rstrip("]")
+        gated = slug in LEAGUES_WITH_DEMONSTRATED_GOALS_SIGNAL
+        revoke = (
+            gated
+            and league_signal.n >= MIN_N
+            and league_signal.ci_high is not None
+            and league_signal.ci_high < MIN_R
+        )
+        admit = not gated and league_signal.meets_trigger
+        if revoke:
+            logger.warning(
+                "GOALS GATE REVOCATION CONDITION MET — %s. Live evidence sits below the bar the "
+                "league was admitted on; remove it from LEAGUES_WITH_DEMONSTRATED_GOALS_SIGNAL "
+                "in app/fixtures/goals_availability.py.",
+                league_signal.describe(),
+            )
+        elif admit:
+            logger.warning(
+                "GOALS GATE ADMISSION CANDIDATE — %s cleared the full trigger LIVE. Consider "
+                "adding it to LEAGUES_WITH_DEMONSTRATED_GOALS_SIGNAL in "
+                "app/fixtures/goals_availability.py.",
+                league_signal.describe(),
+            )
+        else:
+            logger.info(
+                "goals per-league signal (%s) — %s",
+                "gated" if gated else "ungated",
+                league_signal.describe(),
+            )
 
     if signal.meets_trigger:
         # WARNING rather than INFO because this one needs a human: the pre-registered condition

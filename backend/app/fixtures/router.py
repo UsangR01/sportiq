@@ -12,6 +12,7 @@ from sqlalchemy.orm import aliased
 
 from app.core.database import get_db
 from app.fixtures.corners_availability import offers_corners
+from app.fixtures.goals_availability import offers_goals
 from app.fixtures.match_stats_cache import get_cached_match_stats, set_cached_match_stats
 from app.fixtures.models import Fixture, FixtureLiveState, FixtureStatus, Team, TeamFeatures
 from app.fixtures.schemas import (
@@ -853,7 +854,15 @@ async def _bulk_best_picks(
             # removing. The distinction that matters: the guards in _pick_best DELETE a
             # fixture's pick outright, while this one only decides which market wins the
             # headline, and it decides that the same way on every day at once.
-            candidates = [c for c in candidates if c.market not in NO_DEMONSTRATED_SIGNAL_MARKETS]
+            #
+            # Per-league exception (2026-08-18): four leagues measured real goals signal on the
+            # held-out test season — see goals_availability.py for the numbers, the polarity
+            # (earned inclusion, unlike corners' presumed inclusion), and the live-audit
+            # arrangement in check_market_signal.py that can revoke a league.
+            if not offers_goals(league_by_fixture.get(fixture_id)):
+                candidates = [
+                    c for c in candidates if c.market not in NO_DEMONSTRATED_SIGNAL_MARKETS
+                ]
 
         # A corners pick in a league that cannot settle corners at full time sits GREY through
         # the whole window users open the app in -- half a day, structurally, because
