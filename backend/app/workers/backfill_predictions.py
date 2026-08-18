@@ -219,6 +219,162 @@ async def _lineup_presence_for_fixture(
     return {}
 
 
+async def _league_game_log(db, league: League) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """The league's full real history: multi-season parquet plus anything our own DB has
+    settled since the last collection run, de-duplicated by the provider's own fixture id.
+
+    Shared by retrodiction and by the season-opener fallback below — one definition of "what
+    has actually happened in this league", not two."""
+    completed = (
+        await db.execute(
+            select(Fixture, FixtureLiveState)
+            .join(FixtureLiveState, FixtureLiveState.fixture_id == Fixture.id)
+            .where(Fixture.league_id == league.id, Fixture.status == FixtureStatus.COMPLETED)
+        )
+    ).all()
+
+    team_ext_by_id: dict = {}
+    for fixture, _live_state in completed:
+        for team_id in (fixture.home_team_id, fixture.away_team_id):
+            if team_id not in team_ext_by_id:
+                team = (
+                    await db.execute(select(Team).where(Team.id == team_id))
+                ).scalar_one_or_none()
+                team_ext_by_id[team_id] = team.external_id if team else None
+
+    rows = [
+        (
+            fixture,
+            live_state,
+            team_ext_by_id[fixture.home_team_id],
+            team_ext_by_id[fixture.away_team_id],
+        )
+        for fixture, live_state in completed
+    ]
+    rows = [r for r in rows if r[2] is not None and r[3] is not None]
+
+    cached_games, cached_lineups = _load_cached_history(league.slug)
+    db_game_log = _build_game_log_df(rows)
+    cached_fixture_ids = (
+        set(cached_games["FIXTURE_ID"].astype(str)) if not cached_games.empty else set()
+    )
+    new_rows = db_game_log[~db_game_log["FIXTURE_ID"].astype(str).isin(cached_fixture_ids)]
+    game_log = pd.concat([cached_games, new_rows], ignore_index=True)
+    if not game_log.empty:
+        # Both int64 (parquet) and str (DB external_id) arrive here; every downstream lookup
+        # uses str. See the key-type note in _retrodict_league's history.
+        game_log["FIXTURE_ID"] = game_log["FIXTURE_ID"].astype(str)
+    return game_log, cached_lineups
+
+
+async def assemble_upcoming_from_game_log(db, fixture: Fixture) -> dict | None:
+    """Season-opener fallback: real features for an UPCOMING fixture, from the league's own
+    history, when the live path has nothing.
+
+    WHY THIS EXISTS. At a season opening /teams/statistics has no data yet, TeamFeatures come
+    out all None, and every prediction lands on the model's flat prior -- measured on the EPL's
+    2026-27 opening round: Arsenal v newly-promoted Coventry AND Hull City v Manchester United
+    both served H0.684 D0.232 A0.083, and the completeness floor correctly hid them all. Ten
+    fixtures on the product's biggest league's opening weekend, no picks.
+
+    THOSE ARE NOT UNKNOWNS, AND TREATING THEM AS UNKNOWNS IS A TRAIN/SERVE MISMATCH. Training
+    rolls windows across season boundaries -- a team's first fixture of a season trains on the
+    tail of its previous one (assemble_from_game_log filters on GAME_DATE alone, never season).
+    The model has NEVER seen "established club, empty vector" in training; serving invented
+    that case. The game logs ship in the image precisely so past-facing features can be real.
+
+    LEAKAGE-SAFE BY CONSTRUCTION: the fixture is in the future, so every row in the log
+    predates it, and the same GAME_DATE < as_of_date guard training uses applies unchanged.
+
+    A PROMOTED TEAM'S SIDE STAYS None -- Coventry have no top-flight history in this log, so
+    their features are honestly missing, exactly as training saw promoted sides. If BOTH teams
+    are new (Hull v Sunderland, both promoted) the vector stays empty, the flat prior stands,
+    and the floor keeps hiding it. That is the correct answer for a genuinely unknown pairing.
+    """
+    league = (
+        await db.execute(select(League).where(League.id == fixture.league_id))
+    ).scalar_one_or_none()
+    if league is None:
+        return None
+    home_team = (
+        await db.execute(select(Team).where(Team.id == fixture.home_team_id))
+    ).scalar_one_or_none()
+    away_team = (
+        await db.execute(select(Team).where(Team.id == fixture.away_team_id))
+    ).scalar_one_or_none()
+    if (
+        home_team is None
+        or away_team is None
+        or not home_team.external_id
+        or not away_team.external_id
+    ):
+        return None
+
+    game_log, _lineups = await _league_game_log(db, league)
+    if game_log.empty:
+        return None
+
+    # xG (and, where collected, shot-quality) rolling features come from the resolved
+    # TheStatsAPI frame, which ships in the image alongside the game logs. Retrodiction
+    # predates this merge and still runs without it; the fallback merges because its whole
+    # purpose is giving an opening-weekend vector everything training had.
+    xg_path = DATA_DIR / f"football_xg_{league.slug}.parquet"
+    if xg_path.exists():
+        from app.models_ml.football_features import merge_xg_into_game_log
+
+        xg = pd.read_parquet(xg_path)
+        xg["FIXTURE_ID"] = xg["FIXTURE_ID"].astype(str)
+        game_log = merge_xg_into_game_log(game_log, xg)
+
+    ratings = final_elo_ratings(game_log)
+    # A team absent from the log gets INITIAL_ELO, not None — that is what training saw. The
+    # Elo walk starts every team at 1500 on first appearance, so a promoted side's first
+    # top-flight fixture trained with elo_diff = opponent_rating - 1500, never with a missing
+    # value. Arsenal at home to promoted Coventry carries a real, large, honest elo_diff.
+    from app.models_ml.elo import INITIAL_ELO as ELO_START
+
+    elo_home = ratings.get(str(home_team.external_id), ELO_START)
+    elo_away = ratings.get(str(away_team.external_id), ELO_START)
+    elo_diff = elo_home - elo_away
+
+    return assemble_from_game_log(
+        game_log,
+        fixture.kickoff_utc.date(),
+        str(home_team.external_id),
+        str(away_team.external_id),
+        moneyline_implied_prob_home=None,
+        elo_diff=elo_diff,
+    )
+
+
+def final_elo_ratings(game_log: pd.DataFrame) -> dict[str, float]:
+    """Each team's Elo AFTER its last logged match — the rating an upcoming fixture should see.
+
+    compute_elo_history returns pre-match lookups keyed by fixture, which is what retrodiction
+    needs; an upcoming fixture instead needs the end state of the walk. Same walk, same
+    K-factor, same one-row-per-match convention."""
+    from app.models_ml.elo import INITIAL_ELO as ELO_START
+    from app.models_ml.elo import apply_match_result as elo_update
+
+    ratings: dict[str, float] = {}
+    home_rows = (
+        game_log[game_log["HOME_AWAY"] == "home"]
+        .sort_values(["GAME_DATE", "FIXTURE_ID"])
+        .itertuples(index=False)
+    )
+    for row in home_rows:
+        home_id, away_id = str(row.TEAM_ID), str(row.OPPONENT_ID)
+        new_home, new_away = elo_update(
+            ratings.get(home_id, ELO_START),
+            ratings.get(away_id, ELO_START),
+            int(row.GF),
+            int(row.GA),
+        )
+        ratings[home_id] = new_home
+        ratings[away_id] = new_away
+    return ratings
+
+
 async def _retrodict_league(sport: Sport, league: League) -> None:
     async with async_session_factory() as db:
         completed = (

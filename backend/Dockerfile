@@ -33,6 +33,10 @@ ENV MODELS_DIR=/app/models
 # Game logs ONLY. The lineup parquets are much larger and feed the key-player features, which
 # d0a24d9 pruned from the model vector -- confirmed against FEATURE_NAMES, not assumed.
 COPY ml/data/football_game_log_*.parquet /app/ml_data/
+# The resolved xG/shot-quality frames (~200KB total) ride along for the same reason: the
+# season-opener fallback builds an upcoming fixture's features from this history, and a
+# container without them silently loses the xG features that training had.
+COPY ml/data/football_xg_*.parquet /app/ml_data/
 ENV FOOTBALL_DATA_DIR=/app/ml_data
 
 # One image, three roles (web / worker / beat); render.yaml overrides the command per service.

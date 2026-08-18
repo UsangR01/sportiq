@@ -15,6 +15,24 @@ from app.workers.notify_users import notify_new_pick
 _model_runner = ModelRunner()
 
 
+# The signals that make a football vector a statement about THIS fixture rather than the
+# model's prior. All None on both sides means the live path had nothing — the season-opener
+# state — and is the trigger for the game-log fallback below. Deliberately narrow: one side
+# populated (an established club hosting a promoted one) is a REAL partial vector, exactly
+# what training saw for promoted sides, and must not trigger a rebuild.
+_FOOTBALL_CORE_SIGNALS = (
+    "attack_str_home",
+    "attack_str_away",
+    "form_pts_home",
+    "form_pts_away",
+    "elo_diff",
+)
+
+
+def _football_vector_is_empty(features: dict) -> bool:
+    return all(features.get(name) is None for name in _FOOTBALL_CORE_SIGNALS)
+
+
 async def _assemble_features(
     db, sport_slug: str, fixture: Fixture, home_features, away_features
 ) -> dict:
@@ -27,7 +45,22 @@ async def _assemble_features(
     if sport_slug == "football":
         from app.models_ml.football_features import assemble_from_live_db
 
-        return await assemble_from_live_db(db, fixture, home_features, away_features)
+        features = await assemble_from_live_db(db, fixture, home_features, away_features)
+        if _football_vector_is_empty(features):
+            # Season opening: /teams/statistics has nothing yet, so the live vector is empty
+            # and the prediction would land on the model's flat prior -- measured on the EPL
+            # 2026-27 opening round, all ten fixtures at H0.684 D0.232 A0.083, every pick
+            # hidden by the completeness floor. The league's own multi-season game log ships
+            # in the image and training rolls windows ACROSS season boundaries, so last
+            # season's tail is what the model expects to see here, not an empty vector. See
+            # assemble_upcoming_from_game_log for the leakage argument and the promoted-team
+            # honesty rules.
+            from app.workers.backfill_predictions import assemble_upcoming_from_game_log
+
+            fallback = await assemble_upcoming_from_game_log(db, fixture)
+            if fallback is not None and not _football_vector_is_empty(fallback):
+                return fallback
+        return features
     if sport_slug == "tennis":
         from app.models_ml.tennis_features import assemble_from_live_db
 

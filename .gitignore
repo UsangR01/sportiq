@@ -34,6 +34,11 @@ ml/mlruns/
 # 0.5MB for all 18 leagues, and only the GAME LOGS: the lineup and odds parquets stay ignored,
 # being far larger and feeding features the model no longer has (see d0a24d9).
 !ml/data/football_game_log_*.parquet
+# The resolved xG/shot-quality frames too (~200KB for all 18): the season-opener fallback
+# assembles an upcoming fixture's features from the game log, and without these its xG
+# rolling features are None in the image while real locally — the exact split-brain the
+# game-log exception above exists to prevent.
+!ml/data/football_xg_*.parquet
 
 # ml/artifacts holds every training run ever (27MB, mostly superseded), EXCEPT deployed/, which
 # holds only what models_registry marks active (~2.6MB) and must ship inside the image — a

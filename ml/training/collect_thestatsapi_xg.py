@@ -421,7 +421,18 @@ def resolve(league: str, raw: dict, names: dict[str, str]) -> pd.DataFrame | Non
     resolved, dropped, via_name = [], 0, 0
     for match in candidates:
         score, expected = match.get("score") or {}, match.get("xg") or {}
-        if score.get("home") is None or expected.get("home") is None:
+        # The raw cache has ALWAYS carried shots/shots-on-target/big-chances alongside xG --
+        # collect_raw stored them from day one -- but this resolver used to keep only XG_FOR
+        # and, worse, SKIPPED any match without xG, discarding shot data that was already paid
+        # for. Requiring the score is still right (it is the join key); requiring xG was just
+        # the original single-purpose scope surviving its own generalisation.
+        shots = match.get("shots") or {}
+        sot = match.get("shots_on_target") or {}
+        big = match.get("big_chances") or {}
+        has_any_stat = any(
+            block.get("home") is not None for block in (expected, shots, sot, big)
+        )
+        if score.get("home") is None or not has_any_stat:
             continue
         date = match["date"][:10]
         found = []
@@ -453,18 +464,28 @@ def resolve(league: str, raw: dict, names: dict[str, str]) -> pd.DataFrame | Non
             best, via_name = ranked[0][1], via_name + 1
         else:
             best = found[0]
+        def stat(block: dict, side: str) -> float | None:
+            value = block.get(side)
+            return float(value) if value is not None else None
+
         resolved.append(
             {
                 "FIXTURE_ID": best.FIXTURE_ID,
                 "TEAM_ID": best.TEAM_ID,
-                "XG_FOR": float(expected["home"]),
+                "XG_FOR": stat(expected, "home"),
+                "SHOTS_FOR": stat(shots, "home"),
+                "SOT_FOR": stat(sot, "home"),
+                "BIG_CHANCES_FOR": stat(big, "home"),
             }
         )
         resolved.append(
             {
                 "FIXTURE_ID": best.FIXTURE_ID,
                 "TEAM_ID": best.OPPONENT_ID,
-                "XG_FOR": float(expected["away"]),
+                "XG_FOR": stat(expected, "away"),
+                "SHOTS_FOR": stat(shots, "away"),
+                "SOT_FOR": stat(sot, "away"),
+                "BIG_CHANCES_FOR": stat(big, "away"),
             }
         )
 
