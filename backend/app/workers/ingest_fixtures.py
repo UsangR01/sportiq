@@ -27,6 +27,24 @@ FEATURE_WINDOW_MATCHES = 10
 # so a fresh backfill of the current window is needed once, not just going forward.
 FIXTURE_HISTORY_DAYS = 7
 
+# How old a prediction for an UPCOMING fixture may be before it is regenerated.
+#
+# This loop recomputes TeamFeatures on every run, so a team's form, Elo, streak and rest days
+# all move daily -- but a prediction used to be regenerated only when it did not exist or when
+# the model version changed. A fixture predicted the moment it was first ingested therefore
+# carried that number all the way to kickoff, however much better its inputs became.
+#
+# Measured 2026-08-18: Philadelphia Union v Inter Miami served away at 0.04, while the SAME
+# model version fed that fixture's current vector returns away 0.30. Every MLS card read 1X
+# above 90%, and had read the same three days earlier.
+#
+# 20 hours rather than 24 so a daily ingest at a slightly drifting hour still catches it, and
+# rather than "always" so a re-run within the same day queues nothing. The cost is one live H2H
+# call per upcoming fixture per day -- roughly 150 for football against API-Football's 75,000
+# daily allowance. The original "only if no prediction exists" guard was written when that
+# allowance was 7,500 and this arithmetic looked different.
+PREDICTION_MAX_AGE_HOURS = 20
+
 # Sports where a tied score cannot mean a draw. Tennis matches always have a winner, including
 # retirements, where equal COMPLETED sets (6-1, 6-7, 0-2 ret.) still leave a real result. NBA
 # games go to overtime rather than end level. For these, a tie means the winner is not
@@ -512,22 +530,33 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
         from app.workers.run_predictions import run_predictions
 
         active_version = await _active_model_version(db, sport.id)
+        cutoff = datetime.now(UTC) - timedelta(hours=PREDICTION_MAX_AGE_HOURS)
         for fixture in upcoming:
-            existing_version = (
-                (
-                    await db.execute(
-                        select(Prediction.model_version).where(Prediction.fixture_id == fixture.id)
-                    )
+            existing = (
+                await db.execute(
+                    select(Prediction.model_version, Prediction.created_at)
+                    .where(Prediction.fixture_id == fixture.id)
+                    .order_by(Prediction.created_at.desc())
                 )
-                .scalars()
-                .first()
-            )
-            stale = (
-                existing_version is not None
-                and active_version is not None
-                and existing_version != active_version
-            )
-            if existing_version is None or stale:
+            ).first()
+            if existing is None:
+                run_predictions.delay(str(fixture.id))
+                continue
+            existing_version, created_at = existing
+            superseded = active_version is not None and existing_version != active_version
+            # THE FEATURES MOVE EVERY DAY AND THE PREDICTION DID NOT. This loop rewrites
+            # TeamFeatures on every run, but until 2026-08-18 a prediction was only ever
+            # regenerated when it did not exist or when the MODEL VERSION changed -- so a
+            # fixture predicted the moment it was first ingested kept that number until
+            # kickoff, however much better its features became.
+            #
+            # Reported as MLS cards all showing 1X above 90%. Philadelphia Union v Inter
+            # Miami served away at 0.04; fed the SAME fixture's current vector, the same
+            # model version returns away 0.30. Nothing was wrong with the model or the
+            # features — only with when the prediction had been taken. It had looked the
+            # same three days earlier, which is the tell.
+            outdated = created_at is not None and created_at < cutoff
+            if superseded or outdated:
                 run_predictions.delay(str(fixture.id))
 
         await _queue_kickoff_reminders(db, upcoming)
