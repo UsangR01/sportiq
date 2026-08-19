@@ -44,6 +44,9 @@ function dayBounds(date: Date): { from: string; to: string } {
 interface LeagueSection {
   title: string;
   slug: string;
+  /** The real league slug (null for tennis tournament groups) — lets the header show a
+   * competition badge (UEFA) instead of a country flag where one exists. */
+  leagueSlug: string | null;
   country: string | null;
   /** Court surface (Hard/Clay/Grass) — tennis only, shown alongside the tournament name. */
   surface: string | null;
@@ -81,6 +84,7 @@ function groupByLeague(fixtures: FixtureSummary[]): LeagueSection[] {
       section = {
         title: groupByTournament ? fixture.tournament_name! : fixture.league_name,
         slug: key,
+        leagueSlug: groupByTournament ? null : fixture.league_slug,
         country: groupByTournament
           ? countryForTournamentLocation(fixture.tournament_location)
           : fixture.league_country,
@@ -221,7 +225,7 @@ export default function PicksScreen() {
         renderSectionHeader={({ section }) => (
           <View className="mb-2 mt-3 flex-row items-center bg-white dark:bg-black">
             <View className="mr-2">
-              <CountryFlag country={section.country} size={24} />
+              <CountryFlag country={section.country} leagueSlug={section.leagueSlug} size={24} />
             </View>
             <View className="flex-1">
               {/* Says outright that these matches have no confirmed time, so the day they

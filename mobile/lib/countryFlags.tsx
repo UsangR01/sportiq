@@ -57,6 +57,19 @@ const COUNTRY_FLAG_IMAGES: Record<string, number> = {
   "Hong Kong": require("../assets/flags/hongkong.png"),
 };
 
+// Competition badges for leagues that aren't national — the UEFA club competitions. Their
+// League rows carry country "Europe", but an EU flag says only "somewhere in Europe" while
+// users navigate their betting apps by the competition badge itself (per direct user request).
+// Sourced from API-Football's own media CDN (media.api-sports.io/football/leagues/{id}.png —
+// the same provider IDs as app/adapters/api_football.py's LEAGUE_IDS: ucl=2, uel=3, uecl=848),
+// bundled locally like the flags. Keyed by league slug, which is stable and ours, not by
+// country, which all three competitions share.
+const COMPETITION_LOGO_IMAGES: Record<string, number> = {
+  ucl: require("../assets/leagues/ucl.png"),
+  uel: require("../assets/leagues/uel.png"),
+  uecl: require("../assets/leagues/uecl.png"),
+};
+
 /** Tennis tournament CITY -> country. BallDontLie exposes a tournament's `location` as a city
  * ("Montreal", "Indian Wells") and has NO country field at all, so this mapping has to live
  * client-side — it can't be read off the API.
@@ -153,7 +166,31 @@ const NORMALISED_COUNTRY_FLAGS: Record<string, number> = Object.fromEntries(
   Object.entries(COUNTRY_FLAG_IMAGES).map(([name, image]) => [normaliseCountry(name), image])
 );
 
-export function CountryFlag({ country, size = 24 }: { country: string | null; size?: number }) {
+export function CountryFlag({
+  country,
+  leagueSlug = null,
+  size = 24,
+}: {
+  country: string | null;
+  /** When set and the league has a competition badge (UEFA competitions), the badge wins over
+   * the country flag. */
+  leagueSlug?: string | null;
+  size?: number;
+}) {
+  const logo = leagueSlug ? COMPETITION_LOGO_IMAGES[leagueSlug] : undefined;
+  if (logo) {
+    // Unlike flags, a logo must NEVER be cover-cropped (it has a shape, not an edge-to-edge
+    // field), so it contain-scales inside the same square every flag occupies. The white tile
+    // behind it is load-bearing: these are dark marks on a transparent background, invisible
+    // against the dark-mode header without it.
+    return (
+      <View
+        style={{ width: size, height: size, borderRadius: 3, backgroundColor: "#fff", padding: 2 }}
+      >
+        <Image source={logo} style={{ width: "100%", height: "100%" }} resizeMode="contain" />
+      </View>
+    );
+  }
   const source = country
     ? (COUNTRY_FLAG_IMAGES[country] ?? NORMALISED_COUNTRY_FLAGS[normaliseCountry(country)])
     : undefined;
