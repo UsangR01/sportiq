@@ -56,26 +56,64 @@ Missing data is represented as None throughout (never a fabricated neutral value
 nba_features.py's own rationale exactly.
 """
 
+import math
 import os
 from datetime import date
 
 import pandas as pd
 
-FEATURE_NAMES = (
-    "rank_diff",
-    "form_win_rate_home",
-    "form_win_rate_away",
-    "days_since_last_match_home",
-    "days_since_last_match_away",
-    "win_streak_home",
-    "win_streak_away",
-    "h2h_win_rate_home",
-    "h2h_win_rate_surface_home",
-    "surface_win_rate_home",
-    "surface_win_rate_away",
-    "surface_streak_home",
-    "surface_streak_away",
-    "moneyline_implied_prob_home",
+# EXPERIMENT TOGGLE, DEFAULT OFF BECAUSE THE EXPERIMENT FAILED. Set
+# SPORTIQ_TENNIS_RANK_SCALE_FEATURES=1 to re-enable rank_position_diff and
+# rank_log_points_ratio for a future arm.
+#
+# These two were built 2026-08-19 to fix a real, measured defect: the model agrees with "back
+# the higher-ranked player" 88.4% of the time and 100% of the time once the ranking-points gap
+# passes 2,000, because rank_diff is a RAW POINTS SUBTRACTION and points are non-linear in
+# position (ten places costs 8,720 points at #1 and 119 at #50). The hypothesis was that
+# scale-corrected rank signals would let form compete where the gap is genuinely small.
+#
+# THE HYPOTHESIS IS DEAD. Measured against a pre-registered bar (train_tennis.py), everything
+# else identical and seeded:
+#
+#                          baseline (14)   treatment (16)   bar
+#     ranking gap             +2.15pp         +1.77pp       >= +3.15pp   FAIL (got worse)
+#     RPS                      0.2275          0.2302       <= 0.2295    FAIL
+#     accuracy                 0.6377          0.6338       >= 0.6327    pass
+#     agreement (diagnostic)    87.8%           88.2%        --          rose, did not fall
+#
+# Reverted by the letter of the pre-registration. The defect is REAL and remains unfixed --
+# what is now known is that re-scaling the ranking signal is not the fix, so a future attempt
+# should target something else (the honest candidates: features the ranking cannot contain at
+# all, such as opponent-adjusted recent form or fatigue within a tournament).
+#
+# Safe as an env toggle only because app/models_ml/tennis.py reads feature_names FROM THE
+# ARTEFACT rather than from this tuple, so a served model always consumes the vector it was
+# trained on. Always pass --no-activate when running an arm regardless: this project has twice
+# had an experiment's losing arm promote itself, once leaving a sport with no active model at
+# all.
+_RANK_SCALE_FEATURES = os.environ.get("SPORTIQ_TENNIS_RANK_SCALE_FEATURES", "0") != "0"
+
+FEATURE_NAMES = tuple(
+    name
+    for name in (
+        "rank_diff",
+        "rank_position_diff",
+        "rank_log_points_ratio",
+        "form_win_rate_home",
+        "form_win_rate_away",
+        "days_since_last_match_home",
+        "days_since_last_match_away",
+        "win_streak_home",
+        "win_streak_away",
+        "h2h_win_rate_home",
+        "h2h_win_rate_surface_home",
+        "surface_win_rate_home",
+        "surface_win_rate_away",
+        "surface_streak_home",
+        "surface_streak_away",
+        "moneyline_implied_prob_home",
+    )
+    if _RANK_SCALE_FEATURES or name not in ("rank_position_diff", "rank_log_points_ratio")
 )
 
 # MEASURED 2026-08-13, having been inherited rather than chosen: this was 10 purely because
@@ -99,6 +137,39 @@ FEATURE_NAMES = (
 # because serving reads this default back at 10, it would have fed 10-match form into a model
 # trained on 5.
 LAST_N_FORM = int(os.environ.get("SPORTIQ_TENNIS_LAST_N_FORM", "10"))
+
+
+def _rank_position_diff(
+    home_rank_position: float | None, away_rank_position: float | None
+) -> float | None:
+    """Ranking-PLACE difference, positive when the home player is ranked better (a LOWER
+    position number). Linear in places, which raw points are emphatically not.
+
+    Added 2026-08-19 alongside rank_log_points_ratio. rank_diff (a raw points subtraction)
+    was measured to make the model agree with "back the higher-ranked player" 88.4% of the
+    time and 100% of the time once the gap passed 2,000 points -- because ranking points are
+    non-linear in position: dropping ten places costs 8,720 points at #1 and 119 at #50, so
+    one number cannot separate "#3 v #5" from "#40 v #90". See train_tennis.py's
+    pre-registration block for the full measurement and the adoption criteria."""
+    if home_rank_position is None or away_rank_position is None:
+        return None
+    return float(away_rank_position - home_rank_position)
+
+
+def _rank_log_points_ratio(
+    home_rank_points: float | None, away_rank_points: float | None
+) -> float | None:
+    """log(home points / away points) — positive when the home player is stronger.
+
+    Compresses the points scale so a given ratio means the same thing at the top of the
+    field as in the hundreds, where a raw subtraction does not. Requires both sides strictly
+    positive: an unranked player carries 0 or None points and log(0) is undefined, so this
+    returns None rather than fabricating an extreme value."""
+    if not home_rank_points or not away_rank_points:
+        return None
+    if home_rank_points <= 0 or away_rank_points <= 0:
+        return None
+    return float(math.log(home_rank_points) - math.log(away_rank_points))
 
 
 def _rest_days(prior_sorted_desc: pd.DataFrame, as_of_date: date) -> float | None:
@@ -204,6 +275,8 @@ def assemble_from_game_log(
     home_rank_points: float | None = None,
     away_rank_points: float | None = None,
     moneyline_implied_prob_home: float | None = None,
+    home_rank_position: float | None = None,
+    away_rank_position: float | None = None,
 ) -> dict:
     """games_df: one row per player per match (PLAYER_ID, GAME_DATE as a real date, WL
     ("W"/"L"), OPPONENT_ID, SURFACE) — ml/training/collect_tennis_data.py's shape.
@@ -245,6 +318,8 @@ def assemble_from_game_log(
 
     return {
         "rank_diff": rank_diff,
+        "rank_position_diff": _rank_position_diff(home_rank_position, away_rank_position),
+        "rank_log_points_ratio": _rank_log_points_ratio(home_rank_points, away_rank_points),
         "form_win_rate_home": _last_n_win_rate(home_prior),
         "form_win_rate_away": _last_n_win_rate(away_prior),
         "days_since_last_match_home": _rest_days(home_prior, as_of_date),
@@ -355,6 +430,14 @@ async def assemble_from_live_db(db, fixture, home_features, away_features) -> di
 
     return {
         "rank_diff": rank_diff,
+        "rank_position_diff": _rank_position_diff(
+            home_features.rank_position if home_features else None,
+            away_features.rank_position if away_features else None,
+        ),
+        "rank_log_points_ratio": _rank_log_points_ratio(
+            home_features.rank_points if home_features else None,
+            away_features.rank_points if away_features else None,
+        ),
         "form_win_rate_home": home_features.form_pts_5 if home_features else None,
         "form_win_rate_away": away_features.form_pts_5 if away_features else None,
         "days_since_last_match_home": rest_days_home,

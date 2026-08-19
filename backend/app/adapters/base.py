@@ -112,6 +112,12 @@ class TeamStats:
     # (unlike football, which added one later) — simpler and more honest than approximating a
     # rating system when a real one already exists. None for every other sport.
     rank_points: float | None = None
+    # Tennis only — the player's actual ATP/WTA POSITION (#1, #2, ...), returned by the same
+    # /rankings response that already carried points, so it costs no extra call. Kept
+    # alongside points rather than replacing them because points are non-linear in position
+    # (ten places costs 8,720 points at #1 and 119 at #50), which measurably capped how far
+    # form could move a pick — see train_tennis.py's pre-registration block.
+    rank_position: float | None = None
 
 
 @dataclass(frozen=True)

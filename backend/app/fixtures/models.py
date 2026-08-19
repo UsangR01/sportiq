@@ -189,6 +189,10 @@ class TeamFeatures(Base):
     # every other TeamFeatures column is — it's fetched live in assemble_from_live_db instead,
     # the same way NBA's h2h_win_rate_home is a live call rather than a cached column.
     rank_points: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # The same player's ranking POSITION (see TeamStats.rank_position). Nullable with no
+    # backfill: predictions made before this column existed genuinely have no measurement,
+    # and inventing one retroactively is exactly what feature_completeness exists to expose.
+    rank_position: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class TeamKeyPlayer(Base):

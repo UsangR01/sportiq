@@ -120,6 +120,7 @@ MAX_PAGES = 150  # a full ATP season (main draw + qualifying across ~60 tourname
 # returned 500+ rows, so 150 pages * 100/page = up to 15,000 matches/season, comfortably above
 # any real season's total.
 
+RANK_COLUMNS = ["PLAYER_ID", "WEEK", "RANK_POINTS", "RANK_POSITION"]
 RANK_BATCH_SIZE = 100  # matches the API's own per_page ceiling (confirmed live/via the
 # official PDF) — the largest single /rankings?player_ids[]=...&date=... call the endpoint
 # reliably answers in one page.
@@ -295,6 +296,7 @@ async def collect_rank_points(games: pd.DataFrame, checkpoint_path: Path) -> pd.
         for i, week in enumerate(weeks):
             player_ids = by_week[week]
             points_by_player: dict[str, float | None] = {}
+            rank_by_player: dict[str, float | None] = {}
             for batch in _chunk(player_ids, RANK_BATCH_SIZE):
                 response = await _get_with_retry(
                     client,
@@ -306,7 +308,14 @@ async def collect_rank_points(games: pd.DataFrame, checkpoint_path: Path) -> pd.
                     },
                 )
                 for entry in response.json().get("data", []):
-                    points_by_player[str(entry["player"]["id"])] = entry.get("points")
+                    pid = str(entry["player"]["id"])
+                    points_by_player[pid] = entry.get("points")
+                    # RANK (the player's actual ATP position) is returned by the SAME response
+                    # that already carried points -- no extra call. It is collected because
+                    # raw points are wildly non-linear in position (ten places costs 8,720
+                    # points at #1 and 119 at #50), which measurably capped how far form could
+                    # ever move a pick; see train_tennis.py's pre-registration block.
+                    rank_by_player[pid] = entry.get("rank")
                 await asyncio.sleep(RANK_REQUEST_DELAY_SECONDS)
 
             for player_id in player_ids:
@@ -315,16 +324,15 @@ async def collect_rank_points(games: pd.DataFrame, checkpoint_path: Path) -> pd.
                         "PLAYER_ID": player_id,
                         "WEEK": week,
                         "RANK_POINTS": points_by_player.get(player_id),
+                        "RANK_POSITION": rank_by_player.get(player_id),
                     }
                 )
 
             if (i + 1) % 10 == 0 or (i + 1) == len(weeks):
                 print(f"  fetched {i + 1}/{len(weeks)} weeks")
-                pd.DataFrame(rows, columns=["PLAYER_ID", "WEEK", "RANK_POINTS"]).to_parquet(
-                    checkpoint_path, index=False
-                )
+                pd.DataFrame(rows, columns=RANK_COLUMNS).to_parquet(checkpoint_path, index=False)
 
-    return pd.DataFrame(rows, columns=["PLAYER_ID", "WEEK", "RANK_POINTS"])
+    return pd.DataFrame(rows, columns=RANK_COLUMNS)
 
 
 def main() -> None:

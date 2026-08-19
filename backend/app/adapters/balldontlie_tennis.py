@@ -461,12 +461,30 @@ def _filter_meetings_vs_opponent(
     ]
 
 
-def _latest_rank_points(rankings: list[dict]) -> float | None:
+def _latest_ranking(rankings: list[dict]) -> dict | None:
     if not rankings:
         return None
-    latest = max(rankings, key=lambda r: r.get("ranking_date") or "")
+    return max(rankings, key=lambda r: r.get("ranking_date") or "")
+
+
+def _latest_rank_points(rankings: list[dict]) -> float | None:
+    latest = _latest_ranking(rankings)
+    if latest is None:
+        return None
     points = latest.get("points")
     return float(points) if points is not None else None
+
+
+def _latest_rank_position(rankings: list[dict]) -> float | None:
+    """The player's actual ATP/WTA position, off the SAME /rankings row that carries points
+    (confirmed live: the response has both `rank` and `points`), so this costs no extra call.
+    None for an unranked player rather than a fabricated sentinel — a made-up position would
+    read as a real one to every downstream feature."""
+    latest = _latest_ranking(rankings)
+    if latest is None:
+        return None
+    rank = latest.get("rank")
+    return float(rank) if rank is not None else None
 
 
 def _compute_team_stats(
@@ -502,6 +520,7 @@ def _compute_team_stats(
         win_streak=win_streak,
         losing_streak=losing_streak,
         rank_points=_latest_rank_points(rankings),
+        rank_position=_latest_rank_position(rankings),
     )
 
 

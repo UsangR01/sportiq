@@ -59,6 +59,79 @@ N_OPTUNA_TRIALS = 50
 # itself is arbitrary, its fixedness is not.
 RANDOM_SEED = 20260811
 
+# === PRE-REGISTERED 2026-08-19, BEFORE THE RANK-SCALE ARMS WERE RUN =========================
+#
+# THE DEFECT BEING FIXED, measured on the 2025 test season of the then-served model
+# (tennis_xgb_20260813165827) before any code changed:
+#
+#     agreement with "back the higher-ranked player"   88.4%   (n=3,902)
+#     model accuracy 64.20%   ranking baseline 62.22%          gap +1.98pp
+#
+#     rank gap          higher-ranked wins   model acc   agreement
+#     0-250   n=1307          55.4%            59.4%        74%
+#     250-500 n= 794          56.5%            58.4%        91%
+#     500-1k  n= 640          63.4%            64.1%        96%
+#     1k-2k   n= 541          68.6%            69.5%        98%
+#     2k+     n= 620          77.1%            77.1%       100%   <- never deviates at all
+#
+# CAUSE: rank_diff is a RAW POINTS SUBTRACTION, and ranking points are wildly non-linear in
+# position. Measured on the live table: dropping ten places costs 8,720 points at #1 but 119
+# points at #50 -- 73x. One number therefore cannot distinguish "#3 v #5" from "#40 v #90",
+# and past a ~250-point gap NO amount of form advantage flips the pick (an extreme form
+# reversal moves the probability 10-18 points, never across 0.5). The form/streak/surface
+# features are NOT missing at serving time -- verified live against BallDontLie -- and the
+# model does respond to them (0.31 -> 0.69 with rank held equal). They are simply outvoted.
+#
+# THE ARMS: baseline (14 features, unchanged) against treatment (16 -- adding
+# rank_position_diff, linear in ranking PLACES, and rank_log_points_ratio, a compressed
+# points signal). Both seeded, both run with --no-activate, everything else identical.
+#
+# ADOPT ONLY IF ALL THREE HOLD:
+#   PRIMARY   ranking_baseline_gap improves by >= 1.0pp. This is the metric the defect is
+#             ABOUT -- a model that merely reproduces the ranking table has no edge to sell,
+#             and it is what a user experiences as "it always just picks the favourite".
+#   GUARD     RPS (brier) must not worsen by more than 0.0020. Deviating more is only progress
+#             if the probabilities stay honest.
+#   GUARD     test accuracy must not fall by more than 0.5pp.
+#
+# NOT A CRITERION, reported as a diagnostic only: agreement with the ranking baseline. Lower
+# agreement is not by itself good -- deviating and being WRONG is worse than deferring. The
+# gap already encodes "deviates AND is right", which is why it is primary and this is not.
+#
+# Tolerances are stated up front deliberately: the rolling-form pre-registration on this
+# project specified none, so a 0.05% move read as failure and had to be overridden after the
+# fact. See CLAUDE.md.
+#
+# --- RESULT, 2026-08-19: FAILED, REVERTED ---------------------------------------------------
+#
+#                          baseline (14)   treatment (16)   bar
+#     ranking gap             +2.15pp         +1.77pp       >= +3.15pp   FAIL (moved BACKWARDS)
+#     RPS                      0.2275          0.2302       <= 0.2295    FAIL
+#     accuracy                 0.6377          0.6338       >= 0.6327    pass
+#     agreement (diagnostic)    87.8%           88.2%        --          ROSE, did not fall
+#
+# Two of three criteria failed including the primary, so the arm was reverted by the letter --
+# SPORTIQ_TENNIS_RANK_SCALE_FEATURES now defaults OFF and the served vector is 14 again.
+# Baseline reproduced the incumbent exactly (0.6377 / 0.2275 / +2.15pp), so this is a real
+# comparison rather than run-to-run noise. Both arms ran --no-activate and the incumbent
+# tennis_xgb_v20260813023503 was never disturbed.
+#
+# WHAT THIS RULES OUT, which is the value of the negative result: the model's deference to
+# ranking is NOT an artefact of the points scale. Given a linear-in-places signal and a
+# compressed-ratio signal, it deviated slightly LESS, not more. So ranking points are not
+# merely a coarse proxy the model is forced to lean on -- at wide gaps they are genuinely the
+# best information available, which the reality column already said (the higher-ranked player
+# really does win 77.1% of matches past a 2,000-point gap).
+#
+# THE DEFECT IS REAL AND REMAINS OPEN. Where the model SHOULD be able to add value is the
+# 0-250 band, which is a third of all matches and where the higher-ranked player wins only
+# 55.4%; the model manages 59.3% there. A future attempt should carry information ranking
+# CANNOT contain rather than re-expressing what it already does -- opponent-adjusted recent
+# form (beating a top-10 player counts more than beating #300, which a flat win rate ignores),
+# or within-tournament fatigue (sets/minutes played this week). Neither is collected today.
+# ===========================================================================================
+
+
 
 def _iso_monday(d):
     return d - timedelta(days=d.weekday())
@@ -69,9 +142,24 @@ def build_training_examples(games: pd.DataFrame, rank_points: pd.DataFrame) -> p
     assemble_from_game_log (the same function run_predictions.py's live path calls through
     assemble_from_live_db), label = 1 if the home-slot player won."""
     rank_lookup = {(row.PLAYER_ID, row.WEEK): row.RANK_POINTS for row in rank_points.itertuples()}
+    # RANK_POSITION was added to the collector 2026-08-19. Tolerated as absent so an older
+    # parquet still trains (the two position-scaled features simply score as missing, which
+    # XGBoost handles) rather than crashing — the same _load_optional philosophy
+    # train_football.py applies to a league with no corners collected yet.
+    has_position = "RANK_POSITION" in rank_points.columns
+    position_lookup = (
+        {(row.PLAYER_ID, row.WEEK): row.RANK_POSITION for row in rank_points.itertuples()}
+        if has_position
+        else {}
+    )
+    if not has_position:
+        print("  rank parquet has no RANK_POSITION column — position features will be missing")
 
     def rank_points_for(player_id: str, game_date) -> float | None:
         return rank_lookup.get((player_id, _iso_monday(game_date)))
+
+    def rank_position_for(player_id: str, game_date) -> float | None:
+        return position_lookup.get((player_id, _iso_monday(game_date)))
 
     rows = []
     for match_id, group in games.groupby("MATCH_ID"):
@@ -95,6 +183,8 @@ def build_training_examples(games: pd.DataFrame, rank_points: pd.DataFrame) -> p
             home_rank_points=rank_points_for(home_player, game_date),
             away_rank_points=rank_points_for(away_player, game_date),
             moneyline_implied_prob_home=None,
+            home_rank_position=rank_position_for(home_player, game_date),
+            away_rank_position=rank_position_for(away_player, game_date),
         )
         features["label"] = 1 if home_row["WL"] == "W" else 0
         features["season"] = season
@@ -159,6 +249,38 @@ def _ranking_baseline_report(test_df, predicted_labels, model_accuracy: float) -
         f"gap={(pooled_model - pooled_base) * 100:+.2f}pp"
     )
     print(f"  (model accuracy over ALL test rows, including unranked: {model_accuracy:.4f})")
+
+    # DIAGNOSTIC, EXPLICITLY NOT AN ADOPTION CRITERION (see the pre-registration block above):
+    # how often the model simply reproduces the ranking table, overall and by how wide the
+    # gap is. Reported because a user asked why picks "always favour the higher-ranked player"
+    # and the answer turned out to be measurable -- 88.4% agreement, rising to 100% past a
+    # 2,000-point gap. Lower agreement is NOT by itself an improvement: deviating and being
+    # wrong is worse than deferring, which is what ranking_baseline_gap above already scores.
+    rated["baseline_pick"] = (rated["rank_diff"] > 0).astype(int)
+    rated["model_pick"] = pd.Series(predicted_labels).reset_index(drop=True)[rated.index]
+    agreement = float((rated["model_pick"] == rated["baseline_pick"]).mean())
+    metrics["ranking_baseline_agreement"] = agreement
+    disagreements = rated[rated["model_pick"] != rated["baseline_pick"]]
+    right_on_deviations = (
+        float(disagreements["model_correct"].mean()) if len(disagreements) else float("nan")
+    )
+    print(
+        f"  agreement with the ranking table: {agreement * 100:.1f}%  "
+        f"({len(disagreements)} deviations, model right on "
+        f"{right_on_deviations * 100:.1f}% of them)"
+    )
+    gap_bands = [(0, 250), (250, 500), (500, 1000), (1000, 2000), (2000, float("inf"))]
+    print("  by ranking-points gap:")
+    for lo, hi in gap_bands:
+        band = rated[(rated["rank_diff"].abs() >= lo) & (rated["rank_diff"].abs() < hi)]
+        if len(band) < 30:
+            continue
+        print(
+            f"    {lo:>5}-{hi if hi != float('inf') else 'inf':<5} n={len(band):<5} "
+            f"model={band['model_correct'].mean():.4f} "
+            f"baseline={band['baseline_correct'].mean():.4f} "
+            f"agreement={(band['model_pick'] == band['baseline_pick']).mean() * 100:.0f}%"
+        )
 
     if "surface" in rated.columns:
         # Stripped defensively: the collected log holds both "Grass" and "Grass " and an

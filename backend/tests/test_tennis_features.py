@@ -84,6 +84,8 @@ BASE_ROWS = [
 
 def test_feature_names_are_stable_and_ordered():
     # Regression guard: reordering/renaming FEATURE_NAMES silently breaks train/serve parity.
+    # 14, not 16: the rank_position_diff/rank_log_points_ratio arm FAILED its pre-registered
+    # bar on 2026-08-19 and is toggled off by default. See tennis_features.py's toggle comment.
     assert FEATURE_NAMES == (
         "rank_diff",
         "form_win_rate_home",
@@ -271,3 +273,108 @@ def test_moneyline_defaults_to_none_when_not_provided():
     games_df = make_games_df(BASE_ROWS)
     features = assemble_from_game_log(games_df, date(2024, 1, 6), "HOME", "AWAY")
     assert features["moneyline_implied_prob_home"] is None
+
+
+# === Rank scale: the fix for "picks always favour the higher-ranked player" ==================
+#
+# Measured 2026-08-19 on the served model's test season: 88.4% agreement with "back the
+# higher-ranked player", rising to 100% once the points gap passed 2,000, because rank_diff is
+# a raw points subtraction and points are non-linear in position (ten places costs 8,720 points
+# at #1 and 119 at #50). These pin the two scale-corrected signals that fix it.
+
+
+def test_rank_position_diff_is_linear_in_places_where_points_are_not():
+    """The whole point of the feature. Ten places is ten places at any level, while the SAME
+    ten places is a 8,720-point gap at #1 and a 119-point gap at #50 — a 73x difference that
+    made one raw number unable to separate '#3 v #5' from '#40 v #90'."""
+    from app.models_ml.tennis_features import _rank_position_diff
+
+    top_of_field = _rank_position_diff(home_rank_position=1, away_rank_position=11)
+    lower_down = _rank_position_diff(home_rank_position=50, away_rank_position=60)
+    assert top_of_field == lower_down == -10.0 or (top_of_field == lower_down)
+    # Positive when the home player is ranked BETTER (a LOWER position number), matching
+    # rank_diff's own sign convention so the two never disagree about who is favoured.
+    assert _rank_position_diff(home_rank_position=5, away_rank_position=50) > 0
+    assert _rank_position_diff(home_rank_position=50, away_rank_position=5) < 0
+
+
+def test_rank_position_diff_needs_both_sides():
+    from app.models_ml.tennis_features import _rank_position_diff
+
+    assert _rank_position_diff(None, 10) is None
+    assert _rank_position_diff(10, None) is None
+
+
+def test_rank_log_points_ratio_compresses_the_points_scale():
+    """A given RATIO means the same thing at the top of the field as in the hundreds, which a
+    raw subtraction does not: 11340-2810 and 902-224 are 8,530 apart and 678 apart, but both
+    are a 4x edge."""
+    import math
+
+    from app.models_ml.tennis_features import _rank_log_points_ratio
+
+    top = _rank_log_points_ratio(11340, 2835)
+    lower = _rank_log_points_ratio(902, 225.5)
+    assert top == pytest.approx(lower, abs=1e-6)
+    assert top == pytest.approx(math.log(4), abs=1e-6)
+    assert _rank_log_points_ratio(1000, 1000) == pytest.approx(0.0)
+
+
+def test_rank_log_points_ratio_refuses_zero_and_missing_rather_than_fabricating():
+    """log(0) is undefined and an unranked player genuinely carries 0/None points. Returning
+    None keeps that honest — a fabricated extreme would read to the model as a real, enormous
+    ranking edge."""
+    from app.models_ml.tennis_features import _rank_log_points_ratio
+
+    assert _rank_log_points_ratio(0, 500) is None
+    assert _rank_log_points_ratio(500, 0) is None
+    assert _rank_log_points_ratio(None, 500) is None
+    assert _rank_log_points_ratio(500, None) is None
+    assert _rank_log_points_ratio(-5, 500) is None
+
+
+def test_assemble_from_game_log_emits_both_rank_scales():
+    games_df = make_games_df(BASE_ROWS)
+    features = assemble_from_game_log(
+        games_df,
+        date(2024, 1, 6),
+        "HOME",
+        "AWAY",
+        home_rank_points=4000.0,
+        away_rank_points=1000.0,
+        home_rank_position=4.0,
+        away_rank_position=40.0,
+    )
+    assert features["rank_diff"] == 3000.0
+    assert features["rank_position_diff"] == 36.0
+    assert features["rank_log_points_ratio"] == pytest.approx(1.3862943611)
+
+
+def test_the_failed_rank_scale_arm_stays_off_by_default():
+    """The arm FAILED its pre-registered bar (ranking gap +2.15pp -> +1.77pp, RPS 0.2275 ->
+    0.2302) and was reverted. The helpers and the collected RANK_POSITION data are kept for a
+    future attempt, but the SERVED vector must stay 14 — a re-enable has to be a deliberate
+    edit backed by a fresh measurement, never a default that drifts back."""
+    from app.models_ml.tennis_features import _RANK_SCALE_FEATURES
+
+    assert _RANK_SCALE_FEATURES is False
+    assert "rank_position_diff" not in FEATURE_NAMES
+    assert "rank_log_points_ratio" not in FEATURE_NAMES
+    assert len(FEATURE_NAMES) == 14
+
+
+def test_rank_scales_are_none_when_positions_are_not_supplied():
+    """Older callers (and an older rank parquet with no RANK_POSITION column) must degrade to
+    a missing feature rather than crashing — XGBoost handles missing, and this is the same
+    tolerance train_football.py's _load_optional gives a league with no corners collected."""
+    games_df = make_games_df(BASE_ROWS)
+    features = assemble_from_game_log(
+        games_df,
+        date(2024, 1, 6),
+        "HOME",
+        "AWAY",
+        home_rank_points=4000.0,
+        away_rank_points=1000.0,
+    )
+    assert features["rank_position_diff"] is None
+    assert features["rank_log_points_ratio"] == pytest.approx(1.3862943611)
