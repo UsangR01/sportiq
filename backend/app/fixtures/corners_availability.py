@@ -58,46 +58,13 @@ LEAGUES_WITHOUT_PROMPT_CORNERS = frozenset(
     }
 )
 
-# A SECOND, SEPARATE reason to withhold corners: no demonstrated skill — measured 2026-08-19
-# after the UEFA qualifiers went 5/13 on over-9.5 picks that claimed ~65%.
-#
-# The live mechanism: cup clubs have almost no fixture history in our own database, so the
-# rolling corners features are None at serving time and the regressors fall back toward the
-# POOLED mean — every UEFA fixture was predicted 10.7-11.5 total corners, near-constant, in
-# competitions whose real average is ~9.3-9.5 (5 seasons of training data; live settled UECL
-# mean 9.29, over-9.5 rate 0.43). The picks were the pooled base rate wearing a prediction,
-# aimed 1.5 corners high.
-#
-# But the deeper measurement is what keeps all three cups here rather than just waiting for
-# history to accumulate: on the served model's own held-out test split, where the rolling
-# features WERE populated, cup corners still show no signal —
-#
-#     ucl   n=128  r=+0.020  CI [-0.154, +0.193]
-#     uel   n=164  r=-0.074  CI [-0.225, +0.080]
-#     uecl  n=139  r=+0.049  CI [-0.119, +0.214]
-#     (epl, same parquet, for scale: r=+0.136 CI [+0.035, +0.235])
-#
-# So the lift condition is SKILL, not data supply: re-measure on a future served model's
-# parquet (and live once n permits) and remove a cup only when its interval clears zero with
-# a meaningful r — the same earn-your-place polarity as goals_availability.py.
-LEAGUES_WITHOUT_DEMONSTRATED_CORNERS_SIGNAL = frozenset(
-    {
-        "ucl",
-        "uel",
-        "uecl",
-    }
-)
-
 
 def offers_corners(league_slug: str | None) -> bool:
-    """False for a league that cannot settle corners at full time (supply), OR whose corners
-    predictions measured no signal (skill) — two sets, two lift conditions, see each above.
+    """False only for a league measured as unable to settle corners at full time.
 
-    An unknown league returns True: the supply default is benefit of the doubt, and the skill
-    set is deliberately an explicit denylist rather than an allowlist because corners signal
-    was demonstrated pooled (r=+0.288); the cups are the measured exception, not the rule."""
+    An unknown league returns True: a newly-added competition has no measurement yet, and
+    silently withholding a market from it would be a worse default than showing it and finding
+    out. The measurement script is what moves a league into the set."""
     if not league_slug:
         return True
-    if league_slug in LEAGUES_WITHOUT_DEMONSTRATED_CORNERS_SIGNAL:
-        return False
     return league_slug not in LEAGUES_WITHOUT_PROMPT_CORNERS
