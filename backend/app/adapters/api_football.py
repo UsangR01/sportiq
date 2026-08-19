@@ -664,17 +664,29 @@ class APIFootballAdapter(DataSourceAdapter):
             }
 
             for fixture_date in dates:
-                odds_response = await client.get(
-                    "/odds",
-                    params={
-                        "league": league_id,
-                        "season": season,
-                        "date": fixture_date.isoformat(),
-                    },
-                )
-                odds_response.raise_for_status()
-                for row in _api_response(odds_response).get("response", []):
-                    payloads.extend(_map_odds_response_to_payloads(row))
+                # /odds paginates at 10 fixtures per page, and that stayed latent for a year:
+                # a domestic league fits one round's matchday inside a single page (the EPL's
+                # 10 sits exactly at the limit), so page 1 was always everything — until a
+                # 24-fixture UECL matchday silently dropped 14 fixtures' odds (found live
+                # 2026-08-19: 8 UEFA picks priced, 6 not, split exactly at the page boundary).
+                page = 1
+                while True:
+                    odds_response = await client.get(
+                        "/odds",
+                        params={
+                            "league": league_id,
+                            "season": season,
+                            "date": fixture_date.isoformat(),
+                            "page": page,
+                        },
+                    )
+                    odds_response.raise_for_status()
+                    body = _api_response(odds_response)
+                    for row in body.get("response", []):
+                        payloads.extend(_map_odds_response_to_payloads(row))
+                    if page >= int((body.get("paging") or {}).get("total") or 1):
+                        break
+                    page += 1
 
         return payloads
 

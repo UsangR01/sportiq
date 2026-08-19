@@ -759,3 +759,65 @@ def test_extra_time_finishes_settle_on_the_ninety_minute_score():
         fixture("FT", {"home": 3, "away": 0}, {"home": 3, "away": 0}), "epl"
     )
     assert (ft.home_score, ft.away_score) == (3, 0)
+
+
+@pytest.mark.asyncio
+async def test_fetch_odds_walks_every_page(monkeypatch):
+    """/odds paginates at 10 fixtures per page, and reading only page 1 stayed latent for as
+    long as every league fit one matchday in a single page. A 24-fixture UECL matchday
+    silently dropped 14 fixtures' odds (live, 2026-08-19) — the cards split priced/unpriced
+    exactly at the page boundary. This drives fetch_odds through a fake client whose /odds
+    answers span two pages and asserts both pages' rows are ingested, and that the loop stops
+    at paging.total rather than probing a third page."""
+    from app.adapters.api_football import APIFootballAdapter
+
+    odds_row = {**ODDS_ROW}
+    requested_pages: list[int] = []
+
+    class _Response:
+        def __init__(self, body):
+            self._body = body
+            self.status_code = 200
+
+        def json(self):
+            return self._body
+
+        def raise_for_status(self):
+            return None
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def get(self, path, params=None):
+            if path == "/fixtures":
+                return _Response(
+                    {"errors": [], "response": [{"fixture": {"date": "2026-08-20T17:00:00Z"}}]}
+                )
+            assert path == "/odds"
+            page = params["page"]
+            requested_pages.append(page)
+            return _Response(
+                {
+                    "errors": [],
+                    "paging": {"current": page, "total": 2},
+                    "response": [odds_row],
+                }
+            )
+
+    adapter = APIFootballAdapter()
+    monkeypatch.setattr(adapter, "_client", lambda: _Client())
+
+    async def fake_season(client, league):
+        return 2026
+
+    monkeypatch.setattr("app.adapters.api_football.resolve_current_season", fake_season)
+
+    payloads = await adapter.fetch_odds(sport="football", league="uecl", days_ahead=3)
+
+    assert requested_pages == [1, 2], "must request exactly the pages paging.total advertises"
+    # ODDS_ROW maps to 3 payloads (see test_map_odds_response_to_payloads_real_book) per page.
+    assert len(payloads) == 6
