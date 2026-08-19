@@ -58,13 +58,32 @@ LEAGUES_WITHOUT_PROMPT_CORNERS = frozenset(
     }
 )
 
+# A SECOND, SEPARATE reason to withhold corners: measured no skill. Scoped to the Conference
+# League alone by explicit product decision (2026-08-19), after its qualifier corners picks
+# went 5/13 on over-9.5 claims of ~65%. Two measurements behind it:
+#   - live: every UECL fixture was predicted a near-constant 10.7-11.5 total corners (cup
+#     clubs have no fixture history with us, so the rolling corners features are None and the
+#     regressors fall back toward the pooled mean) in a competition averaging ~9.4; settled
+#     UECL mean 9.29, over-9.5 rate 0.43;
+#   - held-out, features populated: uecl corners r=+0.049 CI [-0.119, +0.214] on the served
+#     model's test parquet — no signal even in training conditions.
+# Lift condition is SKILL, not history accumulating: re-measure on a future served model's
+# parquet and remove only if the interval clears zero with a meaningful r. The wider per-league
+# corners measurement (2026-08-19: pooled r=+0.093, zero of 22 leagues passing the goals bar)
+# is recorded in commit c7e7c2d if this ever needs to widen.
+LEAGUES_WITHOUT_DEMONSTRATED_CORNERS_SIGNAL = frozenset({"uecl"})
+
 
 def offers_corners(league_slug: str | None) -> bool:
-    """False only for a league measured as unable to settle corners at full time.
+    """False for a league measured as unable to settle corners at full time (supply), or
+    measured to have no corners skill (currently the Conference League alone) — two sets, two
+    lift conditions, see each above.
 
     An unknown league returns True: a newly-added competition has no measurement yet, and
     silently withholding a market from it would be a worse default than showing it and finding
-    out. The measurement script is what moves a league into the set."""
+    out. The measurement script is what moves a league into the supply set."""
     if not league_slug:
         return True
+    if league_slug in LEAGUES_WITHOUT_DEMONSTRATED_CORNERS_SIGNAL:
+        return False
     return league_slug not in LEAGUES_WITHOUT_PROMPT_CORNERS

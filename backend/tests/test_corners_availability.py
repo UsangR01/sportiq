@@ -35,7 +35,7 @@ def test_leagues_that_cannot_settle_corners_do_not_offer_them():
     re-measuring 6/6 prompt, and uel joined at 1/6 (qualifier clubs without prompt stats)."""
     for slug in ("veikkausliiga", "liga_i", "uel"):
         assert not offers_corners(slug), slug
-    for slug in ("czech_first", "ekstraklasa", "ucl", "uecl"):
+    for slug in ("czech_first", "ekstraklasa", "ucl"):
         assert offers_corners(slug), slug
 
 
@@ -84,3 +84,20 @@ def test_the_measurement_script_reads_the_same_constants():
         for alias in node.names
     }
     assert {"LEAGUES_WITHOUT_PROMPT_CORNERS", "MIN_PROMPT_CORNER_COVERAGE"} <= imported
+
+
+def test_the_conference_league_is_barred_for_absent_skill_not_supply():
+    """UECL settles corners promptly (6/6 measured) but its corners predictions carry no
+    signal: near-constant ~11 predicted in a ~9.4-corner competition live, r=+0.049 with a
+    zero-straddling CI on the held-out split, 5/13 over-9.5 picks won. Scoped to uecl alone by
+    explicit product decision — ucl keeps the market, and improving settlement supply must
+    never re-admit uecl on its own."""
+    from app.fixtures.corners_availability import (
+        LEAGUES_WITHOUT_DEMONSTRATED_CORNERS_SIGNAL,
+        LEAGUES_WITHOUT_PROMPT_CORNERS,
+    )
+
+    assert LEAGUES_WITHOUT_DEMONSTRATED_CORNERS_SIGNAL == {"uecl"}
+    assert not offers_corners("uecl")
+    assert offers_corners("ucl")
+    assert "uecl" not in LEAGUES_WITHOUT_PROMPT_CORNERS
