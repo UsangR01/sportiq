@@ -20,12 +20,21 @@ _model_runner = ModelRunner()
 # state — and is the trigger for the game-log fallback below. Deliberately narrow: one side
 # populated (an established club hosting a promoted one) is a REAL partial vector, exactly
 # what training saw for promoted sides, and must not trigger a rebuild.
+# elo_diff is DELIBERATELY NOT in this list, and it used to be — measured cost 2026-08-19:
+# scripts/seed_elo_from_game_log.py gave every big-league team a real five-season Elo, which
+# made elo_diff non-None on every fixture, which made this test read "real partial vector" and
+# SKIP the season-opener fallback that had been serving those exact leagues correctly the day
+# before. Result on production: 26 upcoming EPL/Serie A/Ligue 1 predictions built from vectors
+# that were empty except Elo (completeness 0.118), several with draw probabilities of 0.50 —
+# a value the real model practically never emits — and zero of them clearing the guards.
+# Seeded Elo is HISTORY, not evidence the current season has data; the season-data question is
+# answered by the rolling-form signals alone. A genuinely partial vector (one side has played,
+# attack/form real) still correctly blocks the fallback.
 _FOOTBALL_CORE_SIGNALS = (
     "attack_str_home",
     "attack_str_away",
     "form_pts_home",
     "form_pts_away",
-    "elo_diff",
 )
 
 

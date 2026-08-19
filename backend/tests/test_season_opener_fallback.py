@@ -38,7 +38,15 @@ def test_one_populated_side_does_not_trigger_a_rebuild():
     training saw for promoted sides. Rebuilding it would replace honest asymmetry with a
     second opinion."""
     assert not _football_vector_is_empty(vector(attack_str_home=1.5))
-    assert not _football_vector_is_empty(vector(elo_diff=32.0))
+    assert not _football_vector_is_empty(vector(form_pts_away=1.0))
+
+
+def test_seeded_elo_alone_still_counts_as_empty():
+    """Measured on production 2026-08-19: seeding five-season Elo made elo_diff real on every
+    fixture, which silently disabled this fallback for whole leagues — 26 predictions built
+    from Elo-and-nothing vectors (completeness 0.118, draw probabilities near 0.50). Elo is
+    history, not evidence the season has data; only the rolling-form signals answer that."""
+    assert _football_vector_is_empty(vector(elo_diff=32.0))
 
 
 def _log(rows):
