@@ -18,14 +18,15 @@ from app.fixtures.goals_availability import (
 )
 
 
-def test_admitted_leagues_are_exactly_the_measured_four():
-    """Pinned so a league cannot drift in without a measurement behind it. Eliteserien is the
-    near-miss worth remembering: r=+0.150 but split-half unstable (+0.02 / +0.24), excluded."""
+def test_admitted_leagues_are_exactly_the_measured_ones():
+    """Pinned so a league cannot drift in OR OUT without a measurement behind it. Re-derived
+    2026-08-19 on the served model's parquet: ekstraklasa (+0.145) and seriea (+0.116) fell
+    below the bar they had passed three retrains earlier, ucl (+0.200) earned admission.
+    Eliteserien remains the near-miss worth remembering: excluded for split-half instability."""
     assert LEAGUES_WITH_DEMONSTRATED_GOALS_SIGNAL == {
         "laliga",
-        "ekstraklasa",
         "bundesliga",
-        "seriea",
+        "ucl",
     }
 
 
@@ -42,10 +43,17 @@ def test_admitted_league_offers_goals():
 
 
 def test_unadmitted_leagues_stay_barred():
-    # The pooled-live measurement that imposed the bar; the near-miss; a signal-free league.
+    # The pooled-live measurement that imposed the bar; the near-miss; a signal-free league;
+    # and the two 2026-08-19 removals, so a revert cannot slip back in silently.
     assert offers_goals("epl") is False
     assert offers_goals("eliteserien") is False
     assert offers_goals("veikkausliiga") is False
+    assert offers_goals("ekstraklasa") is False
+    assert offers_goals("seriea") is False
+    # Cups: only ucl measured signal; the other two fail the same bar.
+    assert offers_goals("ucl") is True
+    assert offers_goals("uel") is False
+    assert offers_goals("uecl") is False
 
 
 def test_the_gate_sits_inside_the_default_ranking_branch_only():

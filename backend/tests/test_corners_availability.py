@@ -35,7 +35,8 @@ def test_leagues_that_cannot_settle_corners_do_not_offer_them():
     re-measuring 6/6 prompt, and uel joined at 1/6 (qualifier clubs without prompt stats)."""
     for slug in ("veikkausliiga", "liga_i", "uel"):
         assert not offers_corners(slug), slug
-    for slug in ("czech_first", "ekstraklasa", "ucl", "uecl"):
+    # ucl/uecl settle promptly but are barred by the SKILL set — see the cups test below.
+    for slug in ("czech_first", "ekstraklasa"):
         assert offers_corners(slug), slug
 
 
@@ -84,3 +85,24 @@ def test_the_measurement_script_reads_the_same_constants():
         for alias in node.names
     }
     assert {"LEAGUES_WITHOUT_PROMPT_CORNERS", "MIN_PROMPT_CORNER_COVERAGE"} <= imported
+
+
+def test_cups_are_barred_for_absent_skill_not_supply():
+    """The three UEFA cups measured NO corners signal on the served model's held-out split
+    (r between -0.07 and +0.05, every CI straddling zero) and, live, served a near-constant
+    ~11 predicted corners in competitions averaging ~9.4 — 5/13 over-9.5 picks won. Their bar
+    is the skill set, so improving settlement supply alone must never re-admit them."""
+    from app.fixtures.corners_availability import (
+        LEAGUES_WITHOUT_DEMONSTRATED_CORNERS_SIGNAL,
+        offers_corners,
+    )
+
+    assert LEAGUES_WITHOUT_DEMONSTRATED_CORNERS_SIGNAL == {"ucl", "uel", "uecl"}
+    for slug in ("ucl", "uel", "uecl"):
+        assert offers_corners(slug) is False, slug
+    # ucl/uecl are NOT in the prompt-settlement set — supply was fine (3/3 and 6/6 measured);
+    # skill is the only thing keeping them out.
+    from app.fixtures.corners_availability import LEAGUES_WITHOUT_PROMPT_CORNERS
+
+    assert "ucl" not in LEAGUES_WITHOUT_PROMPT_CORNERS
+    assert "uecl" not in LEAGUES_WITHOUT_PROMPT_CORNERS
