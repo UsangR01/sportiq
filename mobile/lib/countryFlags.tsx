@@ -12,6 +12,7 @@ import { Image, Text, View } from "react-native";
 // access just to show a badge, and wouldn't work offline).
 const COUNTRY_FLAG_IMAGES: Record<string, number> = {
   England: require("../assets/flags/england.png"),
+  Europe: require("../assets/flags/europe.png"),
   France: require("../assets/flags/france.png"),
   Germany: require("../assets/flags/germany.png"),
   Spain: require("../assets/flags/spain.png"),

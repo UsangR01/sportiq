@@ -27,8 +27,8 @@ def test_the_gap_leagues_are_actually_mapped():
 
 
 def test_every_trained_league_is_mapped():
-    """One model serves all 19, so any of them can surface a corners pick."""
-    assert len(thestatsapi.COMPETITION_IDS) == 19
+    """One model serves all 22, so any of them can surface a corners pick."""
+    assert len(thestatsapi.COMPETITION_IDS) == 22
     assert all(v.startswith("comp_") for v in thestatsapi.COMPETITION_IDS.values())
 
 

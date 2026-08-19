@@ -43,6 +43,7 @@ _RUNDOWN_SPORT_IDS: dict[str, int] = {
     "seriea": 15,
     "mls": 10,  # confirmed live via GET /sports — real coverage, unlike Scottish Prem/CSL below
     "j1_league": 19,  # the only one of the nine Tier-1 leagues TheRundown carries at all
+    "ucl": 16,  # UEFACHAMP — probed 2026-08-19; UEL/UECL have no TheRundown entry
     # The other eight Tier-1 leagues (allsvenskan, eliteserien, veikkausliiga, ekstraklasa,
     # denmark_superliga, liga_i, czech_first, austria_bundesliga) have no entry here for the
     # same reason as Scottish Prem/CSL/Brasileirão — no coverage on this subscription. Their

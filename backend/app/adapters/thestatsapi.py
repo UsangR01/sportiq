@@ -49,6 +49,9 @@ COMPETITION_IDS = {
     "brasileirao": "comp_4795",
     "bundesliga": "comp_4643",
     "championship": "comp_8321",  # probed 2026-08-18: "Championship", England
+    "ucl": "comp_3498",
+    "uel": "comp_7739",
+    "uecl": "comp_408698",
     "csl": "comp_7712",
     "czech_first": "comp_9766",
     "denmark_superliga": "comp_7938",

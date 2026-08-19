@@ -70,6 +70,9 @@ def test_league_ids_match_therundown_slugs_where_covered():
         "austria_bundesliga",
         # probed 2026-08-18: TheRundown has no EFL entry at all — API-Football is its odds source
         "championship",
+        # probed 2026-08-19: TheRundown carries the UCL (16) but not these two
+        "uel",
+        "uecl",
     }
     assert set(LEAGUE_IDS.keys()) == {
         "epl",
@@ -91,6 +94,9 @@ def test_league_ids_match_therundown_slugs_where_covered():
         "czech_first",
         "austria_bundesliga",
         "championship",
+        "ucl",
+        "uel",
+        "uecl",
     }
     for league_slug in LEAGUE_IDS:
         if league_slug in no_rundown_coverage:
@@ -716,3 +722,40 @@ def test_the_normal_empty_errors_list_passes_through():
 
     with_data = _fake_response({"errors": [], "response": [{"fixture": {"id": 1}}]})
     assert len(_api_response(with_data)["response"]) == 1
+
+
+def test_extra_time_finishes_settle_on_the_ninety_minute_score():
+    """1X2 and Over/Under are FULL-TIME markets by universal bookmaker convention, so a UEFA
+    knockout won 2-1 after extra time is a DRAW for every market we grade. `goals` is
+    API-Football's final score including extra time; only score.fulltime is the market's
+    score. No domestic league ever reaches AET/PEN, so this cannot change existing leagues."""
+    from app.adapters.api_football import _map_fixture_to_payload
+
+    def fixture(short, goals, fulltime):
+        return {
+            "fixture": {
+                "id": 1,
+                "date": "2027-04-14T19:00:00+00:00",
+                "status": {"short": short, "elapsed": None},
+            },
+            "league": {"season": 2026},
+            "teams": {"home": {"id": 10, "name": "A"}, "away": {"id": 20, "name": "B"}},
+            "goals": goals,
+            "score": {"fulltime": fulltime},
+        }
+
+    aet = _map_fixture_to_payload(
+        fixture("AET", {"home": 2, "away": 1}, {"home": 1, "away": 1}), "ucl"
+    )
+    assert (aet.home_score, aet.away_score) == (1, 1)
+
+    pen = _map_fixture_to_payload(
+        fixture("PEN", {"home": 1, "away": 1}, {"home": 1, "away": 1}), "ucl"
+    )
+    assert (pen.home_score, pen.away_score) == (1, 1)
+
+    # An ordinary 90-minute finish is untouched — goals and fulltime agree anyway.
+    ft = _map_fixture_to_payload(
+        fixture("FT", {"home": 3, "away": 0}, {"home": 3, "away": 0}), "epl"
+    )
+    assert (ft.home_score, ft.away_score) == (3, 0)

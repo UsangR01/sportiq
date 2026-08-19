@@ -45,7 +45,16 @@ LEAGUE_IDS: dict[str, int] = {
     # (2026 season 2026-08-14..2027-05-01, already underway), coverage: stats/lineups/
     # injuries all true AND odds=true for 2026 — API-Football is its odds source, since
     # TheRundown has no EFL entry at all (probed; only UEFACHAMP matches "champ").
-    "championship": 40,  # Scottish Premiership — confirmed live: id 179, country=Scotland
+    "championship": 40,
+    # UEFA competitions — confirmed live 2026-08-19: ids 2/3/848, type=Cup, Aug-May (European
+    # convention), odds=true, stats=true, lineups=true on all three. The FIRST cup
+    # competitions in this codebase: extra-time/penalty finishes settle on score.fulltime
+    # (see _map_fixture_to_payload), and their teams span every UEFA country — teams from our
+    # own 19 leagues resolve to their existing rows via (sport_id, external_id), keeping Elo
+    # and identity; foreign clubs (Galatasaray, Olympiacos, ...) are created fresh.
+    "ucl": 2,
+    "uel": 3,
+    "uecl": 848,  # Scottish Premiership — confirmed live: id 179, country=Scotland
     "mls": 253,  # Major League Soccer (USA) — confirmed live: id 253, NOT "MLS" by name search
     "csl": 169,  # Chinese Super League — confirmed live: id 169, country=China
     # The nine Tier-1 leagues the model is now trained on (see ml/training/train_football.py's
@@ -285,6 +294,15 @@ def _map_fixture_to_payload(fixture: dict, league_slug: str) -> FixturePayload:
     league = fixture["league"]
     teams = fixture["teams"]
     goals = fixture.get("goals", {})
+    # A match decided after extra time or penalties (UEFA knockouts — no domestic league here
+    # ever reaches AET/PEN) must settle on the NINETY-MINUTE score: 1X2 and Over/Under are
+    # full-time markets by universal bookmaker convention, so a tie won 2-1 in extra time is a
+    # DRAW for every market we grade. `goals` is API-Football's final score INCLUDING extra
+    # time; `score.fulltime` is the 90-minute one. Falls back to `goals` if fulltime is absent.
+    if fx["status"]["short"] in ("AET", "PEN"):
+        fulltime = (fixture.get("score") or {}).get("fulltime") or {}
+        if fulltime.get("home") is not None:
+            goals = fulltime
     return FixturePayload(
         external_id=str(fx["id"]),
         league_external_id=league_slug,
