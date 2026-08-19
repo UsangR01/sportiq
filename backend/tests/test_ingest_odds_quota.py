@@ -12,7 +12,7 @@ modelling problem (a feed full of near-identical high-probability picks) rather 
 ingestion one. Hence tests on the request budget itself, not just on parsing.
 """
 
-from datetime import date, timedelta
+from datetime import date
 
 import pytest
 
@@ -101,7 +101,7 @@ def test_lookahead_and_cadence_stay_within_a_sane_request_budget():
     from app.workers.ingest_odds import ODDS_LOOKAHEAD_DAYS
 
     schedule = celery_app.conf.beat_schedule["ingest-odds-every-6-hours"]["schedule"]
-    runs_per_day = 86400 / float(schedule)
+    runs_per_day = schedule_runs_per_day(schedule)
     rundown_leagues = 7  # see app/adapters/therundown.py:_RUNDOWN_SPORT_IDS
 
     # Worst case: every league has a fixture on every day of the lookahead window.
@@ -110,7 +110,18 @@ def test_lookahead_and_cadence_stay_within_a_sane_request_budget():
         f"worst-case {worst_case_per_day:.0f} odds requests/day is too close to the quota; "
         "TheRundown's BASIC plan allows 1,000 per MONTH"
     )
-    assert timedelta(seconds=float(schedule)) >= timedelta(hours=1)
+    assert runs_per_day <= 24  # never more often than hourly
+
+
+def schedule_runs_per_day(schedule) -> float:
+    """Runs/day for either schedule type. Long-cadence entries are crontabs (a plain interval
+    counts from beat START and deploys reset it — see celery.py's block comment), so quota
+    arithmetic has to read the crontab's own expansion rather than float(schedule)."""
+    from celery.schedules import crontab as crontab_cls
+
+    if isinstance(schedule, crontab_cls):
+        return len(schedule.hour) * len(schedule.minute)
+    return 86400 / float(schedule)
 
 
 def test_tennis_refresh_is_hourly():
@@ -119,7 +130,8 @@ def test_tennis_refresh_is_hourly():
     asserted behaviourally in the test below."""
     from app.workers.celery import celery_app
 
-    assert float(celery_app.conf.beat_schedule["ingest-tennis-odds-hourly"]["schedule"]) == 3600.0
+    schedule = celery_app.conf.beat_schedule["ingest-tennis-odds-hourly"]["schedule"]
+    assert schedule_runs_per_day(schedule) == 24
 
 
 @pytest.mark.asyncio

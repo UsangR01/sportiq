@@ -75,7 +75,24 @@ def test_tennis_has_two_odds_schedules_at_different_cadences():
     free = schedule["ingest-tennis-odds-hourly"]
     metered = schedule["ingest-tennis-rundown-odds-every-2-hours"]
 
+    from tests.test_ingest_odds_quota import schedule_runs_per_day
+
     assert free["task"] != metered["task"]
-    assert float(metered["schedule"]) == 2 * 60 * 60.0
+    assert schedule_runs_per_day(metered["schedule"]) == 12
     # The metered job must never run more often than the free one.
-    assert float(metered["schedule"]) > float(free["schedule"])
+    assert schedule_runs_per_day(metered["schedule"]) < schedule_runs_per_day(free["schedule"])
+
+
+def test_long_cadence_tasks_use_wall_clock_schedules():
+    """An interval schedule counts from BEAT PROCESS START, and beat restarts on every deploy.
+    On a deploy-heavy day the 6-hour odds interval never came due at all — beat's own logs
+    showed every short task dispatching while ingest-odds-every-6-hours was simply absent —
+    and the weekly market-signal audit had NEVER fired in production. Anything of an hour or
+    longer must be a crontab (absolute wall clock, survives restarts)."""
+    for name, entry in celery_app.conf.beat_schedule.items():
+        schedule = entry["schedule"]
+        if isinstance(schedule, (int, float)):
+            assert float(schedule) < 3600, (
+                f"{name} uses a {schedule}s interval; a deploy resets it before it comes due — "
+                "use crontab"
+            )

@@ -73,6 +73,15 @@ def run_task(coro: Coroutine[Any, Any, None]) -> None:
 
 # run_predictions and notify_users are triggered by other tasks (new odds/injury data, late
 # injury re-inference) rather than run on a fixed cadence — not scheduled here (TDD §2.3/§5.4).
+# EVERY ENTRY OF AN HOUR OR LONGER MUST BE A crontab, NOT AN INTERVAL — learned in production
+# 2026-08-19. Interval schedules count from BEAT PROCESS START, and beat restarts on every
+# deploy. On a day with several deploys the 6-hour odds interval never came due at all (beat's
+# own logs showed every short task dispatching and ingest-odds-every-6-hours absent), so the
+# newest leagues sat unpriced while every card looked normal; the weekly market-signal audit
+# had NEVER fired in production for the same reason. A crontab is absolute wall clock (UTC
+# here) and survives restarts. Minutes are staggered so the long tasks never land on the same
+# tick. Sub-hourly intervals are left as intervals: deploys are never that frequent, and
+# test_beat_liveness.py::test_long_cadence_tasks_use_wall_clock_schedules pins the boundary.
 celery_app.conf.beat_schedule = {
     "ingest-odds-every-6-hours": {
         "task": "app.workers.ingest_odds.ingest_odds",
@@ -96,7 +105,7 @@ celery_app.conf.beat_schedule = {
         #
         # Tennis freshness is handled separately and does NOT consume this quota at all -- see
         # ingest-tennis-odds-hourly below.
-        "schedule": 21600.0,
+        "schedule": crontab(minute=10, hour="*/6"),
     },
     "capture-closing-odds-every-15-minutes": {
         "task": "app.workers.ingest_odds.capture_closing_odds",
@@ -115,7 +124,7 @@ celery_app.conf.beat_schedule = {
     # rather than riding the hourly free one. See _ingest_tennis_odds for the quota maths.
     "ingest-tennis-rundown-odds-every-2-hours": {
         "task": "app.workers.ingest_odds.ingest_tennis_rundown_odds",
-        "schedule": 2 * 60 * 60.0,
+        "schedule": crontab(minute=20, hour="*/2"),
     },
     "ingest-tennis-odds-hourly": {
         "task": "app.workers.ingest_odds.ingest_tennis_odds",
@@ -123,7 +132,7 @@ celery_app.conf.beat_schedule = {
         # spends none of TheRundown's monthly allowance — GOAT is 600 req/MINUTE and a refresh
         # costs a couple of calls. Books price a tennis match close to its start, so the
         # 6-hour job left freshly-priced matches showing no odds on the card.
-        "schedule": 3600.0,
+        "schedule": crontab(minute=50),
     },
     "ingest-live-scores-every-5-minutes": {
         "task": "app.workers.ingest_live_scores.ingest_live_scores",
@@ -141,14 +150,15 @@ celery_app.conf.beat_schedule = {
     # same number, less often sits on a met trigger. See check_market_signal.py.
     "check-market-signal-triggers-weekly": {
         "task": "app.workers.check_market_signal.check_market_signals",
-        "schedule": 7 * 24 * 60 * 60.0,
+        # As a 7-day interval this NEVER fired in production — see the block comment above.
+        "schedule": crontab(day_of_week="mon", hour=6, minute=30),
     },
     "snapshot-shown-picks-hourly": {
         "task": "app.workers.snapshot_picks.snapshot_shown_picks",
         # Hourly against a 4-hour window, so a fixture cannot slip through between runs.
         # Makes no external API calls — it reads predictions and odds already stored — and
         # returns immediately when nothing sits in the window.
-        "schedule": 3600.0,
+        "schedule": crontab(minute=5),
     },
     "backfill-corners-second-source-every-15-minutes": {
         "task": "app.workers.ingest_live_scores.backfill_corners_from_thestatsapi",
@@ -184,11 +194,11 @@ celery_app.conf.beat_schedule = {
         # run with nothing to do is a handful of queries and no API calls at all. The live
         # fetch_lineup_presence call fires only for a fixture being retrodicted for the first
         # time, which is bounded by how many matches actually finished.
-        "schedule": 2 * 3600.0,
+        "schedule": crontab(minute=35, hour="*/2"),
     },
     "backfill-tennis-retrodictions-every-2-hours": {
         "task": "app.workers.backfill_tennis_predictions.backfill_tennis_predictions",
-        "schedule": 2 * 3600.0,
+        "schedule": crontab(minute=40, hour="*/2"),
     },
     "backfill-basketball-retrodictions-every-2-hours": {
         "task": ("app.workers.backfill_basketball_predictions.backfill_basketball_predictions"),
@@ -196,7 +206,7 @@ celery_app.conf.beat_schedule = {
         # rather than a cadence change: 23 completed NBA/WNBA fixtures were showing a blank
         # card with no way to ever get a prediction. Costs no API calls -- the game log is
         # rebuilt from fixtures already in our own database.
-        "schedule": 2 * 3600.0,
+        "schedule": crontab(minute=45, hour="*/2"),
     },
     "check-push-receipts-every-30-minutes": {
         "task": "app.workers.notify_users.check_push_receipts",
