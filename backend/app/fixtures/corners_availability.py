@@ -43,12 +43,18 @@ and no migration or retrain is involved.
 MIN_PROMPT_CORNER_COVERAGE = 0.80
 
 # Set to frozenset() to offer corners in every league again — see the header.
+# RE-MEASURED 2026-08-19 (scripts/measure_prompt_corner_coverage.py):
+#   czech_first and ekstraklasa now measure 6/6 prompt — API-Football's coverage improved, so
+#   both are re-admitted; the measurement, not the original snapshot, owns this set.
+#   uel joins instead at 1/6: Europa League QUALIFIERS involve clubs whose statistics
+#   API-Football does not carry promptly. Worth re-measuring once the league phase proper
+#   starts (late September) — the main-draw clubs are exactly the ones with full coverage.
+#   ucl 3/3 and uecl 6/6 both passed and are offered from day one.
 LEAGUES_WITHOUT_PROMPT_CORNERS = frozenset(
     {
         "veikkausliiga",
-        "czech_first",
-        "ekstraklasa",
         "liga_i",
+        "uel",
     }
 )
 

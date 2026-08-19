@@ -30,8 +30,13 @@ from app.fixtures.corners_availability import (
 
 
 def test_leagues_that_cannot_settle_corners_do_not_offer_them():
-    for slug in ("veikkausliiga", "czech_first", "ekstraklasa", "liga_i"):
+    """Membership tracks the MEASUREMENT (scripts/measure_prompt_corner_coverage.py), not a
+    historical snapshot: czech_first and ekstraklasa were re-admitted 2026-08-19 after
+    re-measuring 6/6 prompt, and uel joined at 1/6 (qualifier clubs without prompt stats)."""
+    for slug in ("veikkausliiga", "liga_i", "uel"):
         assert not offers_corners(slug), slug
+    for slug in ("czech_first", "ekstraklasa", "ucl", "uecl"):
+        assert offers_corners(slug), slug
 
 
 def test_leagues_that_settle_promptly_still_offer_corners():
