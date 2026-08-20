@@ -6,13 +6,14 @@ from datetime import datetime
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.core.database import get_db
 from app.fixtures.corners_availability import offers_corners
 from app.fixtures.goals_availability import offers_goals
+from app.fixtures.league_availability import SUPPRESSED_LEAGUES
 from app.fixtures.match_stats_cache import get_cached_match_stats, set_cached_match_stats
 from app.fixtures.models import Fixture, FixtureLiveState, FixtureStatus, Team, TeamFeatures
 from app.fixtures.schemas import (
@@ -928,6 +929,19 @@ async def list_fixtures(
     # existed, burying the day's two genuine picks. Detail (`GET /fixtures/{id}`) still serves
     # them, so an existing deep link does not break.
     stmt = stmt.where(Fixture.withdrawn.is_(False))
+    # A league withheld from the feed entirely (see league_availability.py) hides only its
+    # UNDECIDED fixtures. Settled ones keep their result and verdict: hiding those would
+    # silently improve the visible track record by deleting the losses that prompted the
+    # suppression, which is the retroactive-filtering bias the settled-fixture exemption in
+    # _pick_best exists to prevent. An explicit league_slug request is still honoured, so a
+    # deep link or a direct query into a suppressed league keeps working.
+    if not league_slug and SUPPRESSED_LEAGUES:
+        stmt = stmt.where(
+            or_(
+                League.slug.not_in(SUPPRESSED_LEAGUES),
+                Fixture.status == FixtureStatus.COMPLETED,
+            )
+        )
     if sport_slug:
         stmt = stmt.where(Sport.slug == sport_slug)
     if league_slug:
