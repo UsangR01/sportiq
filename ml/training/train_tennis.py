@@ -21,6 +21,7 @@ import argparse
 import asyncio
 import os
 import sys
+from bisect import bisect_right
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -131,6 +132,82 @@ RANDOM_SEED = 20260811
 # or within-tournament fatigue (sets/minutes played this week). Neither is collected today.
 # ===========================================================================================
 
+# === PRE-REGISTERED 2026-08-19, BEFORE THE OPPONENT-ADJUSTED FORM ARM WAS RUN ================
+#
+# THE PROBLEM, in the user's own words: "Winning 7 games over very weak opponents currently
+# counts as in form, but this could be well misleading." Correct, and it is the gap the FAILED
+# rank-scale arm above pointed at. form_win_rate is a flat, opponent-blind win rate, while ATP
+# ranking points are explicitly weighted by tournament tier and round reached -- so a flat win
+# rate can never out-argue ranking, because ranking already knows something it does not.
+#
+# THE ARM adds 6 features (14 -> 20), all derivable from data already collected:
+#
+#   form_vs_expected_home/away      SUM(actual - expected) / 10 over the last 10 matches,
+#                                   where expected = logistic(BETA * log points ratio) against
+#                                   each opponent's own point-in-time ranking. Zero means
+#                                   "performed exactly as the rankings predicted"; beating 7
+#                                   weak opponents scores NEGATIVE. This is a RESIDUAL, which
+#                                   is why it is not simply rank restated -- it measures what
+#                                   ranking does not already say, by construction.
+#   opponent_quality_faced_home/away  mean log ranking points of the last 10 opponents.
+#   rank_momentum_home/away         log(points now) - log(points RANK_MOMENTUM_WEEKS ago):
+#                                   surging versus coasting on a rank built ten months ago.
+#
+# BETA = 0.6460 was fitted on the TRAIN SEASONS ONLY (2021-2023, 19,594 pairs) and pinned as a
+# constant, so no fitting touches validation or test. Its calibration on that split: predicted
+# 0.149/0.288/0.432/0.568/0.712/0.851 against actual 0.186/0.265/0.427/0.573/0.735/0.814.
+#
+# ADOPT ONLY IF ALL THREE HOLD -- deliberately the SAME bar as the failed rank-scale arm, so
+# the two are directly comparable:
+#   PRIMARY   ranking_baseline_gap improves by >= 1.0pp (baseline +2.15pp, so >= +3.15pp).
+#   GUARD     RPS must not worsen by more than 0.0020 (baseline 0.2275, so <= 0.2295).
+#   GUARD     test accuracy must not fall by more than 0.5pp (baseline 0.6377, so >= 0.6327).
+#
+# REPORTED BUT NOT A CRITERION: the 0-250 ranking-gap band, which is a third of all matches and
+# where the favourite wins only 55.4%. That is where the feature SHOULD bite, and it is worth
+# seeing even on a failing arm -- but promoting it to a criterion after the fact would be
+# choosing the cut that flatters the result.
+#
+# SERVING IS DELIBERATELY NOT WIRED YET. Feasibility was confirmed first (the last 10
+# opponents' current rankings come back in ONE batched /rankings?player_ids[]=... call, under
+# the 100-id cap), but two consecutive tennis arms have now failed, so the measurement runs
+# before the serving work rather than after it. The toggle defaults OFF and a test pins that,
+# so nothing can ship half-wired.
+#
+# --- RESULT, 2026-08-19: FAILED, NOT ADOPTED ------------------------------------------------
+#
+#                          baseline (14)   treatment (20)   bar
+#     ranking gap             +2.15pp         +2.13pp       >= +3.15pp   FAIL (flat)
+#     RPS                      0.2275          0.2324       <= 0.2295    FAIL (clearly worse)
+#     accuracy                 0.6377          0.6362       >= 0.6327    pass
+#     agreement (diagnostic)    87.8%           87.9%        --          unchanged
+#
+# THE ARM WAS ALREADY IN TROUBLE BEFORE TRAINING, and this is the part worth keeping. Measured
+# on the assembled examples (96% coverage, so not a data gap):
+#
+#     corr(form_vs_expected, plain form_win_rate) = +0.843   <- NOT new information
+#     corr(form_vs_expected, outcome)             = +0.080
+#     corr(plain form_win_rate, outcome)          = +0.136   <- the flat version predicts BETTER
+#
+# So the residual is mostly a noisier restatement of the flat win rate. The intuition -- that
+# beating seven qualifiers should not read as "in form" -- is sound, and the arithmetic does
+# express it; what is false is the assumption that opponent strength varies enough ACROSS a
+# player's last ten matches to carry signal. Draws are seeded, so a player's opponents cluster
+# near their own level by construction, and the residual mostly cancels.
+#
+# THE ONE ENCOURAGING NUMBER, and it does NOT rescue the arm: the 0-250 ranking-gap band moved
+# 0.5931 -> 0.6031, the exact band predicted. That is +1.00pp against a standard error of
+# 1.36pp on n=1305 -- inside noise. It was ALSO pre-registered as "reported but not a
+# criterion" precisely so it could not be promoted after the fact, and it is not being
+# promoted now.
+#
+# WHAT IS NOW RULED OUT for tennis: re-scaling the ranking signal (the arm above), and
+# re-weighting recent form by opponent strength (this one). Both tried to extract more from
+# information the ranking already contains. A third attempt should use data the ranking cannot
+# contain at all -- within-tournament fatigue (sets and minutes played this week), or
+# serve/return match statistics, which /match_stats carries and no feature currently reads.
+# ===========================================================================================
+
 
 
 def _iso_monday(d):
@@ -161,6 +238,27 @@ def build_training_examples(games: pd.DataFrame, rank_points: pd.DataFrame) -> p
     def rank_position_for(player_id: str, game_date) -> float | None:
         return position_lookup.get((player_id, _iso_monday(game_date)))
 
+    # MOST RECENT snapshot ON OR BEFORE a date, for any player -- not an exact week hit like
+    # the two lookups above. The opponent-adjusted features need each OPPONENT's ranking at the
+    # time they were played, and an opponent did not necessarily play that same week, so an
+    # exact-key lookup would miss most of them. Sorted arrays + bisect because this runs for
+    # every one of ~17,700 examples x up to 10 prior matches x 2 players.
+    _by_player: dict[str, tuple] = {}
+    for pid, grp in rank_points.dropna(subset=["RANK_POINTS"]).groupby("PLAYER_ID"):
+        grp = grp.sort_values("WEEK")
+        _by_player[pid] = (grp["WEEK"].tolist(), grp["RANK_POINTS"].tolist())
+
+    def rank_points_at(player_id: str, on_date) -> float | None:
+        entry = _by_player.get(player_id)
+        if entry is None:
+            return None
+        weeks, points = entry
+        idx = bisect_right(weeks, _iso_monday(on_date)) - 1
+        if idx < 0:
+            return None
+        value = points[idx]
+        return float(value) if value and value > 0 else None
+
     rows = []
     for match_id, group in games.groupby("MATCH_ID"):
         home_rows = group[group["HOME_AWAY"] == "home"]
@@ -185,6 +283,7 @@ def build_training_examples(games: pd.DataFrame, rank_points: pd.DataFrame) -> p
             moneyline_implied_prob_home=None,
             home_rank_position=rank_position_for(home_player, game_date),
             away_rank_position=rank_position_for(away_player, game_date),
+            rank_points_at=rank_points_at,
         )
         features["label"] = 1 if home_row["WL"] == "W" else 0
         features["season"] = season

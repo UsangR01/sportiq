@@ -378,3 +378,33 @@ def test_rank_scales_are_none_when_positions_are_not_supplied():
     )
     assert features["rank_position_diff"] is None
     assert features["rank_log_points_ratio"] == pytest.approx(1.3862943611)
+
+
+def test_the_failed_opponent_form_arm_stays_off_by_default():
+    """Opponent-adjusted form (form_vs_expected / opponent_quality_faced / rank_momentum) FAILED
+    its pre-registered bar on 2026-08-19: ranking gap flat at +2.13pp against a +3.15pp bar and
+    RPS worse at 0.2324. It is ALSO unwired at serving time, so enabling it without doing that
+    work would be a silent train/serve mismatch — two reasons this must not drift back on."""
+    from app.models_ml.tennis_features import (
+        _OPPONENT_FORM_FEATURES,
+        _OPPONENT_FORM_NAMES,
+    )
+
+    assert _OPPONENT_FORM_FEATURES is False
+    for name in _OPPONENT_FORM_NAMES:
+        assert name not in FEATURE_NAMES, name
+    assert len(FEATURE_NAMES) == 14
+
+
+def test_expected_win_probability_is_symmetric_and_monotonic():
+    """The yardstick form_vs_expected scores against. Equal ranking must give exactly 0.5, or
+    the residual carries a constant bias for every match ever played."""
+    from app.models_ml.tennis_features import _expected_win_probability
+
+    assert _expected_win_probability(1000, 1000) == pytest.approx(0.5)
+    assert _expected_win_probability(4000, 1000) > 0.5
+    assert _expected_win_probability(1000, 4000) < 0.5
+    # symmetric: swapping the players must mirror the probability about 0.5
+    assert _expected_win_probability(3000, 750) == pytest.approx(
+        1 - _expected_win_probability(750, 3000)
+    )

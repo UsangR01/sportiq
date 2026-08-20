@@ -58,9 +58,43 @@ nba_features.py's own rationale exactly.
 
 import math
 import os
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
+
+_OPPONENT_FORM_NAMES = (
+    "form_vs_expected_home",
+    "form_vs_expected_away",
+    "opponent_quality_faced_home",
+    "opponent_quality_faced_away",
+    "rank_momentum_home",
+    "rank_momentum_away",
+)
+
+# EXPERIMENT TOGGLE for opponent-adjusted form, default OFF pending measurement. Set
+# SPORTIQ_TENNIS_OPPONENT_FORM=1 to include the six features above.
+#
+# THE PROBLEM THEY EXIST FOR: form_win_rate is a flat, opponent-blind win rate, so beating ten
+# qualifiers and beating ten top-20 players score identically -- while ATP ranking points are
+# explicitly weighted by tournament tier and round reached. That is why a flat win rate can
+# never out-argue ranking, and it is the gap the failed rank-scale arm pointed at.
+#
+# SERVING IS NOT WIRED. Feasible in one batched /rankings?player_ids[]=... call (confirmed
+# live, under the 100-id cap), but deliberately deferred until the measurement passes -- two
+# consecutive tennis arms have failed. assemble_from_live_db emits these as None, so enabling
+# this toggle without doing that work would be a silent train/serve mismatch;
+# test_tennis_features.py pins the toggle off to stop that shipping by accident.
+_OPPONENT_FORM_FEATURES = os.environ.get("SPORTIQ_TENNIS_OPPONENT_FORM", "0") != "0"
+
+# Fitted on the TRAIN SEASONS ONLY (2021-2023, 19,594 real player-match pairs) and pinned, so
+# no fitting touches validation or test: P(win) = logistic(BETA * [log points - log opp points]).
+# Calibration on that split: predicted .149/.288/.432/.568/.712/.851 vs actual
+# .186/.265/.427/.573/.735/.814 across log-ratio bands.
+EXPECTED_WIN_BETA = 0.6460
+
+# Lookback for rank_momentum. Eight weeks spans a couple of tournaments and still means
+# "lately" rather than restating the 52-week ranking.
+RANK_MOMENTUM_WEEKS = 8
 
 # EXPERIMENT TOGGLE, DEFAULT OFF BECAUSE THE EXPERIMENT FAILED. Set
 # SPORTIQ_TENNIS_RANK_SCALE_FEATURES=1 to re-enable rank_position_diff and
@@ -112,8 +146,10 @@ FEATURE_NAMES = tuple(
         "surface_streak_home",
         "surface_streak_away",
         "moneyline_implied_prob_home",
+        *_OPPONENT_FORM_NAMES,
     )
-    if _RANK_SCALE_FEATURES or name not in ("rank_position_diff", "rank_log_points_ratio")
+    if (_RANK_SCALE_FEATURES or name not in ("rank_position_diff", "rank_log_points_ratio"))
+    and (_OPPONENT_FORM_FEATURES or name not in _OPPONENT_FORM_NAMES)
 )
 
 # MEASURED 2026-08-13, having been inherited rather than chosen: this was 10 purely because
@@ -137,6 +173,73 @@ FEATURE_NAMES = tuple(
 # because serving reads this default back at 10, it would have fed 10-match form into a model
 # trained on 5.
 LAST_N_FORM = int(os.environ.get("SPORTIQ_TENNIS_LAST_N_FORM", "10"))
+
+
+def _expected_win_probability(player_points: float, opponent_points: float) -> float:
+    """P(player beats opponent) from ranking points alone — the yardstick the actual result is
+    scored against. Logistic on the LOG points ratio rather than the raw difference, because
+    points are non-linear in position (ten places costs 8,720 points at #1 and 119 at #50)."""
+    return 1.0 / (
+        1.0 + math.exp(-EXPECTED_WIN_BETA * (math.log(player_points) - math.log(opponent_points)))
+    )
+
+
+def _form_vs_expected(prior_sorted_desc, as_of_date, player_id, rank_points_at) -> float | None:
+    """Wins ABOVE EXPECTATION over the last LAST_N_FORM matches — the opponent-adjusted answer
+    to "is this player in form".
+
+    Plain form_win_rate treats beating ten qualifiers and beating ten top-20 players as the
+    same 1.0, which is exactly the complaint this exists to fix. Here each match is scored
+    against what the rankings said should happen:
+
+        SUM(actual - expected) / n     0 = performed exactly to ranking
+                                       + = beating better players than expected
+                                       - = beating only who they should have
+
+    A RESIDUAL by construction, which is the whole point: it carries what ranking does not
+    already say, unlike the rank-scale arm that merely restated ranking in other units and
+    failed. Matches whose opponent has no ranking are skipped rather than assumed average --
+    an unranked opponent is genuinely unknown, and scoring them as a coin flip would credit a
+    win over a qualifier as if it were a win over a peer."""
+    recent = prior_sorted_desc.head(LAST_N_FORM)
+    if recent.empty:
+        return None
+    total = 0.0
+    scored = 0
+    for row in recent.itertuples():
+        own = rank_points_at(player_id, row.GAME_DATE)
+        opponent = rank_points_at(row.OPPONENT_ID, row.GAME_DATE)
+        if not own or not opponent or own <= 0 or opponent <= 0:
+            continue
+        actual = 1.0 if row.WL == "W" else 0.0
+        total += actual - _expected_win_probability(own, opponent)
+        scored += 1
+    return (total / scored) if scored else None
+
+
+def _opponent_quality_faced(prior_sorted_desc, player_id, rank_points_at) -> float | None:
+    """Mean LOG ranking points of the last LAST_N_FORM opponents — the raw level of opposition,
+    alongside the residual above. Log, not raw, for the same non-linearity reason."""
+    recent = prior_sorted_desc.head(LAST_N_FORM)
+    if recent.empty:
+        return None
+    values = []
+    for row in recent.itertuples():
+        opponent = rank_points_at(row.OPPONENT_ID, row.GAME_DATE)
+        if opponent and opponent > 0:
+            values.append(math.log(opponent))
+    return (sum(values) / len(values)) if values else None
+
+
+def _rank_momentum(player_id, as_of_date, rank_points_at) -> float | None:
+    """log(points now) - log(points RANK_MOMENTUM_WEEKS ago): surging, or coasting on a ranking
+    built ten months ago. Ranking points are a 52-week rolling total, so they cannot say this
+    themselves — the level and its direction are different facts."""
+    now = rank_points_at(player_id, as_of_date)
+    then = rank_points_at(player_id, as_of_date - timedelta(weeks=RANK_MOMENTUM_WEEKS))
+    if not now or not then or now <= 0 or then <= 0:
+        return None
+    return float(math.log(now) - math.log(then))
 
 
 def _rank_position_diff(
@@ -277,6 +380,7 @@ def assemble_from_game_log(
     moneyline_implied_prob_home: float | None = None,
     home_rank_position: float | None = None,
     away_rank_position: float | None = None,
+    rank_points_at=None,
 ) -> dict:
     """games_df: one row per player per match (PLAYER_ID, GAME_DATE as a real date, WL
     ("W"/"L"), OPPONENT_ID, SURFACE) — ml/training/collect_tennis_data.py's shape.
@@ -316,7 +420,32 @@ def assemble_from_game_log(
         else None
     )
 
+    # rank_points_at(player_id, on_date) -> points, most recent snapshot on or before that
+    # date. Supplied by the caller (train_tennis.py) because it owns the collected rankings
+    # history; absent, the six opponent-adjusted features score as missing, which is exactly
+    # the tolerance the toggle needs while serving is unwired.
+    if rank_points_at is None:
+        opponent_form = dict.fromkeys(_OPPONENT_FORM_NAMES)
+    else:
+        opponent_form = {
+            "form_vs_expected_home": _form_vs_expected(
+                home_prior, as_of_date, home_player, rank_points_at
+            ),
+            "form_vs_expected_away": _form_vs_expected(
+                away_prior, as_of_date, away_player, rank_points_at
+            ),
+            "opponent_quality_faced_home": _opponent_quality_faced(
+                home_prior, home_player, rank_points_at
+            ),
+            "opponent_quality_faced_away": _opponent_quality_faced(
+                away_prior, away_player, rank_points_at
+            ),
+            "rank_momentum_home": _rank_momentum(home_player, as_of_date, rank_points_at),
+            "rank_momentum_away": _rank_momentum(away_player, as_of_date, rank_points_at),
+        }
+
     return {
+        **opponent_form,
         "rank_diff": rank_diff,
         "rank_position_diff": _rank_position_diff(home_rank_position, away_rank_position),
         "rank_log_points_ratio": _rank_log_points_ratio(home_rank_points, away_rank_points),
@@ -429,6 +558,11 @@ async def assemble_from_live_db(db, fixture, home_features, away_features) -> di
     )
 
     return {
+        # NOT WIRED YET, and the toggle that would consume them defaults OFF so this is inert
+        # rather than a silent mismatch. Serving them needs each of the last 10 opponents'
+        # current ranking, which is ONE batched /rankings?player_ids[]=... call (confirmed
+        # live, under the 100-id cap) — deferred until the measurement passes.
+        **dict.fromkeys(_OPPONENT_FORM_NAMES),
         "rank_diff": rank_diff,
         "rank_position_diff": _rank_position_diff(
             home_features.rank_position if home_features else None,
