@@ -51,14 +51,57 @@ SUPPRESSED_LEAGUES = frozenset(
     }
 )
 
+# The SAME suppression, but hiding SETTLED fixtures too, so the league vanishes from the feed
+# entirely including its history.
+#
+# EMPTY BY DEFAULT, AND PREFER SUPPRESSED_LEAGUES ABOVE. Hiding a league's settled cards
+# deletes its losses from view, which makes the visible track record better than reality --
+# the same retroactive-filtering bias that once erased a published, winning Hearts v Dundee Utd
+# pick when a completeness floor was raised after the fact. /history and /history/summary are
+# NOT affected by either set, so the numbers this project reports stay honest either way; what
+# this changes is only whether a user can still see the cards.
+#
+# Legitimate uses: a league ingested by mistake, a competition with corrupt fixture data, or a
+# league being retired outright. "Its recent results look bad" is NOT one -- use
+# SUPPRESSED_LEAGUES for that.
+SUPPRESSED_LEAGUES_INCLUDING_HISTORY: frozenset[str] = frozenset()
+
+# One market withheld for one league: {league_slug: {market, ...}}. Markets are the raw values
+# _all_market_candidates emits -- "h2h", "double_chance", "goals_total", "corners_total".
+#
+# THIS IS THE OPERATOR OVERRIDE, AND IT IS DELIBERATELY SEPARATE FROM THE MEASURED GATES.
+# goals_availability.py and corners_availability.py encode what MEASUREMENT concluded about a
+# market's skill or settlement supply, each with the numbers that justified it and a stated
+# condition for lifting. This dict encodes what a PERSON decided, for any market including the
+# two those files do not cover (h2h and double_chance have no measured gate at all).
+#
+# Keeping them apart matters: a decision recorded here cannot be mistaken later for a
+# measurement, and re-running a measurement cannot silently overwrite a human's call.
+SUPPRESSED_MARKETS_BY_LEAGUE: dict[str, frozenset[str]] = {}
+
 
 def offers_picks(league_slug: str | None) -> bool:
-    """False only for a league explicitly suppressed above.
+    """False only for a league explicitly suppressed above (either set).
 
-    An unknown or missing league returns True: this list is an explicit, temporary denylist of
+    An unknown or missing league returns True: these are explicit, temporary denylists of
     leagues someone decided to withhold, never a default. That is the opposite polarity to
     offers_goals (which is earned by measurement) and matches offers_corners' benefit of the
     doubt -- a league nobody has ruled on keeps working."""
     if not league_slug:
         return True
-    return league_slug not in SUPPRESSED_LEAGUES
+    return (
+        league_slug not in SUPPRESSED_LEAGUES
+        and league_slug not in SUPPRESSED_LEAGUES_INCLUDING_HISTORY
+    )
+
+
+def suppressed_markets_for(league_slug: str | None) -> frozenset[str]:
+    """Markets withheld from the headline pick for this league by operator decision.
+
+    Empty for a league nobody has ruled on. A suppressed market still appears in
+    all_market_picks and in the fixture detail's Other Markets, and an explicit
+    ?market=<name> request is still honoured -- exactly like NO_DEMONSTRATED_SIGNAL_MARKETS.
+    Withholding a market from the DEFAULT ranking is not the same as deleting it."""
+    if not league_slug:
+        return frozenset()
+    return SUPPRESSED_MARKETS_BY_LEAGUE.get(league_slug, frozenset())

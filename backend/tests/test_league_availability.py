@@ -78,3 +78,71 @@ def test_emptying_the_set_restores_the_league(monkeypatch):
     """The lift path, exercised rather than described — deleting the slug is the whole change."""
     monkeypatch.setattr("app.fixtures.league_availability.SUPPRESSED_LEAGUES", frozenset())
     assert offers_picks("mls") is True
+
+
+# === The other three operations the runbook documents (docs/suppressing-leagues-and-markets.md)
+
+
+def test_the_include_history_set_is_empty_by_default():
+    """It hides a league's SETTLED cards too, which deletes its losses from view and makes the
+    visible record better than reality. That is a deliberate, narrow tool (a league ingested by
+    mistake, corrupt data, a retirement) and a bad default, so it ships empty and the ordinary
+    suppression above is what "this league is performing badly" should use."""
+    from app.fixtures.league_availability import SUPPRESSED_LEAGUES_INCLUDING_HISTORY
+
+    assert SUPPRESSED_LEAGUES_INCLUDING_HISTORY == frozenset()
+
+
+def test_the_stronger_set_also_withholds_picks(monkeypatch):
+    monkeypatch.setattr(
+        "app.fixtures.league_availability.SUPPRESSED_LEAGUES_INCLUDING_HISTORY",
+        frozenset({"csl"}),
+    )
+    assert offers_picks("csl") is False
+    assert offers_picks("epl") is True
+
+
+def test_the_history_hiding_filter_is_unconditional_on_status():
+    """The whole difference from SUPPRESSED_LEAGUES: no COMPLETED escape hatch. Pinned by
+    reading the query so the two filters cannot silently converge."""
+    source = (Path(__file__).resolve().parents[1] / "app" / "fixtures" / "router.py").read_text(
+        encoding="utf-8"
+    )
+    listing = source[source.index("async def list_fixtures") :]
+    start = listing.index("if not league_slug and SUPPRESSED_LEAGUES_INCLUDING_HISTORY:")
+    guard = listing[start : listing.index("if sport_slug:", start)]
+    assert "not_in" in guard
+    assert "FixtureStatus.COMPLETED" not in guard, "this set must NOT exempt settled fixtures"
+
+
+def test_no_market_is_suppressed_per_league_by_default():
+    from app.fixtures.league_availability import SUPPRESSED_MARKETS_BY_LEAGUE
+
+    assert SUPPRESSED_MARKETS_BY_LEAGUE == {}
+
+
+def test_a_market_can_be_withheld_for_one_league_only(monkeypatch):
+    """Operation 2 in the runbook, and the one no existing gate could express: h2h and
+    double_chance have no measured per-league gate at all."""
+    from app.fixtures.league_availability import suppressed_markets_for
+
+    monkeypatch.setattr(
+        "app.fixtures.league_availability.SUPPRESSED_MARKETS_BY_LEAGUE",
+        {"csl": frozenset({"double_chance"})},
+    )
+    assert suppressed_markets_for("csl") == {"double_chance"}
+    assert suppressed_markets_for("epl") == frozenset()
+    assert suppressed_markets_for(None) == frozenset()
+
+
+def test_the_operator_override_is_applied_to_the_candidate_list():
+    """Pinned by source order, the same way the goals and corners gates are: the behaviour
+    lives in one branch of one function and a silent removal would be invisible otherwise."""
+    source = (Path(__file__).resolve().parents[1] / "app" / "fixtures" / "router.py").read_text(
+        encoding="utf-8"
+    )
+    picks = source[source.index("async def _bulk_best_picks") :]
+    body = picks[: picks.index("return best_picks")]
+    assert "suppressed_markets_for(" in body
+    assert body.index("offers_corners(") < body.index("suppressed_markets_for(")
+    assert body.index("suppressed_markets_for(") < body.index("_pick_best(")

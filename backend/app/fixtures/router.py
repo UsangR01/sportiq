@@ -13,7 +13,11 @@ from sqlalchemy.orm import aliased
 from app.core.database import get_db
 from app.fixtures.corners_availability import offers_corners
 from app.fixtures.goals_availability import offers_goals
-from app.fixtures.league_availability import SUPPRESSED_LEAGUES
+from app.fixtures.league_availability import (
+    SUPPRESSED_LEAGUES,
+    SUPPRESSED_LEAGUES_INCLUDING_HISTORY,
+    suppressed_markets_for,
+)
 from app.fixtures.match_stats_cache import get_cached_match_stats, set_cached_match_stats
 from app.fixtures.models import Fixture, FixtureLiveState, FixtureStatus, Team, TeamFeatures
 from app.fixtures.schemas import (
@@ -878,6 +882,16 @@ async def _bulk_best_picks(
         if not offers_corners(league_by_fixture.get(fixture_id)):
             candidates = [c for c in candidates if c.market != "corners_total"]
 
+        # Operator override, applying to ANY market for ANY league — including h2h and
+        # double_chance, which have no measured gate of their own. Kept separate from the two
+        # gates above so a human decision can never be mistaken for a measurement, nor silently
+        # overwritten by re-running one. Applies to settled fixtures too, matching both gates
+        # above: it decides which market wins the headline rather than deleting a pick, and it
+        # decides it the same way on every day at once, so it creates no ratchet.
+        operator_suppressed = suppressed_markets_for(league_by_fixture.get(fixture_id))
+        if operator_suppressed:
+            candidates = [c for c in candidates if c.market not in operator_suppressed]
+
         best = _pick_best(
             candidates,
             min_probability=min_probability,
@@ -942,6 +956,11 @@ async def list_fixtures(
                 Fixture.status == FixtureStatus.COMPLETED,
             )
         )
+    # The stronger form: hides settled fixtures too, so the league disappears entirely. Empty
+    # by default and deliberately so — see the set's own comment for why hiding a league's
+    # history is a worse default than hiding only what a user could still act on.
+    if not league_slug and SUPPRESSED_LEAGUES_INCLUDING_HISTORY:
+        stmt = stmt.where(League.slug.not_in(SUPPRESSED_LEAGUES_INCLUDING_HISTORY))
     if sport_slug:
         stmt = stmt.where(Sport.slug == sport_slug)
     if league_slug:
