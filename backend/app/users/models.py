@@ -92,6 +92,22 @@ class WatchlistItem(Base):
         UUID(as_uuid=True), ForeignKey("fixtures.id", ondelete="CASCADE"), nullable=False
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # THE PICK AS IT WAS SHOWN WHEN THIS USER SAVED IT.
+    #
+    # best_pick is recomputed on every request and never stored, so a saved fixture's card can
+    # read differently every time it is opened -- a WNBA pick moved 59% -> 66% overnight and a
+    # La Liga card went from "over 1.5" to a double chance, both reported as the app changing
+    # its mind after the fact. The churn is mostly legitimate (books price late, and the market
+    # feeds the model), so this freezes what THIS user saw at the moment they acted rather than
+    # freezing the feed for everyone still deciding.
+    #
+    # Nullable with no backfill: a row saved before these existed has no honest record of what
+    # was shown, and inventing one would be a fabricated receipt.
+    saved_market: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    saved_selection: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    saved_line: Mapped[float | None] = mapped_column(Float, nullable=True)
+    saved_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    saved_odds: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Set once the T-60 reminder actually goes out, so a re-run of the scheduler cannot notify
     # the same user twice about the same fixture — the same idempotency guard style as
     # _maybe_settle_outcome. NULL means "not yet reminded".

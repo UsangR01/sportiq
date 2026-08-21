@@ -305,3 +305,78 @@ async def test_a_broker_failure_does_not_lose_the_save(api_client):
     assert response.status_code == 204
     listed = (await api_client.get("/user/watchlist", headers=auth)).json()
     assert any(item["fixture_id"] == str(fixture_id) for item in listed)
+
+
+# === The saved pick: a receipt, frozen at the moment the user acted ==========================
+
+
+async def _seed_prediction(fixture_id: uuid.UUID, home_prob: float) -> None:
+    """A real Prediction row so the endpoint has a pick to capture."""
+    from app.predictions.models import ConfidenceTier, PredictionKind
+
+    async with async_session_factory() as db:
+        db.add(
+            Prediction(
+                fixture_id=fixture_id,
+                model_version="watchlist-test-v1",
+                home_prob=home_prob,
+                draw_prob=None,
+                away_prob=1 - home_prob,
+                confidence_tier=ConfidenceTier.HIGH,
+                kind=PredictionKind.PRE_MATCH,
+            )
+        )
+        await db.commit()
+
+
+async def test_saving_records_the_pick_that_was_shown(api_client):
+    """The point of the whole feature: best_pick is recomputed per request and never stored, so
+    without this a user who saved "HOME 88%" can open their watchlist and be shown something
+    else entirely — reported as the app changing its mind after they acted."""
+    token = await _register(api_client)
+    auth = {"Authorization": f"Bearer {token}"}
+    fixture_id = await _seed_fixture()
+    await _seed_prediction(fixture_id, home_prob=0.88)
+
+    await api_client.post("/user/watchlist", json={"fixture_id": str(fixture_id)}, headers=auth)
+    item = (await api_client.get("/user/watchlist", headers=auth)).json()[0]
+
+    assert item["saved_market"] == "h2h"
+    assert item["saved_selection"] == "home"
+    assert item["saved_probability"] == pytest.approx(0.88)
+
+
+async def test_the_saved_pick_does_not_move_when_the_model_changes_its_mind(api_client):
+    """THE LOAD-BEARING TEST. A later prediction must not rewrite what the user was shown —
+    the feed is free to update, the receipt is not."""
+    token = await _register(api_client)
+    auth = {"Authorization": f"Bearer {token}"}
+    fixture_id = await _seed_fixture()
+    await _seed_prediction(fixture_id, home_prob=0.88)
+
+    await api_client.post("/user/watchlist", json={"fixture_id": str(fixture_id)}, headers=auth)
+
+    # The model is re-run and now says the other way round — exactly the overnight swing that
+    # prompted this. The live feed should reflect it; the saved row must not.
+    await _seed_prediction(fixture_id, home_prob=0.20)
+
+    item = (await api_client.get("/user/watchlist", headers=auth)).json()[0]
+    assert item["saved_selection"] == "home"
+    assert item["saved_probability"] == pytest.approx(0.88)
+
+
+async def test_a_fixture_with_no_pick_still_saves(api_client):
+    """A fixture whose pick fails the guards has nothing to record, and saving it must still
+    work — the user asked to keep the FIXTURE. Null means "no pick was shown", never a
+    fabricated one."""
+    token = await _register(api_client)
+    auth = {"Authorization": f"Bearer {token}"}
+    fixture_id = await _seed_fixture()  # no prediction seeded at all
+
+    response = await api_client.post(
+        "/user/watchlist", json={"fixture_id": str(fixture_id)}, headers=auth
+    )
+    assert response.status_code == 204
+    item = (await api_client.get("/user/watchlist", headers=auth)).json()[0]
+    assert item["saved_market"] is None
+    assert item["saved_probability"] is None

@@ -135,6 +135,11 @@ async def list_watchlist(
             kickoff_is_estimated=fixture.kickoff_is_estimated,
             status=fixture.status.value.lower(),
             created_at=item.created_at,
+            saved_market=item.saved_market,
+            saved_selection=item.saved_selection,
+            saved_line=item.saved_line,
+            saved_probability=item.saved_probability,
+            saved_odds=item.saved_odds,
         )
         for item, fixture, sport_slug, league_slug, home, away in rows
     ]
@@ -165,7 +170,36 @@ async def add_to_watchlist(
     ).scalar_one_or_none()
     if existing is not None:
         return
-    db.add(WatchlistItem(user_id=user.id, fixture_id=body.fixture_id))
+
+    # RECORD THE PICK AS IT IS SHOWN RIGHT NOW, because this is the only moment it can be
+    # captured honestly. best_pick is recomputed on every request and never stored, so by the
+    # time the user opens their watchlist the card may legitimately say something else -- odds
+    # land, features refresh, the model is re-run. Freezing the whole feed would mean showing
+    # everyone a number we already know is stale; freezing what THIS user acted on costs
+    # nobody else anything.
+    #
+    # A failure here must not lose the save: the fixture is what the user asked to keep, and a
+    # missing receipt is a smaller loss than a missing watchlist entry.
+    saved = None
+    try:
+        from app.fixtures.router import _bulk_best_picks
+
+        best, _ = await _bulk_best_picks(db, [body.fixture_id])
+        saved = best.get(body.fixture_id)
+    except Exception:
+        logger.exception("Could not capture the shown pick for fixture %s", body.fixture_id)
+
+    db.add(
+        WatchlistItem(
+            user_id=user.id,
+            fixture_id=body.fixture_id,
+            saved_market=saved.market if saved else None,
+            saved_selection=saved.selection if saved else None,
+            saved_line=saved.line if saved else None,
+            saved_probability=saved.probability if saved else None,
+            saved_odds=saved.odds if saved else None,
+        )
+    )
     await db.commit()
 
     # Arm the T-60 reminder now, not at the next daily sweep. ingest_fixtures runs at 02:00

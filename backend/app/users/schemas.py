@@ -53,3 +53,13 @@ class WatchlistItemResponse(BaseModel):
     kickoff_is_estimated: bool = False
     status: str
     created_at: datetime
+    # THE PICK AS IT WAS SHOWN when this user saved the fixture — their receipt, not a live
+    # recomputation. best_pick is recomputed per request and never stored, so the feed can
+    # legitimately say something else by the time this list is opened; these five fields are
+    # what the user actually acted on. All null for a row saved before this was recorded, which
+    # the client renders as an ordinary saved fixture rather than inventing a pick.
+    saved_market: str | None = None
+    saved_selection: str | None = None
+    saved_line: float | None = None
+    saved_probability: float | None = None
+    saved_odds: float | None = None
