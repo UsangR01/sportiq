@@ -851,19 +851,28 @@ async def _bulk_best_picks(
     # market, because the market can itself change between revisions -- this answers "has our
     # read of this fixture moved", which is the question a user is really asking when a card
     # reads differently from yesterday.
+    # Grouped in ONE pass rather than rescanned per fixture. The first version of this filtered
+    # the whole prediction list inside the per-fixture loop, which is O(fixtures x predictions):
+    # tolerable for a 50-fixture feed page, but it made a 5,000-fixture analysis run scan tens
+    # of millions of rows and got the container OOM-killed. Cheap to write correctly, expensive
+    # to leave.
+    predictions_by_fixture: dict = {}
+    for p in prediction_rows:
+        predictions_by_fixture.setdefault(p.fixture_id, []).append(p)
+
     previous_probability_by_fixture: dict = {}
     for fixture_id, current in latest_prediction_by_fixture.items():
+        if current.home_prob is None or current.created_at is None:
+            continue
         earlier = [
             p
-            for p in prediction_rows
-            if p.fixture_id == fixture_id
-            and p.id != current.id
+            for p in predictions_by_fixture.get(fixture_id, ())
+            if p.id != current.id
             and p.created_at is not None
-            and current.created_at is not None
             and p.created_at < current.created_at
             and p.home_prob is not None
         ]
-        if not earlier or current.home_prob is None:
+        if not earlier:
             continue
         most_recent = max(earlier, key=lambda p: p.created_at)
         if abs(most_recent.home_prob - current.home_prob) >= MIN_REPORTABLE_PROBABILITY_MOVE:
