@@ -56,24 +56,52 @@ Same action on each. Beat last, so the scheduler starts against code the worker 
 
 ### 4. Verify — do not assume
 
-**From your own machine, or a browser** — not the Render shell (the container image is slim and
-has **no `curl`**):
+**The definitive check is the commit, in the Render shell:**
+
+```bash
+echo $RENDER_GIT_COMMIT
+```
+
+That is what Render actually built. Compare it against `git log --oneline -1` locally.
+
+**DO NOT compare a LOCAL fingerprint against PROD's — they can never match.**
+`source_fingerprint()` hashes file CONTENT, and git checks out CRLF on Windows against LF in
+the Linux container. Identical code therefore hashes differently on the two, and reading that
+difference as "not deployed" is a mistake this runbook made on its first outing. The fingerprint
+is only meaningful compared **against itself on the same machine** — prod before vs prod after.
+
+So from your own machine or a browser (the container has **no `curl`**):
 
 ```bash
 curl -s https://sportpiq-api.onrender.com/health
 ```
 
-- `code.loaded.fingerprint` must have **changed** from what you noted in step 1.
-- `code.stale` must be `false`.
+- `code.stale` must be `false` — that compares loaded vs on-disk *within* the container, which
+  is a valid comparison and catches a process serving code the image no longer has.
+- `code.loaded.fingerprint` changing versus the value **you noted from prod in step 1** is
+  meaningful. Note that it does NOT change when a deploy touched only `docs/`, `scripts/`, `ml/`
+  or `mobile/` — the fingerprint covers `app/` only, so an unchanged value can be perfectly
+  correct.
 
-A fingerprint that has not moved means the deploy did not take, whatever the dashboard says.
-Note this endpoint does **not** touch the database, so a 200 says nothing about Postgres.
-
-**From inside the Render shell**, ask the image directly which code it holds — same function
-`/health` uses, no HTTP involved:
+**The strongest functional check is the live schema**, which proves the new code is serving
+rather than merely present:
 
 ```bash
-PYTHONPATH=. python -c "from app.core.code_version import source_fingerprint; print(source_fingerprint())"
+curl -s https://sportpiq-api.onrender.com/openapi.json | grep -o "your_new_field"
+```
+
+And confirm the migration actually applied, in the Render shell:
+
+```bash
+PYTHONPATH=. python -c "
+import asyncio
+from sqlalchemy import text
+from app.core.database import async_session_factory, engine
+async def main():
+    async with async_session_factory() as db:
+        print('alembic head:', (await db.execute(text('select version_num from alembic_version'))).scalar())
+    await engine.dispose()
+asyncio.run(main())"
 ```
 
 Then spot-check something the deploy actually changed — a real endpoint, not just `/health`.
@@ -188,6 +216,8 @@ PYTHONPATH=. python scripts/activate_model.py <version> --confirm
   — the shell blanks and reconnects. Batch the work; `measure_pick_flips.py` documents the shape.
 - **Bracketed paste.** Some shells prepend `^[[200~` to a pasted line. Type it instead.
 - **No `curl` in the container.** The image is slim; `curl`-based checks belong on your own
-  machine. Inside the shell, use the `source_fingerprint()` one-liner above.
+  machine. Inside the shell, use `echo $RENDER_GIT_COMMIT`.
+- **Local and prod fingerprints never match.** CRLF on Windows against LF in the container, so
+  identical code hashes differently. Compare prod against prod, or use the commit.
 - **`seed_model_registry` before other seeds**, or predictions fail on a missing artefact.
 - **A stale beat is invisible.** No errors, no failed tasks — the work is simply never dispatched.
