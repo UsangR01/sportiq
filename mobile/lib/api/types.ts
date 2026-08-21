@@ -38,6 +38,15 @@ export interface BestPick {
   // information to go on, so the probability shown is closer to a base-rate guess than a
   // considered call — see LOW_CONFIDENCE_COMPLETENESS in components/fixtures/FixtureCard.tsx.
   feature_completeness: number | null;
+  // When the underlying prediction was generated (ISO), and the last materially different
+  // probability it superseded (null when it has not moved, which is the common case).
+  //
+  // best_pick is recomputed server-side on every request and never stored, so a card really
+  // can read differently between visits — reported by the user as the app changing its mind
+  // overnight. The churn is mostly legitimate (odds landing is new information), so the fix is
+  // to stop presenting a moving estimate as timeless rather than to freeze it.
+  as_of: string | null;
+  previous_probability: number | null;
 }
 
 export interface LiveStateResponse {

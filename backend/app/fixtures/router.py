@@ -61,6 +61,11 @@ class _MarketCandidate:
     # Carried through from the Prediction row so the client can tell a well-informed
     # probability from one the model effectively fell back to the base rate for.
     feature_completeness: float | None = None
+    # When the underlying prediction was generated, and the last materially different
+    # probability this pick superseded — see BestPick's own docstring for why a recomputed,
+    # unstored pick needs to say so on the card.
+    as_of: datetime | None = None
+    previous_probability: float | None = None
 
 
 def _build_extra_markets(
@@ -287,6 +292,8 @@ def _candidate_to_best_pick(candidate: _MarketCandidate) -> BestPick:
         market=candidate.market,
         line=candidate.line,
         feature_completeness=candidate.feature_completeness,
+        as_of=candidate.as_of,
+        previous_probability=candidate.previous_probability,
     )
 
 
@@ -297,6 +304,12 @@ def _candidate_to_best_pick(candidate: _MarketCandidate) -> BestPick:
 # feed was surfacing Over/Under picks claiming ~85% at odds of 1.60 (≈60% implied after vig) —
 # a ~25-point disagreement — and those picks were measured delivering only ~70%. 0.15 is
 # deliberately loose enough to keep genuine value while removing the egregious cases.
+# How far a probability must move before the card is worth telling the user it moved. Two
+# tenths of a point is noise from a feature refresh; five points is a different recommendation
+# in all but name. Set at 0.02 so the "was X%" line stays rare enough to mean something --
+# a badge that appears on every card is wallpaper.
+MIN_REPORTABLE_PROBABILITY_MOVE = 0.02
+
 MAX_EDGE_OVER_MARKET = 0.40
 # That bound was calibrated against MEASURED Over/Under overconfidence, and applying it
 # unchanged to the 3-way markets proved too strict. A totals market has two outcomes and a
@@ -832,6 +845,30 @@ async def _bulk_best_picks(
         if existing is None or _prediction_precedence(p) > _prediction_precedence(existing):
             latest_prediction_by_fixture[p.fixture_id] = p
 
+    # What the shown probability MOVED FROM. run_predictions appends rather than overwrites, so
+    # a fixture re-predicted as odds and features landed carries its own history and this needs
+    # no new table. Compared on the 1X2/home probability rather than the final pick's own
+    # market, because the market can itself change between revisions -- this answers "has our
+    # read of this fixture moved", which is the question a user is really asking when a card
+    # reads differently from yesterday.
+    previous_probability_by_fixture: dict = {}
+    for fixture_id, current in latest_prediction_by_fixture.items():
+        earlier = [
+            p
+            for p in prediction_rows
+            if p.fixture_id == fixture_id
+            and p.id != current.id
+            and p.created_at is not None
+            and current.created_at is not None
+            and p.created_at < current.created_at
+            and p.home_prob is not None
+        ]
+        if not earlier or current.home_prob is None:
+            continue
+        most_recent = max(earlier, key=lambda p: p.created_at)
+        if abs(most_recent.home_prob - current.home_prob) >= MIN_REPORTABLE_PROBABILITY_MOVE:
+            previous_probability_by_fixture[fixture_id] = most_recent.home_prob
+
     best_picks: dict = {}
     all_picks: dict = {}
     for fixture_id, prediction in latest_prediction_by_fixture.items():
@@ -842,6 +879,16 @@ async def _bulk_best_picks(
         candidates = _all_market_candidates(
             prediction, odds_by_market, reference_corners.get(fixture_id)
         )
+        # Stamped on every candidate rather than only the winner, so all_market_picks carries
+        # the same provenance as the headline pick.
+        candidates = [
+            dataclasses.replace(
+                c,
+                as_of=prediction.created_at,
+                previous_probability=previous_probability_by_fixture.get(fixture_id),
+            )
+            for c in candidates
+        ]
         all_picks[fixture_id] = [_candidate_to_best_pick(c) for c in candidates]
 
         if market and market != "all":

@@ -117,6 +117,22 @@ function PostponedBadge() {
  * Worth revisiting once the European seasons are underway and the spread shifts upward. */
 const LOW_CONFIDENCE_COMPLETENESS = 0.35;
 
+/** "as of" stamp for a pick: the time alone for something generated today, otherwise a short
+ * date, so a card that has not been refreshed for days says so plainly rather than showing a
+ * bare time that reads as recent. */
+function formatPickTimestamp(iso: string): string {
+  const made = new Date(iso);
+  if (Number.isNaN(made.getTime())) return "";
+  const now = new Date();
+  const sameDay =
+    made.getFullYear() === now.getFullYear() &&
+    made.getMonth() === now.getMonth() &&
+    made.getDate() === now.getDate();
+  return sameDay
+    ? made.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : made.toLocaleDateString([], { day: "numeric", month: "short" });
+}
+
 function PredictionBadge({ fixture }: { fixture: FixtureSummary }) {
   const pick = fixture.best_pick;
   if (!pick) return null;
@@ -146,6 +162,20 @@ function PredictionBadge({ fixture }: { fixture: FixtureSummary }) {
       {lowInformation && (
         <Text className="mt-0.5 text-center text-[9px] text-amber-600 dark:text-amber-500">
           limited data
+        </Text>
+      )}
+      {/* Says outright WHEN this call was made, and what it moved from. The pick is recomputed
+          on every request and never stored, so without this a card that reads differently from
+          yesterday looks like the app quietly changing its mind. Shown only when it actually
+          moved (>= 2pp server-side) — a badge on every card would be wallpaper. */}
+      {pick.previous_probability != null && (
+        <Text className="mt-0.5 text-center text-[9px] text-slate-500 dark:text-slate-400">
+          was {Math.round(pick.previous_probability * 100)}%
+        </Text>
+      )}
+      {pick.as_of && (
+        <Text className="text-center text-[9px] text-slate-400 dark:text-slate-500">
+          as of {formatPickTimestamp(pick.as_of)}
         </Text>
       )}
     </View>

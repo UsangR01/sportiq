@@ -37,6 +37,24 @@ class BestPick(BaseModel):
     # distinguish a well-informed probability from one the model effectively fell back to the
     # base rate for -- see Prediction.feature_completeness.
     feature_completeness: float | None = None
+    # WHEN this pick's underlying prediction was generated, and what it superseded.
+    #
+    # best_pick is recomputed on EVERY request against whatever prediction and odds exist at
+    # that moment, and nothing about it is stored -- so a card genuinely can read differently
+    # from one visit to the next. Reported twice by a user in one day (a WNBA pick moving
+    # 59% -> 66% overnight; a La Liga card showing over-1.5 one day and a double chance the
+    # next) and experienced as the app changing its mind behind their back.
+    #
+    # The churn itself is mostly legitimate -- odds landing is new information, and the market
+    # feeds the model -- so the defect is not that the number moves, it is that the card
+    # presents a moving estimate as though it were timeless. These two fields let the client
+    # say "as of 09:40, up from 59%" instead, which is honest and still fresh.
+    #
+    # previous_probability is the last MATERIALLY different value (see
+    # MIN_REPORTABLE_PROBABILITY_MOVE) from an earlier pre-kickoff prediction for the same
+    # fixture; null when the pick has not meaningfully moved, which is the common case.
+    as_of: datetime | None = None
+    previous_probability: float | None = None
 
 
 class LiveStateResponse(BaseModel):
