@@ -56,6 +56,9 @@ Same action on each. Beat last, so the scheduler starts against code the worker 
 
 ### 4. Verify — do not assume
 
+**From your own machine, or a browser** — not the Render shell (the container image is slim and
+has **no `curl`**):
+
 ```bash
 curl -s https://sportpiq-api.onrender.com/health
 ```
@@ -65,6 +68,13 @@ curl -s https://sportpiq-api.onrender.com/health
 
 A fingerprint that has not moved means the deploy did not take, whatever the dashboard says.
 Note this endpoint does **not** touch the database, so a 200 says nothing about Postgres.
+
+**From inside the Render shell**, ask the image directly which code it holds — same function
+`/health` uses, no HTTP involved:
+
+```bash
+PYTHONPATH=. python -c "from app.core.code_version import source_fingerprint; print(source_fingerprint())"
+```
 
 Then spot-check something the deploy actually changed — a real endpoint, not just `/health`.
 
@@ -83,7 +93,7 @@ PYTHONPATH=. python scripts/stage_artefacts.py --confirm
 git add ml/artifacts/deployed && git commit && git push
 ```
 
-Then deploy, and **on the API shell**:
+Then deploy, and **in the Render shell for `sportpiq-api`**:
 
 ```bash
 PYTHONPATH=. python scripts/seed_model_registry.py --confirm
@@ -96,7 +106,7 @@ equally silent — that sport simply stops producing picks, with nothing in the 
 
 ### A new league or sport was added
 
-On the API shell, after deploying:
+In the Render shell for `sportpiq-api`, after deploying:
 
 ```bash
 PYTHONPATH=. python scripts/seed_sports.py
@@ -158,7 +168,7 @@ Render keeps previous deploys: dashboard → service → **Rollback**. Do all th
 you have reintroduced the split-version problem you were escaping.
 
 **A migration does not roll back with the code.** Every migration in this project has a real
-`downgrade()`, but rolling one back is a deliberate act on the API shell, not part of the
+`downgrade()`, but rolling one back is a deliberate act in the Render shell, not part of the
 dashboard rollback. Prefer rolling forward with a fix.
 
 For a **model**, rollback is a DB update and needs no deploy at all, provided the artefact is
@@ -177,5 +187,7 @@ PYTHONPATH=. python scripts/activate_model.py <version> --confirm
 - **The web shell shares the API container.** Analysis scripts have been OOM-killed twice there
   — the shell blanks and reconnects. Batch the work; `measure_pick_flips.py` documents the shape.
 - **Bracketed paste.** Some shells prepend `^[[200~` to a pasted line. Type it instead.
+- **No `curl` in the container.** The image is slim; `curl`-based checks belong on your own
+  machine. Inside the shell, use the `source_fingerprint()` one-liner above.
 - **`seed_model_registry` before other seeds**, or predictions fail on a missing artefact.
 - **A stale beat is invisible.** No errors, no failed tasks — the work is simply never dispatched.
