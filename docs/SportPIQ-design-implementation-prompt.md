@@ -70,26 +70,24 @@ Screen top padding **60px** (58 on overlays) to clear the status bar; bottom tab
 
 ## 2. App shell
 
-Four tabs in a bottom bar on `surface` with a 1px `border` top edge, `padding: 8px 8px 22px`, tabs distributed evenly. Each tab: 22px glyph above an 11/600 label, `accent` when selected, `textFaint` otherwise.
+**Five** tabs in a bottom bar on `surface` with a 1px `border` top edge, `padding: 8px 8px 22px`, tabs distributed evenly. Each tab: 22px glyph above an 11/600 label, `accent` when selected, `textFaint` otherwise. At 390px that is ~78px per tab, which fits an 11px label without truncation.
 
 | tab | label | glyph |
 |---|---|---|
 | picks | Picks | concentric rings (22px circle, 2px border, inner 10px circle) |
 | live | Live | three ascending 3px bars (9/15/21px) |
 | premium | Top calls | 14px square rotated 45°, r3, filled |
+| saved | Saved | bookmark outline (14×18, notched base) |
 | profile | Profile | head-and-shoulders outline (9px circle + 16×8 r8-8-0-0 shape) |
+
+**Saved keeps its own tab** (it is already built and shipped). The Hub's `SAVED` block stays a
+tappable second route into the same screen, so the count doubles as a shortcut, but the tab is
+the primary way in.
 
 Two full-screen overlays sit above the tabs: **Hub** (z 49) and **Paywall** (z 53). Bottom sheets sit at z 44 (scrim) / 45 (panel).
 
-**Saved picks do NOT get a fifth tab.** The bar stays at four. Saving is initiated from the
-expanded match panel (§3.2) and the saved list is reached from the Hub's `SAVED` block (§7.1),
-which becomes tappable rather than a bare count. See §6.5 for that screen.
-
-> **This supersedes a shipped Saved tab.** A fifth tab currently exists in the app
-> (Picks · Live · Saved · Profile). Adopting this design removes it and re-homes the list under
-> the Hub. Flagged rather than silently dropped: the screen and its API layer already work, so
-> this is a re-parent, not new work — but the `premium` tab replaces it in the bar, so the two
-> cannot both be reached from the tab bar.
+Saving is initiated from the expanded match panel (§3.2); the saved list is §6.5, reachable from
+its own tab and from the Hub's `SAVED` block.
 
 ---
 
@@ -174,6 +172,107 @@ Each live match is its own `surface` card r18, 16px padding, card shadow, 13px i
 - a 3px r2 `mutedBg` progress track filled `fail` to match elapsed time
 - pick label (12.5/700) with a status tag right: `ON TRACK` on `successSoft`/`success` or `AT RISK` on `failSoft`/`fail` (9.5/800/0.08em, r6, `4px 7px`)
 
+### 4.1 At-risk alerts (Premium)
+
+A push alert when a **saved** pick that is currently in play starts going wrong, early enough to
+act on. This also defines the `ON TRACK` / `AT RISK` tag on the Live card (§4) — one rule set,
+two surfaces, so the badge and the notification can never disagree.
+
+**Three states, and only one of them is worth a push.**
+
+| state | meaning |
+|---|---|
+| `ON TRACK` | the pick is currently landing |
+| `AT RISK` | currently failing **and** the rule below says recovery is materially threatened |
+| `LOST` | arithmetically decided against, before full time |
+
+Alert on the transition into **AT RISK**, once per saved fixture. Do **not** alert on `LOST`:
+by then there is nothing to act on, and a notification that only confirms a loss is a worse
+product than silence.
+
+**The tension to resolve deliberately, not by feel.** Alert early and it is actionable but often
+wrong; alert late and it is accurate but useless. The thresholds below are a starting position
+chosen to fire while a match can still turn, and every one of them should be **re-derived from
+settled fixtures** — for each rule, how often did a pick that tripped it go on to lose? A rule
+that fires on picks which recover more than half the time should be loosened before launch, not
+after complaints.
+
+#### Football — full support
+
+Uses `match_minute`, which is populated on **332 of 332** football live-state rows. `total`
+below is combined goals.
+
+| pick | AT RISK when | LOST when |
+|---|---|---|
+| `h2h:home` | away leads **and** (minute ≥ 70 **or** margin ≥ 2) | — |
+| `h2h:away` | mirror of the above | — |
+| `h2h:draw` | either side leads **and** (minute ≥ 75 **or** margin ≥ 2) | — |
+| `double_chance:1X` | away leads **and** minute ≥ 75 | — |
+| `double_chance:X2` | home leads **and** minute ≥ 75 | — |
+| `goals_total:under N` | `total > N − 1` (one more goal kills it) **and** minute ≤ 75 | `total > N` |
+| `goals_total:over N` | `N − total ≥ 1` and minute ≥ 70; or `N − total ≥ 2` and minute ≥ 55 | — |
+| `corners_total` | **never — not evaluable, see below** | — |
+
+Double chance is deliberately more forgiving than the matching `h2h`: a draw still wins it, so
+the same scoreline is less threatening.
+
+Only `under` can be **LOST** early, because goals never come off the board. That makes it the
+one market where an early alert is certain rather than probabilistic — and the most valuable.
+
+#### Corners — blocked, and this is a data fact, not a preference
+
+`fixture_live_state.home_corners` is written **once, at settlement**, not during play. The
+second source lags roughly twelve hours. So a corners pick has **no observable in-play state at
+all**: it must show no tag on the Live card and must never raise an alert. Showing a guessed one
+would be inventing a fact.
+
+Unblocking it means ingesting corners on the live poll rather than at settlement — a real change
+with a real API cost, since it is one call per in-play fixture per poll.
+
+#### Tennis — degraded, and honest about it
+
+`match_minute` and `period` are populated on **0 of 2,366** tennis rows; only completed-set
+counts exist. So the earliest observable signal is "opponent has won a set", by which point a
+best-of-three is already close to decided.
+
+- `h2h:{player}` — AT RISK when the opponent leads by a set. That is the only rule available.
+
+Ship it, but do not market tennis as an early-warning sport until game-level scores are
+ingested. The provider's live payload **does** carry a per-match `set_scores` array; it simply is
+not read today. Ingesting it would give games-within-the-current-set and make a genuine early
+signal possible.
+
+#### Basketball (NBA / WNBA) — cannot be supported today
+
+`match_minute` **and** `period` are both populated on **0 of 263** rows. Without either, a
+trailing scoreline cannot be placed in the game: a six-point deficit in the first quarter and
+the same deficit with a minute left are indistinguishable to us, and basketball leads swing far
+too much for a margin-only rule to mean anything.
+
+**Do not ship an at-risk tag or alert for basketball.** The upstream feed does expose a period,
+so the fix is bounded — map it in the adapter, then a period-and-margin rule becomes possible
+(e.g. trailing by ≥ 10 in Q4). Until then, showing nothing is the correct behaviour.
+
+#### Delivery rules
+
+- **Saved fixtures only.** This is a premium feature attached to picks the user chose to keep,
+  not a broadcast about the whole feed.
+- **At most one alert per saved fixture**, dedupe-stamped server-side the way the kick-off
+  reminder already stamps `reminded_at`. Live scores poll every 5 minutes; without a stamp the
+  same alert fires every poll for the rest of the match.
+- **Nothing in the closing minutes.** Suppress after minute 85 in football — an alert the user
+  cannot act on is noise wearing a premium label.
+- **Up to 5 minutes stale by construction**, because that is the live-score cadence. Acceptable
+  for football; it is another reason basketball needs more than a period before it qualifies.
+- Copy names the pick and the reason, never just the fixture:
+  `Arsenal v Chelsea — your UNDER 2.5 is at risk. 2 goals, 62'.`
+
+#### On the Live card
+
+The `ON TRACK` / `AT RISK` tag in §4 uses exactly these rules. A market with no rule (corners
+today, basketball today) renders **no tag at all** rather than a neutral one — an absent tag
+reads as "not applicable", a grey tag reads as "we checked and it is fine".
+
 ---
 
 ## 5. Top calls screen (Premium)
@@ -238,7 +337,7 @@ Then a single `surface` r14 card of three rows divided by 1px `border`:
 
 Nothing else on this screen: no hit-rate card and no stat tiles.
 
-### 6.5 Saved picks (reached from the Hub, not a tab)
+### 6.5 Saved picks (own tab; also reachable from the Hub)
 
 Same shell as any screen: wordmark, 18px padding, `bg` background. Header row is the wordmark
 with `{n} saved` right-aligned, 12/600 `textFaint`.
@@ -280,7 +379,7 @@ keep its pick exactly as it is now."*
 
 Top bar: `SPORTPIQ · {membership}` (11/800/0.14em `textFaint`) and a `×` close button.
 
-1. **Identity block** — `Guest` at 28/800/-0.035em with `Sign in to sync picks →` beneath; right side shows a `SAVED` eyebrow over the saved-pick count at 26/800. **The saved block is tappable** and opens the saved-picks screen (§6.5) — it is the only route to it, since there is no Saved tab. Give it a pressed state so it reads as a control rather than a statistic.
+1. **Identity block** — `Guest` at 28/800/-0.035em with `Sign in to sync picks →` beneath; right side shows a `SAVED` eyebrow over the saved-pick count at 26/800. **The saved block is tappable** and opens the saved-picks screen (§6.5) — a shortcut alongside the Saved tab, not the only route. Give it a pressed state so it reads as a control rather than a statistic.
 2. **Premium feature card** — `premiumBg` r16, 18px padding, two decorative concentric circle outlines (`rgba(255,255,255,0.16)`) bleeding off the top-right corner. Inside: a translucent `PREMIUM` pill plus state text (`Active on this device` / `Locked`); the headline *"The calls where the model / disagrees with the market"* (19/800/-0.025em, white); a stat row (`CALLS`, `WIDEST GAP`) and a white CTA pill reading `Open Top calls` or `See plans`
 3. **Tile grid**, 2 columns, 10px gap — `surface` r14, min-height 92, a big value top-left and label/sub bottom-left: **All matches** (count, `accent`) · **Favourites** (starred-league count, `#f5b715`) · **How it works** (`01`) · **Get in touch** (`02`)
 4. **Preferences card** — `ODDS FORMAT` segmented chips `EU` / `UK` / `US` with a live example (`e.g. 1.50` / `1/2` / `−200`). **No language selector.**
@@ -298,6 +397,7 @@ Top bar: `SPORTPIQ · {membership}` (11/800/0.14em `textFaint`) and a `×` close
 4. What the odds imply, with the margin stripped out
 5. Power charts and form trends
 6. Filter by odds and probability
+7. Early alerts when a saved pick starts going wrong
 
 Three plan rows (`surface`, r14, 2px border — `accent` when selected, transparent otherwise): a 20px radio, plan name (15/700) with `₦{was}` struck through beside `₦{now}`, and the price right at 19/800. The Monthly row carries a `MOST POPULAR` pill pinned to its top edge (`top: -9px; left: 15px`, `accent`, white, 9/800/0.1em).
 
@@ -406,10 +506,10 @@ uniform 24×24, centre-cropped so differing aspect ratios still read as one size
 fallback for anything unmapped. It also ships **competition badges** for the UEFA competitions,
 whose "country" is Europe and for which a flag says almost nothing.
 
-So: keep letter codes wherever a compact inline badge is wanted (the country picker rows, where
-a code beside a name is clearer than a flag), but the **league-group header keeps the existing
-PNG flag / competition badge**, which is strictly better than a code and already built. Do not
-regress it to `SCO`.
+**Decision: flags, not codes.** The league-group header uses the existing PNG flag or competition
+badge everywhere. Letter codes appear ONLY inside the country-picker popover rows, where a
+compact code sits beside the full country name and a flag would add nothing. Do not regress any
+header to `SCO`.
 
 Seed fixtures for development: Série A (Brazil, BR), Scottish Premiership (Scotland, SCO), Chinese Super League (China, CN), Major League Soccer (USA, US), plus a Premier League / La Liga / Serie A set for Live. Include at least one postponed match, one won pick, one lost pick and several pending across different days so every state is reachable.
 
@@ -452,10 +552,22 @@ inverted at one point (HIGH claiming 74% and delivering 61%). Show `n` alongside
 publish a band whose sample is below the reporting floor. A calibration claim the data cannot
 support is worse than no calibration block.
 
-**4. `ON TRACK` / `AT RISK` on Live has no implementation.** It needs the live score compared
-against the specific pick — derivable for h2h, double chance and goals totals from the running
-score, but **not for corners**, where live corner counts are not ingested. A corners pick should
-show no tag rather than a guessed one.
+**4. At-risk alerts and the Live tag (§4.1) need four things, none of them large.**
+The rules themselves are pure functions of data already stored, so most of the work is plumbing:
+- a **dedupe stamp** on the saved row, mirroring the kick-off reminder's `reminded_at`, so one
+  alert fires per fixture rather than one every 5-minute poll;
+- a **worker hook** on the existing live-score poll that evaluates saved in-play picks;
+- **live corner ingestion** to unblock corners at all — currently written only at settlement,
+  and it costs one API call per in-play fixture per poll, so it needs sizing against quota
+  before it is promised;
+- **period mapping for basketball and `set_scores` for tennis** — both are present in the
+  providers' live payloads and simply not read. Measured: `match_minute` and `period` are
+  populated on 0 of 263 basketball rows and 0 of 2,366 tennis rows, which is why neither sport
+  can carry the feature today.
+
+**Before launch, re-derive the thresholds.** For each rule, measure on settled fixtures how often
+a pick that tripped it actually went on to lose. Anything that fires on picks recovering more
+than half the time is noise sold as a premium feature.
 
 **5. Premium is a commercial layer with nothing behind it.** No payment provider, no entitlement
 store, no receipt validation, and ₦ pricing implies a Nigerian payment rail. The paywall can be
@@ -503,3 +615,8 @@ until entitlements are real — treat the gating as presentational for now and s
 - [ ] No factor bar displays a fabricated weight; if attribution is unavailable the panel is
       labelled as inputs, not causes
 - [ ] Kick-off alert copy states the interval the backend actually fires at
+- [ ] Five tabs reachable, Saved among them, and the Hub's SAVED block opens the same screen
+- [ ] At-risk alerts fire once per saved fixture, never after the actionable window, and never
+      for a market with no in-play rule
+- [ ] Corners and basketball show NO in-play tag at all rather than a neutral one
+- [ ] Every at-risk threshold has been re-derived against settled fixtures before launch
