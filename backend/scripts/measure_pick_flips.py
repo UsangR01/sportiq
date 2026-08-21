@@ -32,10 +32,18 @@ Three different changes are counted separately, because they matter differently 
 It reuses the router's own _all_market_candidates/_pick_best rather than reimplementing the
 ranking, so the measurement cannot drift away from what the product actually shows.
 
-MEMORY. Fixtures are processed in batches, and only that batch's odds and predictions are held
-at once. The first version loaded everything up front and was OOM-KILLED on production -- the
-shell blanked and reconnected in a loop. Odds dominate: one tennis fixture can carry 40+ price
-rows across 18 bookmakers.
+MEMORY. The web shell runs INSIDE the live service container, alongside the running API, so
+headroom is small and this has been OOM-killed twice -- the shell blanks and reconnects in a
+loop. Three things keep it lean now:
+
+  * SMALL BATCHES (40). The binding constraint is not odds, it is bulk_corners_reference: it
+    gathers every TEAM in the batch and then queries their whole completed-fixture history, so
+    cost grows with distinct teams. 250 fixtures meant ~500 teams and tens of thousands of rows;
+    40 keeps that bounded.
+  * COLUMN QUERIES, NOT ORM ROWS. Odds and predictions are read as plain tuples and rebuilt as
+    lightweight objects, avoiding SQLAlchemy instrumentation and the session identity map for
+    what can be tens of thousands of rows per run.
+  * A fresh session per batch, dropped afterwards, so nothing accumulates across batches.
 
     PYTHONPATH=. python scripts/measure_pick_flips.py
     PYTHONPATH=. python scripts/measure_pick_flips.py --hours 2 6 12 24 --limit 3000
@@ -43,9 +51,11 @@ rows across 18 bookmakers.
 
 import argparse
 import asyncio
+import gc
 import sys
 from collections import defaultdict
-from datetime import timedelta
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -69,6 +79,28 @@ from app.picks.service import latest_price_per_bookmaker  # noqa: E402
 from app.predictions.models import Prediction  # noqa: E402
 from app.sports.models import League, Sport  # noqa: E402
 
+
+@dataclass(frozen=True, slots=True)
+class _LeanPrediction:
+    """Only the columns _all_market_candidates and _prediction_precedence actually read.
+
+    A stand-in for the ORM row so a full Prediction (with instrumentation and an identity-map
+    entry) never has to be materialised -- this script reads far more of them than any request
+    path does."""
+
+    id: object
+    created_at: datetime
+    kind: object
+    home_prob: float | None
+    draw_prob: float | None
+    away_prob: float | None
+    xg_home: float | None
+    xg_away: float | None
+    corners_xg_home: float | None
+    corners_xg_away: float | None
+    feature_completeness: float | None
+
+
 DEFAULT_HOURS = (2, 6, 12)
 DB_MARKETS = ("h2h", "double_chance", "total", "corners_total")
 # The mobile default min_probability. A pick crossing it is what the user reported for the WNBA
@@ -80,19 +112,22 @@ def _pick_as_of(prediction, odds_rows, as_of, sport_slug, league_slug, corners_r
     """The pick the feed WOULD have shown at `as_of`, or None if it would have shown nothing."""
     if prediction is None:
         return None
+    # Rows are plain tuples from a column query (see the MEMORY note), ordered:
+    # fixture_id, bookmaker, market, updated_at, home, draw, away, line, over, under.
     by_market = defaultdict(list)
-    for o in odds_rows:
-        if o.updated_at is not None and o.updated_at <= as_of:
-            by_market[o.market.value].append(
+    for row in odds_rows:
+        updated_at = row[3]
+        if updated_at is not None and updated_at <= as_of:
+            by_market[row[2].value].append(
                 {
-                    "bookmaker": o.bookmaker,
-                    "updated_at": o.updated_at,
-                    "home_odds": o.home_odds,
-                    "draw_odds": o.draw_odds,
-                    "away_odds": o.away_odds,
-                    "line": o.line,
-                    "over_odds": o.over_odds,
-                    "under_odds": o.under_odds,
+                    "bookmaker": row[1],
+                    "updated_at": updated_at,
+                    "home_odds": row[4],
+                    "draw_odds": row[5],
+                    "away_odds": row[6],
+                    "line": row[7],
+                    "over_odds": row[8],
+                    "under_odds": row[9],
                 }
             )
     odds_by_market = {m: latest_price_per_bookmaker(by_market.get(m, [])) for m in DB_MARKETS}
@@ -205,7 +240,9 @@ async def main() -> None:
     parser.add_argument("--hours", type=int, nargs="+", default=list(DEFAULT_HOURS))
     # 1500 rather than everything: see the MEMORY note in the module docstring.
     parser.add_argument("--limit", type=int, default=1500)
-    parser.add_argument("--batch", type=int, default=250)
+    # 40, not 250: bulk_corners_reference's cost grows with DISTINCT TEAMS in the batch, and it
+    # queries their entire completed history. See the MEMORY note in the module docstring.
+    parser.add_argument("--batch", type=int, default=40)
     args = parser.parse_args()
 
     async with async_session_factory() as db:
@@ -240,18 +277,48 @@ async def main() -> None:
         batch_ids = [f.id for f in batch]
         async with async_session_factory() as db:
             odds_by_fixture = defaultdict(list)
-            for o in (
-                await db.execute(select(Odds).where(Odds.fixture_id.in_(batch_ids)))
-            ).scalars():
-                odds_by_fixture[o.fixture_id].append(o)
+            for row in (
+                await db.execute(
+                    select(
+                        Odds.fixture_id,
+                        Odds.bookmaker,
+                        Odds.market,
+                        Odds.updated_at,
+                        Odds.home_odds,
+                        Odds.draw_odds,
+                        Odds.away_odds,
+                        Odds.line,
+                        Odds.over_odds,
+                        Odds.under_odds,
+                    ).where(Odds.fixture_id.in_(batch_ids))
+                )
+            ).all():
+                odds_by_fixture[row[0]].append(row)
             preds_by_fixture = defaultdict(list)
-            for p in (
-                await db.execute(select(Prediction).where(Prediction.fixture_id.in_(batch_ids)))
-            ).scalars():
-                preds_by_fixture[p.fixture_id].append(p)
+            for row in (
+                await db.execute(
+                    select(
+                        Prediction.fixture_id,
+                        Prediction.id,
+                        Prediction.created_at,
+                        Prediction.kind,
+                        Prediction.home_prob,
+                        Prediction.draw_prob,
+                        Prediction.away_prob,
+                        Prediction.xg_home,
+                        Prediction.xg_away,
+                        Prediction.corners_xg_home,
+                        Prediction.corners_xg_away,
+                        Prediction.feature_completeness,
+                    ).where(Prediction.fixture_id.in_(batch_ids))
+                )
+            ).all():
+                preds_by_fixture[row[0]].append(_LeanPrediction(*row[1:]))
             corners = await bulk_corners_reference(db, batch)
         _score_batch(batch, odds_by_fixture, preds_by_fixture, corners, meta, args.hours, acc)
-        print(f"  batch {number}/{len(batches)} done")
+        del odds_by_fixture, preds_by_fixture, corners
+        gc.collect()
+        print(f"  batch {number}/{len(batches)} done", flush=True)
 
     _report(args.hours, *acc)
     await engine.dispose()
