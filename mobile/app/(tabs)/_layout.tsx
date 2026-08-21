@@ -1,83 +1,116 @@
-import { SymbolView } from "expo-symbols";
 import { Tabs } from "expo-router";
+import { Text } from "react-native";
+import type { ColorValue } from "react-native";
 
-import Colors from "@/constants/Colors";
-import { useColorScheme } from "@/components/useColorScheme";
+import {
+  LiveGlyph,
+  PicksGlyph,
+  PremiumGlyph,
+  ProfileGlyph,
+  SavedGlyph,
+} from "@/components/tabs/TabGlyphs";
+import { SCREEN, TYPE, useTheme } from "@/lib/theme";
+
+/** Five tabs (design spec §2).
+ *
+ * Glyphs are drawn to the spec's own geometry rather than pulled from a platform symbol set —
+ * see components/tabs/TabGlyphs.tsx for why SymbolView could not match the design on more than
+ * one platform at a time.
+ *
+ * At 390px this is ~78px per tab, which fits an 11px label without truncation.
+ *
+ * DELIBERATELY the JS `Tabs` component rather than SDK 57's `NativeTabs` — checked against the
+ * v57 docs, not assumed. NativeTabs wraps the platform tab bar and accepts only SF Symbols,
+ * Material icons, drawables or image sources as icons; it cannot render an arbitrary React
+ * component, and it does not expose the bar's background, border and padding. This design
+ * specifies all four, so the native bar cannot express it.
+ *
+ * Headers stay off: every screen renders the wordmark itself (spec §10), so the router header
+ * would sit in a separate band above the design's own header.
+ */
+/** The tab label, rendered by us rather than by React Navigation.
+ *
+ * The design specifies the label's size, weight, tracking and colour exactly (spec §1.2), and
+ * `tabBarLabelStyle` is merged into an element whose height React Navigation sets itself.
+ * Supplying `tabBarLabel` replaces that element outright, so what ships is what the spec says
+ * rather than what survives a merge. */
+function TabLabel({ label, color }: { label: string; color: ColorValue }) {
+  return (
+    <Text numberOfLines={1} style={[TYPE.tabLabel, { color, textAlign: "center" }]}>
+      {label}
+    </Text>
+  );
+}
 
 export default function TabLayout() {
-  const colorScheme = useColorScheme();
+  const { colors } = useTheme();
 
   return (
     <Tabs
       screenOptions={{
-        tabBarActiveTintColor: Colors[colorScheme].tint,
-        // The Picks screen renders its own AppHeader so the title, sport/date controls and
-        // filters read as one surface; the router header sat in a separate band above them.
         headerShown: false,
+        tabBarActiveTintColor: colors.accent,
+        tabBarInactiveTintColor: colors.textFaint,
+        tabBarStyle: {
+          backgroundColor: colors.surface,
+          borderTopColor: colors.border,
+          borderTopWidth: 1,
+          paddingTop: 8,
+          paddingHorizontal: 8,
+          // Clears the home indicator; without it the labels sit under the gesture bar.
+          paddingBottom: SCREEN.tabBarPaddingBottom,
+          height: 58 + SCREEN.tabBarPaddingBottom,
+          // The design's own 1px rule is the separator; RN's default elevation would add a
+          // second, heavier one on Android and make the bar look detached from the screen.
+          elevation: 0,
+          shadowOpacity: 0,
+        },
       }}
     >
-      {/* Home and Picks were merged into one tab — the user's own words: "I don't think we
-          need two different pages - home and picks." index.tsx now IS the Picks feed
-          (day-strip/league-grouping retained per their explicit follow-up, but only surfacing
-          fixtures whose best pick — across every market — clears a real probability/odds
-          floor, not a general schedule browser). */}
+      {/* Home and Picks are one tab: "I don't think we need two different pages - home and
+          picks." index.tsx IS the Picks feed. */}
       <Tabs.Screen
         name="index"
         options={{
           title: "Picks",
-          tabBarIcon: ({ color }) => (
-            <SymbolView
-              name={{ ios: "target", android: "my_location", web: "my_location" }}
-              tintColor={color}
-              size={26}
-            />
-          ),
+          tabBarLabel: ({ color }) => <TabLabel label="Picks" color={color} />,
+          tabBarIcon: ({ color }) => <PicksGlyph color={color} />,
         }}
       />
       <Tabs.Screen
         name="live"
         options={{
           title: "Live",
-          tabBarIcon: ({ color }) => (
-            <SymbolView
-              name={{
-                ios: "dot.radiowaves.left.and.right",
-                android: "podcasts",
-                web: "podcasts",
-              }}
-              tintColor={color}
-              size={26}
-            />
-          ),
+          tabBarLabel: ({ color }) => <TabLabel label="Live" color={color} />,
+          tabBarIcon: ({ color }) => <LiveGlyph color={color} />,
         }}
       />
-      {/* Saved shows each fixture's pick AS IT WAS WHEN SAVED — a receipt. best_pick is
-          recomputed per request and never stored, so the Picks feed can legitimately show a
-          different call later; this is the one place a call is frozen. */}
+      {/* Top calls — the premium surface. Placed centre-right rather than last so it sits in
+          the thumb's reach without displacing Profile, which users expect at the end. */}
+      <Tabs.Screen
+        name="premium"
+        options={{
+          title: "Top calls",
+          tabBarLabel: ({ color }) => <TabLabel label="Top calls" color={color} />,
+          tabBarIcon: ({ color }) => <PremiumGlyph color={color} />,
+        }}
+      />
+      {/* Saved keeps its own tab. The Hub's SAVED block is a second route to the same screen,
+          not a replacement — saved picks are opened often enough to earn a permanent slot. */}
       <Tabs.Screen
         name="saved"
         options={{
           title: "Saved",
-          tabBarIcon: ({ color }) => (
-            <SymbolView
-              name={{ ios: "bookmark.fill", android: "bookmark", web: "bookmark" }}
-              tintColor={color}
-              size={26}
-            />
-          ),
+          tabBarLabel: ({ color }) => <TabLabel label="Saved" color={color} />,
+          tabBarIcon: ({ color }) => <SavedGlyph color={color} />,
         }}
       />
       <Tabs.Screen
         name="profile"
         options={{
           title: "Profile",
-          tabBarIcon: ({ color }) => (
-            <SymbolView
-              name={{ ios: "person.fill", android: "person", web: "person" }}
-              tintColor={color}
-              size={26}
-            />
-          ),
+          tabBarLabel: ({ color }) => <TabLabel label="Profile" color={color} />,
+          tabBarIcon: ({ color }) => <ProfileGlyph color={color} />,
         }}
       />
     </Tabs>
