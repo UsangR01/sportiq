@@ -51,6 +51,22 @@ export default function TabLayout() {
           ),
         }}
       />
+      {/* Saved shows each fixture's pick AS IT WAS WHEN SAVED — a receipt. best_pick is
+          recomputed per request and never stored, so the Picks feed can legitimately show a
+          different call later; this is the one place a call is frozen. */}
+      <Tabs.Screen
+        name="saved"
+        options={{
+          title: "Saved",
+          tabBarIcon: ({ color }) => (
+            <SymbolView
+              name={{ ios: "bookmark.fill", android: "bookmark", web: "bookmark" }}
+              tintColor={color}
+              size={26}
+            />
+          ),
+        }}
+      />
       <Tabs.Screen
         name="profile"
         options={{

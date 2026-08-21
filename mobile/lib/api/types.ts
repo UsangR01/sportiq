@@ -229,3 +229,24 @@ export interface GuestSessionState {
 export interface ApiErrorBody {
   detail?: string;
 }
+
+export interface WatchlistItem {
+  fixture_id: string;
+  sport_slug: string;
+  league_slug: string;
+  home_team: string;
+  away_team: string;
+  kickoff_utc: string;
+  kickoff_is_estimated: boolean;
+  status: string;
+  created_at: string;
+  // THE PICK AS IT WAS SHOWN when this fixture was saved — a receipt, not a live
+  // recomputation. best_pick is recomputed per request and never stored, so the feed can
+  // legitimately say something else by the time this list is opened. Null for a fixture saved
+  // before the backend started recording it, or one that had no pick at all when saved.
+  saved_market: PickMarket | null;
+  saved_selection: string | null;
+  saved_line: number | null;
+  saved_probability: number | null;
+  saved_odds: number | null;
+}

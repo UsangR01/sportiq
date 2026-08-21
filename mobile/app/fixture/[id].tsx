@@ -1,10 +1,12 @@
-import { useQuery } from "@tanstack/react-query";
-import { useLocalSearchParams } from "expo-router";
-import { ScrollView, Text, View } from "react-native";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link, useLocalSearchParams } from "expo-router";
+import { Pressable, ScrollView, Text, View } from "react-native";
 
 import { LiveBadge } from "@/components/fixtures/LiveBadge";
 import { getFixture } from "@/lib/api/fixtures";
 import type { ComparisonStat, ExtraMarketsResponse, HeadToHeadResponse } from "@/lib/api/types";
+import { addToWatchlist, listWatchlist, removeFromWatchlist } from "@/lib/api/watchlist";
+import { useAuthStore } from "@/store/authStore";
 
 export default function FixtureDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -49,9 +51,11 @@ export default function FixtureDetailScreen() {
       <Text className="mb-1 text-2xl font-bold text-gray-900 dark:text-gray-100">
         {fixture.home_team} vs {fixture.away_team}
       </Text>
-      <Text className="mb-6 text-sm text-gray-500 dark:text-gray-400">
+      <Text className="mb-3 text-sm text-gray-500 dark:text-gray-400">
         {kickoff.toLocaleString()}
       </Text>
+
+      <SaveControl fixtureId={fixture.id} />
 
       {fixture.live_state && (
         <View className="mb-6 rounded-xl bg-gray-50 p-4 dark:bg-gray-900">
@@ -379,6 +383,73 @@ function ProbabilityBar({
         {draw > 0 && <Text className="text-xs text-gray-500 dark:text-gray-400">Draw {draw}%</Text>}
         <Text className="text-xs text-gray-500 dark:text-gray-400">Away {away}%</Text>
       </View>
+    </View>
+  );
+}
+
+
+/** Save / remove, plus the honest reason to bother.
+ *
+ * Saving records the pick AS IT IS SHOWN RIGHT NOW, server-side. That matters because
+ * best_pick is recomputed on every request and never stored — the feed can legitimately show
+ * a different call tomorrow (odds land, features refresh, the model re-runs), which was
+ * reported as the app changing its mind after the fact. Saving is the only way to keep what
+ * you actually acted on.
+ *
+ * Auth-only, matching the endpoint: a guest session is device-bound Redis state with a 24h
+ * TTL, while a watchlist is durable and drives a push notification.
+ */
+function SaveControl({ fixtureId }: { fixtureId: string }) {
+  const accessToken = useAuthStore((state) => state.accessToken);
+  const queryClient = useQueryClient();
+
+  const watchlistQuery = useQuery({
+    queryKey: ["watchlist"],
+    queryFn: listWatchlist,
+    enabled: !!accessToken,
+  });
+
+  const isSaved = (watchlistQuery.data ?? []).some((item) => item.fixture_id === fixtureId);
+
+  const mutation = useMutation({
+    mutationFn: () => (isSaved ? removeFromWatchlist(fixtureId) : addToWatchlist(fixtureId)),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["watchlist"] }),
+  });
+
+  if (!accessToken) {
+    return (
+      <Link href="/auth/login" asChild>
+        <Pressable className="mb-6 self-start rounded-lg border border-slate-300 px-4 py-2 dark:border-slate-700">
+          <Text className="text-sm text-slate-600 dark:text-slate-300">
+            Sign in to save this pick
+          </Text>
+        </Pressable>
+      </Link>
+    );
+  }
+
+  return (
+    <View className="mb-6">
+      <Pressable
+        onPress={() => mutation.mutate()}
+        disabled={mutation.isPending}
+        className={`self-start rounded-lg px-4 py-2 ${
+          isSaved ? "border border-slate-300 dark:border-slate-700" : "bg-blue-600"
+        }`}
+      >
+        <Text
+          className={`text-sm font-semibold ${
+            isSaved ? "text-slate-600 dark:text-slate-300" : "text-white"
+          }`}
+        >
+          {mutation.isPending ? "…" : isSaved ? "Saved · tap to remove" : "Save this pick"}
+        </Text>
+      </Pressable>
+      {!isSaved && (
+        <Text className="mt-1 text-[11px] text-slate-400">
+          Keeps the pick exactly as it is now, even if it changes later.
+        </Text>
+      )}
     </View>
   );
 }
