@@ -520,15 +520,53 @@ Seed fixtures for development: Série A (Brazil, BR), Scottish Premiership (Scot
 Ordered by how much work sits behind them. Nothing here blocks starting the UI; all of it blocks
 shipping the screens that depend on it, so it is listed rather than discovered late.
 
-**1. Per-pick driver explanations — the biggest gap.** Both expanded panels (§3.2 factor rows,
-§5.4 "WHAT IS DRIVING THIS") need to say WHY a call was made, with a magnitude per factor. There
-is no feature-attribution anywhere in the system today: the models are XGBoost, the inputs are
-stored, but nothing computes or serves per-fixture contributions. Options, cheapest first:
-(a) surface the raw inputs already stored — recent form, rest days, H2H — as descriptive rows
-without claiming they caused anything; (b) global feature importances, which are honest but
-identical on every card; (c) real per-prediction SHAP values, which is the only version that
-supports the copy as written. **Do not fabricate factor weights to fill the bars.** If (a) is
-chosen, the eyebrow should read `WHAT WENT INTO THIS` rather than `WHY THE MODEL CALLED IT`.
+**1. Per-pick driver explanations — decided: exact TreeSHAP over a MARKET-BLIND model.**
+
+Both expanded panels (§3.2 factor rows, §5.4 "WHAT IS DRIVING THIS") need per-fixture magnitudes.
+Nothing computes attribution today, but the mechanism is cheaper than expected and was verified
+against the real artefacts before this was written:
+
+- XGBoost's own `pred_contribs=True` gives **exact TreeSHAP**, so **no `shap` dependency**.
+- **5.4 ms per row**, negligible beside the API calls a prediction already makes.
+- **Additivity verified**: contributions + bias reproduce the raw logit exactly, so the numbers
+  genuinely decompose the score rather than approximating it.
+
+Clean for tennis, NBA/WNBA, football corners and football goals — each is a single estimator over
+named features. **Football 1X2 is the awkward one**: Layer 2 sees only ten features and two of
+them (`xg_home`, `xg_away`) are Layer 1 OUTPUTS, so attribution bottoms out at "expected goals
+were 1.8 vs 1.1", which is not a reason a user can act on. Explain 1X2 from **Layer 1's** features
+instead and treat xG as the bridge, not a driver.
+
+**WHY MARKET-BLIND.** `market_implied_home/away/over25` are real input features, adopted on
+measured evidence as the best 1X2 result this project has produced. They are also, in probing,
+among the largest contributors — so a truthful panel would frequently say the biggest reason for
+a pick is *the bookmaker's price*. That is honest and unusable: it reads as circular next to a
+Premium screen selling "where the model disagrees with the market".
+
+Decision: **train a parallel market-blind variant per sport and compute explanations from it**,
+while the market-aware model continues to serve the probability.
+
+> **STATE THE COST PLAINLY, IN THE UI AND IN THE CODE.** The explanation then decomposes a
+> DIFFERENT model from the one that produced the number on the card. The contributions do not
+> sum to the displayed probability and must never be presented as though they do.
+> - Eyebrow reads **`WHAT THE FOOTBALL DATA SAYS`** (or the sport's equivalent), not
+>   "why the model called it".
+> - Show **direction and relative weight**, never a percentage that implies it adds up to the
+>   headline figure.
+> - **Divergence guard:** if the market-blind model favours a DIFFERENT outcome from the one on
+>   the card, suppress the panel entirely rather than justify a pick nobody made. Log it — a
+>   rising rate of divergence is a real signal about how much the market is carrying.
+
+**THE BONUS, AND IT IS THE REAL PRIZE.** The market-blind model's own probability is a *clean*
+read of the football, uncontaminated by the price. `blind_model − market` is therefore an honest
+disagreement measure, free of the circularity that otherwise compromises Top calls (§5). One
+artefact fixes the explanation problem and the "We disagree" problem together, and the Top calls
+caveat below should be revisited once it exists.
+
+**1a. Which sports actually need a blind variant.** Only where the market is genuinely an input:
+football does (all three market features). Tennis does **not** — `moneyline_implied_prob_home` is
+in the vector but measured as used in **zero splits**, so the serving model is already effectively
+market-blind and can explain itself. NBA/WNBA must be checked the same way before assuming either.
 
 **2. De-vigged market probability is computed but never exposed.** The whole Top calls screen
 rests on `gap = model − market`. The devig maths already exists server-side (it feeds the football
@@ -543,6 +581,11 @@ well-understood addition — the arithmetic is written and tested.
 > odds coverage than genuine insight. Markets the model does not see prices for (corners, and
 > anything in a league with no odds) are where a real disagreement can still appear. The screen
 > is still worth building; the copy should not imply an edge the architecture argues against.
+>
+> **This is fixable, and the fix is already scheduled.** Once the market-blind variant in §9.6.1
+> exists, compute the gap as `blind_model − market` instead. That comparison is not circular:
+> one side has never seen a price. Top calls should be built against the market-blind
+> probability from the start, and the market-aware model should continue to drive the pick.
 
 **3. Calibration figures must carry their own uncertainty.** §5.1 states *"When we say 70%, it
 happens 68% of the time"* over *"our last 412 published calls"*. The data exists, but the honest
@@ -620,3 +663,84 @@ until entitlements are real — treat the gating as presentational for now and s
       for a market with no in-play rule
 - [ ] Corners and basketball show NO in-play tag at all rather than a neutral one
 - [ ] Every at-risk threshold has been re-derived against settled fixtures before launch
+
+---
+
+## 11. Implementation plan
+
+Ordered so that each phase ships something usable and nothing waits on a phase that could fail.
+Backend work is called out separately because it gates screens rather than blocking the shell.
+
+### Phase 0 — foundations (no backend)
+1. Theme token map, both themes, single `darkMode` boolean; no colour at a call site.
+2. Type scale, tabular numerals, one-line truncation everywhere.
+3. Geometry constants (radii, paddings, 60px top / 22px bottom).
+4. Five-tab shell (§2) with the new `saved` glyph; wordmark on every screen.
+5. Odds-format helper (EU/UK/US) as ONE function, wired to the stored user preference — not a
+   second copy in local state.
+
+### Phase 1 — Picks screen (no backend)
+6. Fixed header: hamburger, wordmark, PRO pill, theme toggle, Filters button with dot.
+7. Date stepper + calendar popover; days-with-fixtures dots come from the day's data.
+8. Summary strip; **country picker** built from live data, cutting across sports, `All` when unset.
+9. Segmented control (All / Upcoming / Finished).
+10. League groups with **flag / competition badge** headers, favourite stars, pinning, and
+    matches as rows inside one card.
+11. Match row: status eyebrow, result disc, pick line, probability track, chevron.
+12. Filter sheet with sport / sub-tour chips and the two sliders.
+13. Filter pipeline in the documented order — including "a pick with no odds survives the odds
+    floor".
+
+### Phase 2 — fold in what already ships (no backend)
+14. `as of` provenance line in the expanded panel.
+15. `was {n}%` caption, only when present.
+16. Limited-data dimming below the completeness floor.
+17. Save / Remove action in the expanded panel.
+18. Restyle the existing Saved screen to §6.5 — receipts, upcoming/finished grouping,
+    `no pick recorded` state, guest and empty states.
+
+### Phase 3 — explanation engine (BACKEND, gates both expanded panels)
+19. Check whether NBA/WNBA actually use their moneyline feature (tennis is measured as not).
+20. Train **market-blind variants** where needed, via a training toggle, `--no-activate`, seeded.
+    Record the accuracy/RPS cost of dropping the market features — it is expected and fine, but
+    it should be a measured number, not an assumption.
+21. Stage them alongside the serving artefacts (`stage_artefacts.py`, manifest).
+22. Compute TreeSHAP at **prediction time** and store the contributions. It cannot be recomputed
+    later: the feature vector is only reconstructible at the moment of prediction, and rebuilding
+    it afterwards would explain the fixture with today's data.
+23. Route attribution per market — 1X2 from Layer 1, goals from the xG regressors, corners from
+    the corners pair, tennis/basketball from their single model.
+24. Group features into the five display labels; SHAP is additive, so summing within a group is
+    valid. Map machine names to human ones once, centrally.
+25. **Divergence guard**: blind model favours a different outcome → suppress the panel, and log
+    it as a rate worth watching.
+26. Expose on the fixture detail response. Older predictions carry nothing and say so.
+
+### Phase 4 — Live and at-risk alerts (BACKEND)
+27. Implement the §4.1 rule table as pure functions over live state — testable without a DB.
+28. Live card tag; **no tag at all** for corners and basketball.
+29. Dedupe stamp on the saved row so one alert fires per fixture, not one per 5-minute poll.
+30. Worker hook on the existing live-score poll; push via the existing Expo path.
+31. **Re-derive every threshold against settled fixtures before launch** — for each rule, how
+    often did a pick that tripped it go on to lose? Loosen anything that fires on picks which
+    recover more than half the time.
+32. Optional unblocks, each bounded: basketball `period` mapping, tennis `set_scores`, live
+    corner ingestion (this one has a real per-poll API cost — size it against quota first).
+
+### Phase 5 — Top calls (BACKEND + screen)
+33. Expose de-vigged market probability.
+34. Compute the gap from the **market-blind** probability (§9.6.1), not the serving one.
+35. Stance bands, gap legend, 20-cell bar with the two gradients and the carved overhang.
+36. Call rows, driver panel reusing Phase 3, direction-aware wording.
+37. Calibration block — only with `n` shown, and no band published below the reporting floor.
+
+### Phase 6 — Premium shell
+38. Hub, Paywall, plan rows, ₦ pricing, perks list.
+39. Gating as **presentational** against a local flag, clearly marked as unenforced.
+40. Entitlements, payment rail and receipt validation — a separate project, not this one.
+
+### Cross-cutting, do not skip
+41. Screenshot every feed-affecting change; the API check has twice said a change worked while
+    the screenshot showed it had traded one problem for another.
+42. Verify at 390px: nothing overflows, no team/league/country string wraps.
+43. Both themes on every screen.
