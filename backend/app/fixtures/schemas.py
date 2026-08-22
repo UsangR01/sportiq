@@ -16,6 +16,23 @@ class TeamFeaturesResponse(BaseModel):
     away_win_rate: float | None = None
 
 
+class DriverRow(BaseModel):
+    """One factor row in the expanded panel (design spec §3.2, §5.4).
+
+    `weight` is a RELATIVE share of the movement, never a probability, and the two must not be
+    confused in the UI. For football these contributions come from a market-blind model that
+    never saw a price, so they decompose a DIFFERENT model from the one that produced the
+    probability on the card and cannot sum to it -- which is why the panel's eyebrow says what
+    the DATA says rather than "why the model called it".
+    """
+
+    label: str
+    #: Positive means this factor supports the pick being shown, whatever the market or side.
+    contribution: float
+    #: |contribution| as a share of all rows' |contribution|, in 0..1.
+    weight: float
+
+
 class BestPick(BaseModel):
     """The model's single favoured outcome for this fixture, with the best available odds for
     it — drawn from ACROSS every market this product supports (h2h, double chance, Over/Under
@@ -55,6 +72,17 @@ class BestPick(BaseModel):
     # fixture; null when the pick has not meaningfully moved, which is the common case.
     as_of: datetime | None = None
     previous_probability: float | None = None
+    # The three biggest real-world factors behind this pick, or null.
+    #
+    # Null is an ORDINARY outcome, not an error, and the client must render nothing rather than
+    # a placeholder: predictions written before attribution existed carry none (contributions
+    # cannot be reconstructed after the fact), a draw pick has no expressible direction, and the
+    # divergence guard suppresses the panel outright when the market-blind model favours a
+    # different outcome from the one on the card.
+    drivers: list[DriverRow] | None = None
+    # True when `drivers` came from a market-blind variant rather than the serving model, so the
+    # UI can label them as what the DATA says instead of implying they add up to `probability`.
+    drivers_are_market_blind: bool = False
 
 
 class LiveStateResponse(BaseModel):

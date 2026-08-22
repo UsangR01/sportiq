@@ -135,6 +135,20 @@ FEATURE_NAMES = (
     "market_implied_over25",
 )
 
+#: The three inputs that carry the BOOKMAKER'S OWN OPINION rather than anything about the
+#: football. Named here because two very different places have to agree on exactly which ones
+#: they are: ml/training/train_football.py --market-blind drops them to train the explanation
+#: variant, and the attribution engine refuses to explain a model that still contains them.
+#:
+#: A tuple rather than a "market_" prefix test: a prefix rule silently captures any future
+#: feature that happens to start the same way, and the whole point of the blind variant is that
+#: its exclusion list is deliberate rather than incidental.
+MARKET_FEATURE_NAMES: tuple[str, ...] = (
+    "market_implied_home",
+    "market_implied_away",
+    "market_implied_over25",
+)
+
 # RE-ENABLED 2026-08-11, AFTER a clear negative result at a third of the training data. The
 # original finding and its stated re-enable condition are kept below verbatim, because the
 # condition being met is the entire reason this was retried rather than left alone.

@@ -23,6 +23,7 @@ from app.fixtures.models import Fixture, FixtureLiveState, FixtureStatus, Team, 
 from app.fixtures.schemas import (
     BestPick,
     ComparisonStat,
+    DriverRow,
     ExtraMarketsResponse,
     FixtureDetail,
     FixtureSummary,
@@ -41,6 +42,7 @@ from app.picks.service import (
     best_totals_odds,
     latest_price_per_bookmaker,
 )
+from app.predictions.explanation import explain_pick
 from app.predictions.models import Prediction, PredictionKind
 from app.sports.models import League, Sport
 
@@ -66,6 +68,10 @@ class _MarketCandidate:
     # unstored pick needs to say so on the card.
     as_of: datetime | None = None
     previous_probability: float | None = None
+    # The raw stored TreeSHAP blob from the Prediction row, resolved into display rows per
+    # candidate in _candidate_to_best_pick -- because the SIGN depends on which selection is
+    # being shown, so it cannot be resolved once for the fixture.
+    driver_contributions: dict | None = None
 
 
 def _build_extra_markets(
@@ -279,12 +285,21 @@ def _all_market_candidates(
     # Stamped once here rather than threaded through every construction above: completeness is
     # a property of the PREDICTION, identical for every candidate derived from it.
     return [
-        replace(candidate, feature_completeness=prediction.feature_completeness)
+        replace(
+            candidate,
+            feature_completeness=prediction.feature_completeness,
+            driver_contributions=prediction.driver_contributions,
+        )
         for candidate in candidates
     ]
 
 
 def _candidate_to_best_pick(candidate: _MarketCandidate) -> BestPick:
+    # Resolved per candidate rather than per fixture: "positive supports the pick" means the
+    # contributions flip sign between a home pick and an away one on the same prediction.
+    explanation = explain_pick(
+        candidate.driver_contributions, market=candidate.market, selection=candidate.selection
+    )
     return BestPick(
         selection=candidate.selection,
         probability=candidate.probability,
@@ -294,6 +309,15 @@ def _candidate_to_best_pick(candidate: _MarketCandidate) -> BestPick:
         feature_completeness=candidate.feature_completeness,
         as_of=candidate.as_of,
         previous_probability=candidate.previous_probability,
+        drivers=(
+            [
+                DriverRow(label=row.label, contribution=row.contribution, weight=row.weight)
+                for row in explanation.rows
+            ]
+            if explanation is not None
+            else None
+        ),
+        drivers_are_market_blind=explanation is not None and explanation.is_market_blind,
     )
 
 

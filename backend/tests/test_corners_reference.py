@@ -223,6 +223,7 @@ def test_corners_candidates_are_blended_but_goals_and_h2h_are_not():
         xg_home = xg_away = 1.4
         corners_xg_home = corners_xg_away = 6.0  # 12 total -> strongly OVER 10.5
         feature_completeness = 1.0
+        driver_contributions = None  # this test is about probabilities, not explanations
 
     plain = {
         c.market + str(c.selection) + str(c.line): c.probability

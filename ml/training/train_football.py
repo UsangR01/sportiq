@@ -82,6 +82,7 @@ from app.models_ml.football import FootballModel  # noqa: E402
 from app.models_ml.football_features import (  # noqa: E402
     CORNERS_FEATURE_NAMES,
     FEATURE_NAMES,
+    MARKET_FEATURE_NAMES,
     assemble_from_game_log,
     merge_corners_into_game_log,
     merge_xg_into_game_log,
@@ -594,6 +595,25 @@ EVALUATION_DIR = ML_DIR / "evaluation"
 
 ARTEFACT_PREFIX = "football_xgb_"
 
+# Set by --market-blind. Drops MARKET_FEATURE_NAMES from every estimator's input vector so the
+# resulting artefact has never seen a bookmaker's price.
+#
+# WHY A WHOLE SECOND MODEL RATHER THAN JUST HIDING THOSE COLUMNS AT EXPLAIN TIME: contributions
+# are only meaningful for a model that was FIT without the feature. Zeroing a column the trees
+# already split on explains a counterfactual nobody served, and the remaining features would
+# still carry the market's influence through the splits that were chosen because of it.
+#
+# This artefact NEVER SERVES A PROBABILITY on a card. It exists to say WHY, and (§9.6) to give
+# Top calls a disagreement measure that is not circular.
+MARKET_BLIND = False
+
+
+def _model_feature_cols(names: tuple[str, ...]) -> list[str]:
+    """The input vector for this run: every feature, minus the market ones when --market-blind."""
+    if not MARKET_BLIND:
+        return list(names)
+    return [name for name in names if name not in MARKET_FEATURE_NAMES]
+
 
 def model_version_for(artefact_path: Path) -> str:
     """The models_registry version string for an artefact, derived from its own filename.
@@ -795,7 +815,7 @@ async def main_async() -> None:
     test_df = examples[examples["season"] == TEST_SEASON]
     print(f"train={len(train_df)} val={len(val_df)} test={len(test_df)}")
 
-    feature_cols = list(FEATURE_NAMES)
+    feature_cols = _model_feature_cols(FEATURE_NAMES)
     X_train = train_df[feature_cols].astype(float)
     X_val = val_df[feature_cols].astype(float)
     X_test = test_df[feature_cols].astype(float)
@@ -827,7 +847,7 @@ async def main_async() -> None:
     # docstring for why this replaces the earlier "just reuse Layer 1's vector" simplification).
     # Rows missing a real corner count (not every historical fixture's /fixtures/statistics
     # call returned one) are excluded from fitting, not zero-filled.
-    corners_feature_cols = list(CORNERS_FEATURE_NAMES)
+    corners_feature_cols = _model_feature_cols(CORNERS_FEATURE_NAMES)
     X_train_corners = train_df[corners_feature_cols].astype(float)
     X_val_corners = val_df[corners_feature_cols].astype(float)
     X_test_corners = test_df[corners_feature_cols].astype(float)
@@ -1241,7 +1261,13 @@ async def main_async() -> None:
                         f"actual={actual_under[in_bucket].mean():.3f}"
                     )
 
-    artefact_path = ARTIFACT_DIR / f"football_xgb_{datetime.now(UTC):%Y%m%d%H%M%S}.joblib"
+    # The variant is in the FILENAME, so model_version_for() carries it into the registry
+    # version string too -- a blind artefact can never be mistaken for a serving one by
+    # reading either the disk or the database.
+    variant_suffix = "_blind" if MARKET_BLIND else ""
+    artefact_path = (
+        ARTIFACT_DIR / f"football_xgb_{datetime.now(UTC):%Y%m%d%H%M%S}{variant_suffix}.joblib"
+    )
     joblib.dump(
         {
             "layer1_home_model": layer1_home_model,
@@ -1256,6 +1282,10 @@ async def main_async() -> None:
             "xg_away_calibrator": xg_away_calibrator,
             "corners_home_calibrator": corners_home_calibrator,
             "corners_away_calibrator": corners_away_calibrator,
+            # Read by the attribution engine, which refuses to explain an artefact that still
+            # contains the market features. An older artefact has no such key and is treated as
+            # market-aware, which is what it is.
+            "market_blind": MARKET_BLIND,
         },
         artefact_path,
     )
@@ -1376,7 +1406,7 @@ async def main_async() -> None:
 
 
 def main() -> None:
-    global ACTIVATE_ON_REGISTER
+    global ACTIVATE_ON_REGISTER, MARKET_BLIND
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--no-activate",
@@ -1385,7 +1415,21 @@ def main() -> None:
         "MEASUREMENT rather than a promotion - an experiment arm must not become the served "
         "model just by finishing.",
     )
-    ACTIVATE_ON_REGISTER = not parser.parse_args().no_activate
+    parser.add_argument(
+        "--market-blind",
+        action="store_true",
+        help="Train the EXPLANATION variant: drop market_implied_* so the artefact has never "
+        "seen a bookmaker's price. Implies --no-activate - this model must never serve a "
+        "probability on a card.",
+    )
+    args = parser.parse_args()
+    MARKET_BLIND = args.market_blind
+    # Not merely defaulted: FORCED. A blind model activating itself would replace the served
+    # probability with a deliberately worse one, and this project has already been bitten twice
+    # by train scripts that activate whatever finishes last.
+    ACTIVATE_ON_REGISTER = not (args.no_activate or args.market_blind)
+    if MARKET_BLIND:
+        print("MARKET-BLIND RUN: dropping " + ", ".join(MARKET_FEATURE_NAMES))
 
     asyncio.run(main_async())
 

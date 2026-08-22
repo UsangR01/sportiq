@@ -13,7 +13,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -98,6 +98,20 @@ class Prediction(Base):
         nullable=False,
         server_default=PredictionKind.UNKNOWN.name,
     )
+    # Exact TreeSHAP contributions, computed at PREDICTION TIME by the market-blind variant
+    # (app/models_ml/attribution.py). Null for every row written before this existed, and for
+    # any sport with no blind artefact staged.
+    #
+    # STORED RATHER THAN DERIVED, AND IT CANNOT BE BACKFILLED. Contributions are a function of
+    # the feature vector as it stood at the moment of inference; reconstructing that vector
+    # afterwards would explain the fixture with today's form, today's Elo and today's odds
+    # coverage. An old prediction therefore carries no explanation and says so, rather than
+    # being handed a plausible one invented after the result was known.
+    #
+    # Raw per-feature values per estimator, NOT the grouped display rows: grouping is a
+    # presentation choice that will change, and re-grouping stored numbers costs nothing while
+    # re-running inference to change a label would cost real API calls.
+    driver_contributions: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

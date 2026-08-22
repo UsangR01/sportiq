@@ -6,6 +6,7 @@ from sqlalchemy import select
 from app.core.database import async_session_factory
 from app.fixtures.models import Fixture, TeamFeatures
 from app.models_ml.runner import ModelRunner
+from app.predictions.explanation import compute_driver_contributions
 from app.predictions.models import Prediction, PredictionKind
 from app.predictions.service import confidence_tier_for_probability, feature_completeness
 from app.sports.models import Sport
@@ -107,6 +108,11 @@ async def _run_predictions(fixture_id: uuid.UUID) -> None:
 
         features = await _assemble_features(db, sport.slug, fixture, home_features, away_features)
         result = model.predict(features)
+        # Computed HERE, beside the prediction, because contributions decompose the feature
+        # vector as it stands at this instant. Reconstructing it later would explain the fixture
+        # with form and odds that had not happened yet, so this is the only moment it can be
+        # done honestly. Returns None rather than raising - see compute_driver_contributions.
+        drivers = await compute_driver_contributions(db, sport.slug, features, model)
 
         probability = max(result.home_prob, result.away_prob, result.draw_prob or 0.0)
         prediction = Prediction(
@@ -124,6 +130,7 @@ async def _run_predictions(fixture_id: uuid.UUID) -> None:
             xg_away=result.xg_away,
             corners_xg_home=result.corners_xg_home,
             corners_xg_away=result.corners_xg_away,
+            driver_contributions=drivers,
             created_at=datetime.now(UTC),
         )
         db.add(prediction)
