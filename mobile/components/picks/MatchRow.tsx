@@ -1,3 +1,4 @@
+import { router } from "expo-router";
 import { Pressable, Text, View } from "react-native";
 
 import { formatOdds, type OddsFormat } from "@/lib/oddsFormat";
@@ -328,6 +329,48 @@ function ExpandedPanel({
               better than one that explains something we cannot yet compute. */}
           Why the model called it is coming soon.
         </Text>
+
+        {/* THE ROUTE TO THE FIXTURE SCREEN, and it is not optional.
+         *
+         * Head-to-head history, every other market's prediction, and match stats all live on
+         * that screen. Before this feed expanded rows inline, tapping a card went there; the
+         * expansion replaced that navigation and briefly left the whole thing unreachable from
+         * the feed.
+         *
+         * A link rather than folding the content in here: the H2H panel alone is a win/draw/win
+         * record plus five stat rows, and it costs up to six live API calls per view. That
+         * belongs on a screen someone deliberately opens, not one that fires whenever a row is
+         * tapped open. */}
+        <Pressable
+          onPress={() => router.push(`/fixture/${fixture.id}`)}
+          accessibilityRole="link"
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            justifyContent: "space-between",
+            marginTop: 12,
+            paddingTop: 12,
+            borderTopWidth: 1,
+            borderTopColor: colors.border,
+          }}
+        >
+          <View>
+            <Text style={[TYPE.pick, { color: colors.accent }]}>Full details</Text>
+            <Text style={[TYPE.caption, { color: colors.textFaint, fontWeight: "400" }]}>
+              Head-to-head, other markets, match stats
+            </Text>
+          </View>
+          <View
+            style={{
+              width: 8,
+              height: 8,
+              borderRightWidth: 1.8,
+              borderTopWidth: 1.8,
+              borderColor: colors.accent,
+              transform: [{ rotate: "45deg" }],
+            }}
+          />
+        </Pressable>
 
         {fixture.status === "scheduled" && (
           <Pressable
