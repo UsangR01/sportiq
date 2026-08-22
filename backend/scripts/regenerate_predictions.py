@@ -130,7 +130,14 @@ async def main(confirm: bool, sport_slug: str, limit: int, queue: bool) -> None:
     if len(targets) > 10:
         print(f"  ... and {len(targets) - 10} more")
 
-    print(f"\ncost: ~{len(targets)} API-Football head-to-head calls, one per fixture")
+    # Named per sport rather than hardcoded: only football's head-to-head comes from
+    # API-Football. Tennis and NBA assemble theirs from BallDontLie, and naming the wrong
+    # provider in a cost estimate is the kind of small untruth that gets quoted back later
+    # when someone is working out which quota a run will spend.
+    provider = {"football": "API-Football", "tennis": "BallDontLie", "nba": "BallDontLie"}.get(
+        sport_slug, "provider"
+    )
+    print(f"\ncost: ~{len(targets)} {provider} head-to-head calls, one per fixture")
     if not confirm:
         print("dry run - re-run with --confirm to regenerate")
         await engine.dispose()
