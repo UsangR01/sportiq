@@ -179,16 +179,50 @@ async def compute_driver_contributions(
         return None
 
 
-def _blind_favours(blind_probabilities: dict[str, float | None]) -> str | None:
-    """Which 1X2 outcome the market-blind model itself prefers."""
+#: The outcomes each guarded selection WINS on. A selection is contradicted only when the blind
+#: model gives its complement more probability -- which for a double chance is a genuinely
+#: different question from which single outcome tops the table.
+#:
+#: An Over/Under pick is absent deliberately: it is about how MANY goals, not who wins, so a
+#: blind model preferring a different winner says nothing about whether its goals reasoning
+#: agrees.
+_SELECTION_WINS_ON: dict[str, frozenset[str]] = {
+    "home": frozenset({"home"}),
+    "away": frozenset({"away"}),
+    "1X": frozenset({"home", "draw"}),
+    "X2": frozenset({"away", "draw"}),
+}
+
+
+def _blind_contradicts(selection: str, blind_probabilities: dict[str, float | None]) -> bool:
+    """Does the market-blind model rate this selection the wrong side of its own question?
+
+    THE TEST DIFFERS BY MARKET, because the two markets ask different questions, and using one
+    rule for both is wrong in opposite directions. Both errors were measured on real stored
+    contributions rather than reasoned about:
+
+    * H2H picks ONE outcome out of three, so the question is whether the blind model ranks the
+      same one top. A complement test would suppress a perfectly ordinary home pick at 0.45,
+      because "not home" sums higher -- it cut home panels from 15 to 8 when tried.
+    * DOUBLE CHANCE picks a PAIR, so the question is whether that pair outweighs what is left.
+      An argmax test suppressed X2 in 15 of 16 fixtures, because football's home advantage makes
+      `home` the top single outcome nearly always -- including where the blind model agreed X2
+      was the likelier side, measured at 8 of 16. X2 is the most common football pick there is.
+    """
+    wins_on = _SELECTION_WINS_ON.get(selection)
+    if wins_on is None:
+        return False
     scored = {key: value for key, value in blind_probabilities.items() if value is not None}
-    return max(scored, key=scored.__getitem__) if scored else None
+    if not scored:
+        return False
 
+    if len(wins_on) == 1:
+        # H2H: is this the blind model's own top single outcome?
+        return max(scored, key=scored.__getitem__) not in wins_on
 
-#: Selections whose direction the divergence guard can meaningfully test against a 1X2 favourite.
-#: An Over/Under pick is about how MANY goals, not about who wins, so a blind model preferring a
-#: different winner says nothing about whether its goals reasoning agrees.
-_GUARDED_SELECTIONS = {"home": "home", "away": "away", "1X": "home", "X2": "away"}
+    backing = sum(value for key, value in scored.items() if key in wins_on)
+    against = sum(value for key, value in scored.items() if key not in wins_on)
+    return against > backing
 
 
 def explain_pick(stored: dict | None, *, market: str, selection: str) -> PickExplanation | None:
@@ -213,16 +247,12 @@ def explain_pick(stored: dict | None, *, market: str, selection: str) -> PickExp
             )
         else:
             blind_probabilities = stored.get("blind_probabilities") or {}
-            guarded = _GUARDED_SELECTIONS.get(selection)
-            if guarded is not None:
-                favoured = _blind_favours(blind_probabilities)
-                if favoured is not None and favoured != guarded:
-                    logger.info(
-                        "divergence: blind model favours %s, card shows %s - panel suppressed",
-                        favoured,
-                        selection,
-                    )
-                    return None
+            if _blind_contradicts(selection, blind_probabilities):
+                logger.info(
+                    "divergence: blind model rates %s the less likely side - panel suppressed",
+                    selection,
+                )
+                return None
             combined = contributions_for_selection(estimators, market=market, selection=selection)
 
         rows = group_contributions(combined, top_n=PANEL_ROWS)

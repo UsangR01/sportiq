@@ -47,12 +47,30 @@ def test_the_divergence_guard_suppresses_a_pick_the_blind_model_disagrees_with()
     assert explain_pick(_FOOTBALL, market="h2h", selection="away") is None
 
 
-def test_double_chance_is_guarded_by_the_side_it_leans_toward() -> None:
-    """1X leans home and X2 leans away, so the same guard applies to both — otherwise the
-    suppression could be sidestepped by picking the double-chance version of a pick the
-    football does not support."""
-    assert explain_pick(_FOOTBALL, market="double_chance", selection="1X") is not None
-    assert explain_pick(_FOOTBALL, market="double_chance", selection="X2") is None
+def test_double_chance_is_judged_against_its_complement_not_the_argmax() -> None:
+    """THE BUG THIS EXISTS TO PREVENT, found in production.
+
+    Football's home advantage makes `home` the single likeliest outcome in most fixtures
+    (measured: 15 of 16 recent predictions), so an argmax test suppressed nearly every X2 panel
+    — including where the blind model AGREED X2 was the likelier side, measured at 8 of 16. X2
+    is the most common football pick there is, so the panel silently blanked on half the feed.
+
+    Here home is 0.45 and X2 combines to 0.55, so the blind model favours home as a SINGLE
+    outcome while still rating X2 the likelier side. Both panels must render.
+    """
+    stored = dict(_FOOTBALL, blind_probabilities={"home": 0.45, "draw": 0.25, "away": 0.30})
+
+    assert explain_pick(stored, market="double_chance", selection="X2") is not None
+    assert explain_pick(stored, market="double_chance", selection="1X") is not None
+
+
+def test_double_chance_is_still_suppressed_when_the_blind_model_really_disagrees() -> None:
+    """The guard must keep biting: home at 0.62 outweighs away+draw at 0.38, so an X2 panel
+    would be justifying a pick the football argues against."""
+    stored = dict(_FOOTBALL, blind_probabilities={"home": 0.62, "draw": 0.20, "away": 0.18})
+
+    assert explain_pick(stored, market="double_chance", selection="X2") is None
+    assert explain_pick(stored, market="double_chance", selection="1X") is not None
 
 
 def test_over_under_is_not_guarded_by_the_1x2_favourite() -> None:
