@@ -1,6 +1,6 @@
 import { Text, View } from "react-native";
 
-import { SCREEN, TYPE, useTheme } from "@/lib/theme";
+import { SCREEN, TYPE, useTheme, useScreenInsets } from "@/lib/theme";
 
 /** Top calls — PLACEHOLDER.
  *
@@ -14,13 +14,14 @@ import { SCREEN, TYPE, useTheme } from "@/lib/theme";
  */
 export default function PremiumScreen() {
   const { colors } = useTheme();
+  const insets = useScreenInsets();
   return (
     <View
       style={{
         flex: 1,
         backgroundColor: colors.bg,
         paddingHorizontal: SCREEN.padding,
-        paddingTop: SCREEN.paddingTop,
+        paddingTop: insets.top,
       }}
     >
       <Text style={[TYPE.wordmarkCompact, { color: colors.text }]}>SportPIQ</Text>

@@ -16,7 +16,7 @@ import {
   registerForPushNotificationsAsync,
   setPushNotificationsEnabledFlag,
 } from "@/lib/notifications";
-import { ONE_LINE, RADIUS, SCREEN, TYPE, useTheme } from "@/lib/theme";
+import { ONE_LINE, RADIUS, SCREEN, TYPE, useTheme, useScreenInsets } from "@/lib/theme";
 import { useAuthStore } from "@/store/authStore";
 import { useThemeStore } from "@/store/themeStore";
 
@@ -28,6 +28,7 @@ import { useThemeStore } from "@/store/themeStore";
  */
 export default function ProfileScreen() {
   const { colors, isDark, elevation } = useTheme();
+  const insets = useScreenInsets();
   const email = useAuthStore((s) => s.email);
   const accessToken = useAuthStore((s) => s.accessToken);
   const refreshToken = useAuthStore((s) => s.refreshToken);
@@ -105,7 +106,7 @@ export default function ProfileScreen() {
       style={{
         flex: 1,
         backgroundColor: colors.bg,
-        paddingTop: SCREEN.paddingTop,
+        paddingTop: insets.top,
         paddingHorizontal: SCREEN.padding,
       }}
     >

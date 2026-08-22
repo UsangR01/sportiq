@@ -10,10 +10,15 @@
 export const SCREEN = {
   /** Horizontal padding on every screen. */
   padding: 18,
-  /** Clears the status bar. 58 on full-screen overlays, which sit above the normal chrome. */
+  /** REFERENCE ONLY — do NOT use these for layout. Use `useScreenInsets()`.
+   *
+   * These are the design canvas's own numbers, taken on an iPhone 14 whose status-bar inset is
+   * ~47 and whose home indicator is ~34. Applied literally they put the tab bar UNDERNEATH
+   * Android's ~48dp three-button navigation bar, which is how it shipped and was reported from
+   * a real device. They are kept because the 13px gap useScreenInsets adds below the status bar
+   * is derived from `paddingTop` minus that canvas inset. */
   paddingTop: 60,
   paddingTopOverlay: 58,
-  /** Clears the home indicator under the tab bar. */
   tabBarPaddingBottom: 22,
   /** The design canvas width — assert against this when checking for overflow. */
   canvasWidth: 390,

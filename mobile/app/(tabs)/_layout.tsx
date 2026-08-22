@@ -9,7 +9,7 @@ import {
   ProfileGlyph,
   SavedGlyph,
 } from "@/components/tabs/TabGlyphs";
-import { SCREEN, TYPE, useTheme } from "@/lib/theme";
+import { TYPE, useScreenInsets, useTheme } from "@/lib/theme";
 
 /** Five tabs (design spec §2).
  *
@@ -44,6 +44,7 @@ function TabLabel({ label, color }: { label: string; color: ColorValue }) {
 
 export default function TabLayout() {
   const { colors } = useTheme();
+  const insets = useScreenInsets();
 
   return (
     <Tabs
@@ -57,9 +58,11 @@ export default function TabLayout() {
           borderTopWidth: 1,
           paddingTop: 8,
           paddingHorizontal: 8,
-          // Clears the home indicator; without it the labels sit under the gesture bar.
-          paddingBottom: SCREEN.tabBarPaddingBottom,
-          height: 58 + SCREEN.tabBarPaddingBottom,
+          // MEASURED FROM THE DEVICE, not the design canvas. A hardcoded 22 (the iPhone
+          // home-indicator figure) put the bar underneath Android's ~48dp three-button
+          // navigation bar, making the labels and glyphs partly untappable.
+          paddingBottom: insets.bottom,
+          height: 58 + insets.bottom,
           // The design's own 1px rule is the separator; RN's default elevation would add a
           // second, heavier one on Android and make the bar look detached from the screen.
           elevation: 0,

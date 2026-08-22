@@ -7,7 +7,7 @@ import type { FixtureSummary } from "@/lib/api/types";
 import { getPreferences } from "@/lib/api/users";
 import { formatOdds, toOddsFormat, type OddsFormat } from "@/lib/oddsFormat";
 import { pickHeadline } from "@/lib/pickFormat";
-import { GAP, ONE_LINE, RADIUS, SCREEN, TRACK_HEIGHT, TYPE, useTheme } from "@/lib/theme";
+import { GAP, ONE_LINE, RADIUS, SCREEN, TRACK_HEIGHT, TYPE, useTheme, useScreenInsets } from "@/lib/theme";
 import { useAuthStore } from "@/store/authStore";
 
 /** Football's regulation time, used only to draw the elapsed-time track.
@@ -27,6 +27,7 @@ const FOOTBALL_FULL_TIME = 90;
  */
 export default function LiveScreen() {
   const { colors } = useTheme();
+  const insets = useScreenInsets();
   const accessToken = useAuthStore((state) => state.accessToken);
 
   const liveQuery = useQuery({
@@ -48,7 +49,7 @@ export default function LiveScreen() {
     <View style={{ flex: 1, backgroundColor: colors.bg }}>
       <View
         style={{
-          paddingTop: SCREEN.paddingTop,
+          paddingTop: insets.top,
           paddingHorizontal: SCREEN.padding,
           paddingBottom: 12,
           flexDirection: "row",

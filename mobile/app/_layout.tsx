@@ -1,4 +1,5 @@
 import { QueryClientProvider } from "@tanstack/react-query";
+import { SafeAreaProvider } from "react-native-safe-area-context";
 import { useFonts } from "expo-font";
 import { DarkTheme, DefaultTheme, router, Stack, ThemeProvider } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
@@ -89,25 +90,30 @@ function RootLayoutNav() {
   const colorScheme = useColorScheme();
 
   return (
-    <QueryClientProvider client={queryClient}>
-      <AccountThemeSync />
-      <ThemeProvider value={colorScheme === "dark" ? DarkTheme : DefaultTheme}>
-        <Stack>
-          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-          <Stack.Screen name="fixture/[id]" options={{ title: "Fixture" }} />
-          <Stack.Screen name="history/index" options={{ title: "History" }} />
-          <Stack.Screen name="how-it-works/index" options={{ title: "How It Works" }} />
-          <Stack.Screen
-            name="auth/login"
-            options={{ title: "Log In", presentation: "modal" }}
-          />
-          <Stack.Screen
-            name="auth/register"
-            options={{ title: "Sign Up", presentation: "modal" }}
-          />
-        </Stack>
-      </ThemeProvider>
-    </QueryClientProvider>
+    // REQUIRED for useSafeAreaInsets to report anything — without it every inset reads 0 and
+    // screens fall back to hardcoded iPhone numbers, which is exactly how the tab bar ended up
+    // underneath Android's navigation buttons.
+    <SafeAreaProvider>
+      <QueryClientProvider client={queryClient}>
+        <AccountThemeSync />
+        <ThemeProvider value={colorScheme === "dark" ? DarkTheme : DefaultTheme}>
+          <Stack>
+            <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+            <Stack.Screen name="fixture/[id]" options={{ title: "Fixture" }} />
+            <Stack.Screen name="history/index" options={{ title: "History" }} />
+            <Stack.Screen name="how-it-works/index" options={{ title: "How It Works" }} />
+            <Stack.Screen
+              name="auth/login"
+              options={{ title: "Log In", presentation: "modal" }}
+            />
+            <Stack.Screen
+              name="auth/register"
+              options={{ title: "Sign Up", presentation: "modal" }}
+            />
+          </Stack>
+        </ThemeProvider>
+      </QueryClientProvider>
+    </SafeAreaProvider>
   );
 }
 

@@ -8,7 +8,7 @@ import { getPreferences } from "@/lib/api/users";
 import { listWatchlist, removeFromWatchlist } from "@/lib/api/watchlist";
 import { formatOdds, toOddsFormat, type OddsFormat } from "@/lib/oddsFormat";
 import { pickHeadline } from "@/lib/pickFormat";
-import { GAP, ONE_LINE, RADIUS, RESULT_DISC, SCREEN, TYPE, useTheme } from "@/lib/theme";
+import { GAP, ONE_LINE, RADIUS, RESULT_DISC, SCREEN, TYPE, useTheme, useScreenInsets } from "@/lib/theme";
 import { useAuthStore } from "@/store/authStore";
 
 /** Saved picks (design spec §6.5).
@@ -24,6 +24,7 @@ import { useAuthStore } from "@/store/authStore";
  */
 export default function SavedScreen() {
   const { colors } = useTheme();
+  const insets = useScreenInsets();
   const accessToken = useAuthStore((state) => state.accessToken);
   const isHydrated = useAuthStore((state) => state.isHydrated);
   const queryClient = useQueryClient();
@@ -60,7 +61,7 @@ export default function SavedScreen() {
     <View style={{ flex: 1, backgroundColor: colors.bg }}>
       <View
         style={{
-          paddingTop: SCREEN.paddingTop,
+          paddingTop: insets.top,
           paddingHorizontal: SCREEN.padding,
           paddingBottom: 12,
           flexDirection: "row",

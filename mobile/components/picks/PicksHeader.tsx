@@ -1,6 +1,6 @@
 import { Pressable, Text, View } from "react-native";
 
-import { CONTROL, GAP, ONE_LINE, RADIUS, SCREEN, TYPE, useTheme } from "@/lib/theme";
+import { CONTROL, GAP, ONE_LINE, RADIUS, SCREEN, TYPE, useTheme, useScreenInsets } from "@/lib/theme";
 
 /** The fixed, non-scrolling Picks header (design spec §3.1 row 1).
  *
@@ -27,11 +27,12 @@ export function PicksHeader({
   children?: React.ReactNode;
 }) {
   const { colors } = useTheme();
+  const insets = useScreenInsets();
 
   return (
     <View
       style={{
-        paddingTop: SCREEN.paddingTop,
+        paddingTop: insets.top,
         paddingHorizontal: SCREEN.padding,
         paddingBottom: 12,
         backgroundColor: colors.bg,
