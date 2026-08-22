@@ -55,16 +55,28 @@ interface PicksState {
   hydrateFavourites: () => Promise<void>;
 }
 
+/** The sport the feed opens on.
+ *
+ * FOOTBALL, not "All". It is the product's centre of gravity — 18 leagues of trained model
+ * against one basketball model shared across two leagues and a single tennis tour — and an
+ * all-sports feed buries a day's football under whatever else happens to be playing. "All"
+ * remains one tap away in the filter sheet.
+ *
+ * Being a DEFAULT rather than a lock also matters for the Filters dot: opening on football is
+ * not "a filter is active", so the dot stays off until the user changes something themselves.
+ */
+export const DEFAULT_SPORT = "football";
+
 /** Everything the "Reset filters" affordance clears. Deliberately NOT the date or favourites:
  * the user did not set the date by accident, and a reset that silently unstars their leagues
  * would be destructive rather than corrective. */
 const FILTER_DEFAULTS = {
-  sport: null,
-  subSport: null,
+  sport: DEFAULT_SPORT as string | null,
+  subSport: null as string | null,
   segment: "All" as Segment,
   minProbability: DEFAULT_MIN_PROBABILITY,
   minOdds: DEFAULT_MIN_ODDS,
-  country: null,
+  country: null as string | null,
   onlyFavourites: false,
 };
 

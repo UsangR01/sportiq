@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Modal, Pressable, ScrollView, Text, View } from "react-native";
 
+import { CountryFlag } from "@/lib/countryFlags";
 import { ONE_LINE, RADIUS, SCREEN, TYPE, useTheme } from "@/lib/theme";
 
 export interface CountryOption {
@@ -47,9 +48,16 @@ export function SummaryStrip({
       >
         <Column label="Calls today" value={String(callCount)} />
         <Column label="Leagues" value={String(leagueCount)} divided />
+        {/* This column is always an IMAGE: the selected country's flag, or the globe for no
+            filter. Country names vary wildly in length — "USA" against "Czech-Republic" — so a
+            name either truncates or drags the three columns to different widths, and a flag is
+            recognised faster than a word at this size. Using the globe rather than the word
+            "All" also keeps the column the same shape whether the filter is set or cleared. */}
         <Column
           label="Country"
           value={country ?? "All"}
+          flag={country}
+          showFlag
           divided
           interactive
           onPress={() => setOpen(true)}
@@ -73,17 +81,24 @@ export function SummaryStrip({
 function Column({
   label,
   value,
+  flag,
+  showFlag,
   divided,
   interactive,
   onPress,
 }: {
   label: string;
   value: string;
+  /** When set, the column shows this country's flag in place of the value text. */
+  flag?: string | null;
+  /** Render an image even when `flag` is null — the globe, meaning "every country". */
+  showFlag?: boolean;
   divided?: boolean;
   interactive?: boolean;
   onPress?: () => void;
 }) {
   const { colors } = useTheme();
+  const active = interactive && value !== "All";
   const body = (
     <View style={{ alignItems: "center", paddingHorizontal: 6 }}>
       {/* Fixed height so all three eyebrows sit on one baseline even when one wraps to two
@@ -93,19 +108,37 @@ function Column({
           {label}
         </Text>
       </View>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 3 }}>
-        <Text
-          {...ONE_LINE}
-          style={[
-            TYPE.summaryValue,
-            // Accent signals "this one does something"; the selected country also reads as a
-            // filter that is currently ON.
-            { color: interactive && value !== "All" ? colors.accent : colors.text },
-          ]}
-        >
-          {value}
-        </Text>
-        {interactive && <Chevron color={value !== "All" ? colors.accent : colors.textFaint} />}
+      {/* Fixed height on the value row too: a 22px flag and a 20px numeral have different
+          natural heights, and without this the three columns' baselines drift apart the moment
+          a country is selected. */}
+      <View
+        style={{
+          height: 25,
+          flexDirection: "row",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 3,
+        }}
+      >
+        {showFlag ? (
+          // A country shows its flag; "no filter" shows the globe CountryFlag already falls
+          // back to. Keeping both as images means the column never changes shape when the
+          // filter is set or cleared, which a word-then-flag swap would do.
+          <CountryFlag country={flag ?? null} size={22} />
+        ) : (
+          <Text
+            {...ONE_LINE}
+            style={[
+              TYPE.summaryValue,
+              // Accent signals "this one does something"; a selected country also reads as a
+              // filter that is currently ON.
+              { color: active ? colors.accent : colors.text },
+            ]}
+          >
+            {value}
+          </Text>
+        )}
+        {interactive && <Chevron color={active ? colors.accent : colors.textFaint} />}
       </View>
     </View>
   );
@@ -186,6 +219,9 @@ function CountryPicker({
           <ScrollView>
             <CountryRow
               label="All countries"
+              // No country name to map, so CountryFlag renders its globe — the same mark the
+              // strip shows when the filter is off, so the two read as the same state.
+              globe
               selected={selected === null}
               onPress={() => onSelect(null)}
               first
@@ -214,6 +250,7 @@ function CountryRow({
   selected,
   onPress,
   first,
+  globe,
 }: {
   label: string;
   code?: string;
@@ -221,6 +258,7 @@ function CountryRow({
   selected: boolean;
   onPress: () => void;
   first?: boolean;
+  globe?: boolean;
 }) {
   const { colors } = useTheme();
   return (
@@ -239,21 +277,13 @@ function CountryRow({
         backgroundColor: selected ? colors.accentSoft : "transparent",
       }}
     >
-      {code ? (
-        <View
-          style={{
-            minWidth: 26,
-            alignItems: "center",
-            paddingHorizontal: 5,
-            paddingVertical: 3,
-            borderRadius: RADIUS.badge,
-            backgroundColor: colors.surfaceAlt,
-          }}
-        >
-          {/* A letter code, not a flag — the ONE place the design prefers it, since a code
-              beside the full country name is clearer at this size than a 20px image. */}
-          <Text style={[TYPE.eyebrowSmall, { color: colors.textSub }]}>{code}</Text>
-        </View>
+      {/* Flags here too, matching the strip above. The full country name sits beside it, so the
+          flag is a fast visual key rather than the only identifier — which is what makes it
+          safe to prefer over a letter code even for countries whose flags look alike. */}
+      {globe ? (
+        <CountryFlag country={null} size={20} />
+      ) : code ? (
+        <CountryFlag country={label} size={20} />
       ) : null}
       <Text
         {...ONE_LINE}
