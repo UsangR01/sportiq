@@ -20,9 +20,24 @@ WHAT IT COSTS
 One real API-Football `/fixtures/headtohead` call per football fixture, paced. Nothing else --
 team stats and odds are already in the database, and the blind model is loaded from the image.
 
-    PYTHONPATH=. python scripts/regenerate_predictions.py                  # dry run
-    PYTHONPATH=. python scripts/regenerate_predictions.py --confirm
-    PYTHONPATH=. python scripts/regenerate_predictions.py --confirm --limit 50
+RUN IT WITH --queue ON RENDER. MEASURED, BECAUSE THIS KILLED THE SHELL TWICE:
+
+    imports alone (xgboost, pandas, sklearn)      189 MB
+    after one prediction (two models loaded)      311 MB
+    plateau across eight fixtures                 326 MB
+
+The Render shell runs INSIDE the web service's container, so all of that lands on top of the
+live API process. A smaller --limit does not help: the floor is the imports and the models, not
+the loop, so a single fixture costs nearly as much as fifty.
+
+`--queue` instead dispatches each fixture to the Celery worker by task NAME, which needs only
+Redis -- no xgboost, no pandas, no model. The worker is a separate service that already holds
+those loaded because running predictions is its job. It also means a dropped shell no longer
+matters: the work is already queued and continues without it.
+
+    PYTHONPATH=. python scripts/regenerate_predictions.py                  # dry run, safe
+    PYTHONPATH=. python scripts/regenerate_predictions.py --confirm --queue # ON RENDER
+    PYTHONPATH=. python scripts/regenerate_predictions.py --confirm         # inline, locally
 """
 
 import argparse
@@ -97,10 +112,7 @@ async def _fixtures_needing_explanations(db, sport_slug: str, limit: int) -> lis
     return needing
 
 
-async def main(confirm: bool, sport_slug: str, limit: int) -> None:
-    # Imported here rather than at module scope so a dry run does not pay for loading xgboost.
-    from app.workers.run_predictions import _run_predictions
-
+async def main(confirm: bool, sport_slug: str, limit: int, queue: bool) -> None:
     async with async_session_factory() as db:
         targets = await _fixtures_needing_explanations(db, sport_slug, limit)
 
@@ -123,6 +135,27 @@ async def main(confirm: bool, sport_slug: str, limit: int) -> None:
         print("dry run - re-run with --confirm to regenerate")
         await engine.dispose()
         return
+
+    if queue:
+        # Dispatched BY NAME rather than by importing the task, which is the entire point:
+        # importing app.workers.run_predictions pulls the model runner and therefore xgboost,
+        # and it is that import -- not the work -- that makes this too heavy for the shell.
+        from app.workers.celery import celery_app
+
+        for fixture, _ in targets:
+            celery_app.send_task(
+                "app.workers.run_predictions.run_predictions", args=[str(fixture.id)]
+            )
+        print(f"queued {len(targets)} fixtures to the Celery worker")
+        print(
+            "  the worker processes these on its own; re-run this script (without --confirm) "
+            "in a few minutes to see the remaining count fall"
+        )
+        await engine.dispose()
+        return
+
+    # Inline. Fine locally; see the module docstring for why not on Render.
+    from app.workers.run_predictions import _run_predictions
 
     done = failed = 0
     for index, (fixture, _) in enumerate(targets, start=1):
@@ -177,5 +210,12 @@ if __name__ == "__main__":
         "without needing this)",
     )
     parser.add_argument("--limit", type=int, default=MAX_FIXTURES)
+    parser.add_argument(
+        "--queue",
+        action="store_true",
+        help="dispatch to the Celery worker instead of predicting inline. USE THIS ON RENDER - "
+        "the shell shares the web service's container and the inline path needs ~330MB, which "
+        "OOMs it. Also survives the shell dropping, since the work is already queued.",
+    )
     args = parser.parse_args()
-    asyncio.run(main(args.confirm, args.sport, min(args.limit, MAX_FIXTURES)))
+    asyncio.run(main(args.confirm, args.sport, min(args.limit, MAX_FIXTURES), args.queue))
