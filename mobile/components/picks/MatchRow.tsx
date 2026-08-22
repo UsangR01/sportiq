@@ -4,7 +4,7 @@ import { Pressable, Text, View } from "react-native";
 import { formatOdds, type OddsFormat } from "@/lib/oddsFormat";
 import { evaluatePickCorrectness, pickHeadline } from "@/lib/pickFormat";
 import { ONE_LINE, RADIUS, RESULT_DISC, TRACK_HEIGHT, TYPE, useTheme } from "@/lib/theme";
-import type { FixtureSummary } from "@/lib/api/types";
+import type { DriverRow, FixtureSummary } from "@/lib/api/types";
 
 /** Below this share of the model's inputs, the probability is shown muted with a "limited
  * data" caption (spec §3.2). The server refuses to publish a pick under its own floor, so this
@@ -307,12 +307,72 @@ function Chevron({ open, color }: { open: boolean; color: string }) {
   );
 }
 
+/** The three factor rows (spec §3.2): 112px label, a proportional track, a direction word.
+ *
+ * DIRECTION AND RELATIVE WEIGHT, NEVER A PERCENTAGE. A figure like "48%" sitting inches from
+ * the pick's own probability reads as part of it, and these contributions come from a different
+ * model and cannot sum to it. The bar carries the magnitude; the word carries the sign.
+ *
+ * Bars are scaled against the LARGEST row rather than against the sum, so the leading factor
+ * always fills the track. Scaling by share instead would make a pick with several balanced
+ * drivers render as three stubs, which reads as "weak evidence" when it means the opposite.
+ */
+function FactorRows({ rows }: { rows: DriverRow[] }) {
+  const { colors } = useTheme();
+  const largest = Math.max(...rows.map((row) => Math.abs(row.contribution)), 1e-9);
+
+  return (
+    <View style={{ gap: 9 }}>
+      {rows.map((row) => {
+        const supports = row.contribution >= 0;
+        return (
+          <View key={row.label} style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+            <Text {...ONE_LINE} style={[TYPE.caption, { color: colors.textSub, width: 112 }]}>
+              {row.label}
+            </Text>
+            <View
+              style={{
+                flex: 1,
+                height: TRACK_HEIGHT.factor,
+                borderRadius: RADIUS.track,
+                backgroundColor: colors.mutedBg,
+                overflow: "hidden",
+              }}
+            >
+              <View
+                style={{
+                  width: `${Math.max(6, (Math.abs(row.contribution) / largest) * 100)}%`,
+                  height: "100%",
+                  borderRadius: RADIUS.track,
+                  backgroundColor: supports ? colors.accent : colors.textFaint,
+                }}
+              />
+            </View>
+            <Text
+              style={[
+                TYPE.caption,
+                { color: supports ? colors.text : colors.textFaint, width: 52, textAlign: "right" },
+              ]}
+            >
+              {supports ? "For" : "Against"}
+            </Text>
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
 /** The expanded panel (spec §3.2).
  *
- * The factor rows the design calls for need per-fixture attribution, which does not exist yet
- * — that is Phase 3 (market-blind TreeSHAP). Rather than fill the bars with invented weights,
- * this ships the parts that are real today: the provenance line and the save action. The
- * eyebrow says what is actually shown.
+ * The factor rows are exact TreeSHAP contributions computed when the prediction was made. For
+ * football they come from a model that never saw a bookmaker's price, which is deliberate — a
+ * panel built on the serving model would keep reporting that the biggest reason for a pick is
+ * the odds, which is both true and useless. The consequence is carried in the wording rather
+ * than hidden: the rows describe what the DATA says and do not sum to the probability shown.
+ *
+ * When the server sends no drivers the panel says so plainly instead of inventing weights —
+ * see BestPick.drivers for the several ordinary reasons that happens.
  */
 function ExpandedPanel({
   fixture,
@@ -327,28 +387,47 @@ function ExpandedPanel({
 }) {
   const { colors } = useTheme();
   const asOf = fixture.best_pick?.as_of;
+  const drivers = fixture.best_pick?.drivers ?? null;
+  const isBlind = fixture.best_pick?.drivers_are_market_blind ?? false;
 
   return (
     <View style={{ paddingHorizontal: 16, paddingBottom: 15 }}>
       <View style={{ backgroundColor: colors.surfaceAlt, borderRadius: RADIUS.button, padding: 14 }}>
+        {/* NOT "why the model called it", and the difference is load-bearing. For football
+            these contributions decompose a market-blind model rather than the one that produced
+            the number on the card, so claiming they explain that number would be false. */}
         <Text style={[TYPE.eyebrowSmall, { color: colors.textFaint, marginBottom: 10 }]}>
-          About this call
+          {drivers && drivers.length > 0
+            ? isBlind
+              ? "What the form data says"
+              : "What drove this call"
+            : "About this call"}
         </Text>
+
+        {drivers && drivers.length > 0 ? (
+          <FactorRows rows={drivers} />
+        ) : (
+          <Text style={[TYPE.body, { color: colors.textSub, marginBottom: 4 }]}>
+            {/* Deliberately vague about WHICH reason: a user does not need to know whether this
+                is an older prediction or a suppressed panel, only that we are not going to make
+                something up. */}
+            No driver breakdown for this pick.
+          </Text>
+        )}
 
         {asOf && (
           <View
-            style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "space-between",
+              marginTop: 12,
+            }}
           >
             <Text style={[TYPE.eyebrowSmall, { color: colors.textFaint }]}>Called</Text>
             <Text style={[TYPE.caption, { color: colors.textSub }]}>{formatAsOf(asOf)}</Text>
           </View>
         )}
-
-        <Text style={[TYPE.body, { color: colors.textSub, marginTop: 10 }]}>
-          {/* Honest about the gap rather than silent about it: a panel that explains nothing is
-              better than one that explains something we cannot yet compute. */}
-          Why the model called it is coming soon.
-        </Text>
 
         {/* THE ROUTE TO THE FIXTURE SCREEN, and it is not optional.
          *

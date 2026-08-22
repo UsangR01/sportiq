@@ -47,6 +47,26 @@ export interface BestPick {
   // to stop presenting a moving estimate as timeless rather than to freeze it.
   as_of: string | null;
   previous_probability: number | null;
+  // The three biggest real-world factors behind this pick, largest first — or null.
+  //
+  // NULL IS ORDINARY, NOT AN ERROR, and must render as nothing rather than a placeholder:
+  // predictions written before attribution existed carry none (contributions depend on the
+  // feature vector at the moment of inference and cannot be rebuilt afterwards), a draw pick
+  // has no direction to explain, and the server suppresses the panel outright when its
+  // market-blind model favours a different outcome from the pick on the card.
+  drivers: DriverRow[] | null;
+  // True when `drivers` came from a model that never saw a bookmaker's price — a DIFFERENT
+  // model from the one that produced `probability`. The rows therefore cannot sum to it, which
+  // is why the panel is titled after what the data says rather than "why the model called it".
+  drivers_are_market_blind: boolean;
+}
+
+export interface DriverRow {
+  label: string;
+  // Positive means this factor supports the pick being shown, whatever the market or side.
+  contribution: number;
+  // Share of the total movement, 0..1. A RELATIVE weight — never a probability.
+  weight: number;
 }
 
 export interface LiveStateResponse {

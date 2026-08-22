@@ -38,6 +38,7 @@ from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.database import async_session_factory, engine
+from app.predictions.explanation import BLIND_VERSION_SUFFIX
 from app.predictions.models import ModelRegistry
 from app.sports.models import Sport
 
@@ -53,6 +54,26 @@ DEPLOYED_DIR = Path(__file__).resolve().parents[2] / "ml" / "artifacts" / "deplo
 MANIFEST = DEPLOYED_DIR / "manifest.json"
 
 
+async def _newest_blind_rows(db) -> list[tuple[ModelRegistry, str]]:
+    """The most recent market-blind artefact for each sport that has one.
+
+    Newest-per-sport rather than all of them: every measurement run leaves a row, and staging the
+    whole history would grow the image without bound for no benefit.
+    """
+    newest: dict[str, tuple[ModelRegistry, str]] = {}
+    rows = (
+        await db.execute(
+            select(ModelRegistry, Sport.slug)
+            .join(Sport, Sport.id == ModelRegistry.sport_id)
+            .where(ModelRegistry.version.endswith(BLIND_VERSION_SUFFIX))
+            .order_by(ModelRegistry.trained_at.desc())
+        )
+    ).all()
+    for registry_row, sport_slug in rows:
+        newest.setdefault(sport_slug, (registry_row, sport_slug))
+    return list(newest.values())
+
+
 async def main(confirm: bool) -> None:
     source_dir = get_settings().models_path
     async with async_session_factory() as db:
@@ -63,6 +84,11 @@ async def main(confirm: bool) -> None:
                 .where(ModelRegistry.is_active.is_(True))
             )
         ).all()
+        # Plus the newest market-blind variant per sport. These are is_active=False BY DESIGN --
+        # they must never serve a probability -- so the active-only query above cannot see them,
+        # and the stale-clearing step below would DELETE one copied in by hand. Without this the
+        # explanation engine silently returns nothing in production while working locally.
+        rows += await _newest_blind_rows(db)
 
     if not rows:
         print("no active models registered — nothing to stage")
