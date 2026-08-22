@@ -174,7 +174,14 @@ export default function PicksScreen() {
     const bySegment = all.filter((fixture) => {
       if (store.segment === "All") return true;
       if (store.segment === "Finished") return fixture.status === "completed";
-      return fixture.status !== "completed";
+      // UPCOMING MEANS NOT STARTED. A match in progress is not upcoming, and lumping it in
+      // here was reported: live games appeared among fixtures that had not kicked off, with
+      // nothing distinguishing them. In-play matches belong in All and on the Live tab.
+      //
+      // Postponed IS kept: it was on today's card as an upcoming fixture, and someone
+      // browsing "what's coming up" needs to see it was called off rather than have it
+      // silently vanish.
+      return fixture.status === "scheduled" || fixture.status === "postponed";
     });
 
     // 5. group, dropping any that end up empty

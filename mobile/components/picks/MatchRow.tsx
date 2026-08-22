@@ -60,25 +60,38 @@ export function MatchRow({
   const voided = Boolean(live?.result_type);
   const verdict = voided ? null : correct;
 
+  const inPlay = fixture.status === "live";
+
   const statusLabel = postponed
     ? "Postponed"
     : settled
       ? "Full-time"
-      : fixture.kickoff_is_estimated
-        ? "Time TBC"
-        : // 2-digit hour, not "numeric": a 00:30 kick-off renders as "0:30" otherwise, which
-          // reads as a truncated value rather than half past midnight. The eyebrow sits in a
-          // column of times, so they should all be the same width.
-          new Date(fixture.kickoff_utc).toLocaleTimeString(undefined, {
-            hour: "2-digit",
-            minute: "2-digit",
-          });
+      : inPlay
+        ? // A live row previously showed its KICK-OFF TIME, which made it indistinguishable
+          // from one that had not started — the visible half of the same complaint that put
+          // in-play matches under "Upcoming". The minute is shown where a sport reports one;
+          // basketball and tennis ingest no clock, so they get the plain label rather than a
+          // fabricated minute.
+          live?.match_minute != null
+          ? `${live.match_minute}'`
+          : "Live"
+        : fixture.kickoff_is_estimated
+          ? "Time TBC"
+          : // 2-digit hour, not "numeric": a 00:30 kick-off renders as "0:30" otherwise, which
+            // reads as a truncated value rather than half past midnight. The eyebrow sits in a
+            // column of times, so they should all be the same width.
+            new Date(fixture.kickoff_utc).toLocaleTimeString(undefined, {
+              hour: "2-digit",
+              minute: "2-digit",
+            });
 
   const statusColor = postponed
     ? colors.warn
     : settled
       ? colors.textFaint
-      : colors.accent;
+      : inPlay
+        ? colors.fail // same red as the Live tab, so "in progress" reads identically in both
+        : colors.accent;
 
   const pickColor =
     verdict === true ? colors.success : verdict === false ? colors.fail : colors.accent;
@@ -102,6 +115,13 @@ export function MatchRow({
         style={{ paddingHorizontal: 16, paddingVertical: 15 }}
       >
         <View style={{ flexDirection: "row", alignItems: "center", gap: 7, marginBottom: 8 }}>
+          {/* The same red dot the Live tab uses, so an in-progress match is recognisable
+              without reading the label. */}
+          {inPlay && (
+            <View
+              style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.fail }}
+            />
+          )}
           <Text style={[TYPE.eyebrow, { color: statusColor, letterSpacing: 0.7 }]}>
             {statusLabel}
           </Text>
