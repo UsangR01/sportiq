@@ -17,7 +17,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-import joblib
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,12 +28,16 @@ from app.models_ml.attribution import (
     group_contributions,
     raw_contributions,
 )
-from app.models_ml.base import resolve_artefact_path
-from app.models_ml.football import FootballModel
 from app.predictions.models import ModelRegistry
 from app.sports.models import Sport
 
 logger = logging.getLogger(__name__)
+
+# NOTHING HEAVY AT MODULE SCOPE. app/fixtures/router.py imports explain_pick from here, so every
+# import at this level is paid by the WEB service at startup. joblib and FootballModel pull
+# xgboost, which took app.main from 120MB to 239MB and OOM'd the 512MB instance -- production
+# served 502 for a dependency that only the WORKER's write path actually needs. They are
+# imported inside the two functions that use them instead.
 
 #: A market-blind artefact's registry version always ends here, because `--market-blind` puts the
 #: variant in the FILENAME and `model_version_for()` derives the version string from it. The
@@ -50,7 +53,7 @@ SELF_EXPLAINING_SPORTS = frozenset({"tennis", "nba"})
 #: How many factor rows the fixture panel shows (design spec §3.2).
 PANEL_ROWS = 3
 
-_blind_model_cache: dict[str, FootballModel | None] = {}
+_blind_model_cache: dict[str, object | None] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,8 +69,13 @@ class PickExplanation:
     is_market_blind: bool
 
 
-async def _load_blind_model(db: AsyncSession, sport_slug: str) -> FootballModel | None:
+async def _load_blind_model(db: AsyncSession, sport_slug: str) -> object | None:
     """The newest registered market-blind artefact for a sport, or None if none is staged."""
+    import joblib  # noqa: PLC0415 - deliberately deferred; see the module header
+
+    from app.models_ml.base import resolve_artefact_path
+    from app.models_ml.football import FootballModel
+
     if sport_slug in _blind_model_cache:
         return _blind_model_cache[sport_slug]
 
@@ -101,7 +109,7 @@ async def _load_blind_model(db: AsyncSession, sport_slug: str) -> FootballModel 
     return model
 
 
-def _football_contributions(model: FootballModel, features: dict) -> dict:
+def _football_contributions(model, features: dict) -> dict:
     """Per-estimator TreeSHAP for the four count regressors that drive every football market."""
     bundle = model._artefact  # noqa: SLF001 - same package, and loading it twice is wasteful
     layer1_names = list(bundle["layer1_feature_names"])
@@ -130,6 +138,10 @@ async def compute_driver_contributions(
     explainable model staged. Never raises into the prediction path: an explanation is an
     enhancement, and losing one must not cost a fixture its prediction.
     """
+    import joblib  # noqa: PLC0415 - deliberately deferred; see the module header
+
+    from app.models_ml.base import resolve_artefact_path
+
     try:
         if sport_slug in SELF_EXPLAINING_SPORTS:
             bundle = joblib.load(resolve_artefact_path(serving_model.artefact_path))

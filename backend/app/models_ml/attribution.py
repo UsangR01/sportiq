@@ -37,9 +37,18 @@ than as a driver.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
-import xgboost as xgb
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    import xgboost as xgb
+
+# xgboost IS NOT IMPORTED AT MODULE SCOPE, AND THAT IS LOAD-BEARING RATHER THAN TIDY.
+# app/fixtures/router.py imports the read path from here, so anything imported at this level
+# lands in the WEB service at startup. Importing xgboost here took app.main from 120MB to 239MB
+# and OOM'd the 512MB instance -- the API returned 502 while the only code that needs xgboost
+# (raw_contributions) runs exclusively in the worker.
 
 #: Machine feature name -> the label a reader sees. Mapped ONCE, centrally, because the same
 #: grouping has to hold for the fixture panel and for Top calls; two copies would drift and there
@@ -143,6 +152,8 @@ def raw_contributions(
     passed through as NaN, which XGBoost handles natively -- the same treatment it had at training
     time, so an absent feature is explained as absent rather than as a fabricated zero.
     """
+    import xgboost as xgb  # noqa: PLC0415 - deliberately deferred; see the module header
+
     values = np.array(
         [[np.nan if row.get(name) is None else float(row[name]) for name in feature_names]],
         dtype=float,
