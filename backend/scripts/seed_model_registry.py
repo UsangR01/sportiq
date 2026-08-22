@@ -33,6 +33,7 @@ from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.database import async_session_factory, engine
+from app.predictions.explanation import BLIND_VERSION_SUFFIX
 from app.predictions.models import ModelRegistry
 from app.sports.models import Sport
 
@@ -97,6 +98,32 @@ async def main(confirm: bool) -> None:
 
         for entry in planned:
             sport_id = sports[entry["sport_slug"]]
+            # A MARKET-BLIND ARTEFACT MUST NEVER BECOME THE SERVING MODEL. It exists to explain
+            # picks, and it is deliberately WORSE than the model it explains (measured: accuracy
+            # 0.5021 vs 0.5082, RPS 0.2119 vs 0.2084) because it has never seen a price.
+            #
+            # This is the third appearance of the register-and-activate coupling. train_*.py
+            # once promoted an experiment's losing arm by finishing; --no-activate then stranded
+            # NBA with no active model at all. Fixing it in the trainer was not enough, because
+            # THIS script is a separate door to the same table -- and the blind artefact is the
+            # NEWEST one in the manifest, so the "newer artefact replaces the incumbent" rule
+            # would have promoted it on a fresh deployment without anyone choosing to.
+            blind = entry["version"].endswith(BLIND_VERSION_SUFFIX)
+            if blind:
+                db.add(
+                    ModelRegistry(
+                        sport_id=sport_id,
+                        version=entry["version"],
+                        artefact_path=entry["artefact_path"],
+                        accuracy=entry["accuracy"],
+                        rps_score=entry["rps_score"],
+                        roi_simulation=entry["roi_simulation"],
+                        trained_at=datetime.fromisoformat(entry["trained_at"]),
+                        is_active=False,
+                    )
+                )
+                print(f"  registered {entry['version']} (is_active=False - explanation only)")
+                continue
             # Demote this sport's current active row only because a newer artefact is genuinely
             # replacing it. Blanket demotion is what once left NBA with no active model at all.
             for row in (
