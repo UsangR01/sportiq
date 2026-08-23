@@ -17,8 +17,11 @@ from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.database import async_session_factory
-from app.fixtures.models import Fixture, FixtureStatus, Team
+from app.fixtures.models import Fixture, FixtureLiveState, FixtureStatus, Team
+from app.predictions.live_risk import evaluate as evaluate_live_risk
+from app.predictions.live_risk import should_alert
 from app.predictions.models import Prediction
+from app.sports.models import Sport
 from app.users.models import PushTicketRecord, User, UserPreference, WatchlistItem
 from app.workers.celery import celery_app, run_task
 
@@ -323,3 +326,121 @@ async def _check_push_receipts() -> None:
 @celery_app.task(name="app.workers.notify_users.check_push_receipts")
 def check_push_receipts() -> None:
     run_task(_check_push_receipts())
+
+
+async def _notify_at_risk(fixture_id: uuid.UUID) -> None:
+    """Alert everyone who SAVED this fixture that their pick has started going wrong.
+
+    Called from the live-score poll rather than on a schedule of its own, because the only thing
+    that can change a pick's state is a new scoreline -- and that is exactly what that poll
+    fetches. No extra API call, and no possibility of evaluating a score we have not yet read.
+
+    SAVED PICKS ONLY. This is a premium alert about something the user chose to keep, not a
+    broadcast about the whole feed.
+    """
+    async with async_session_factory() as db:
+        fixture = (
+            await db.execute(select(Fixture).where(Fixture.id == fixture_id))
+        ).scalar_one_or_none()
+        if fixture is None or fixture.status is not FixtureStatus.LIVE:
+            return
+
+        live_state = (
+            await db.execute(
+                select(FixtureLiveState).where(FixtureLiveState.fixture_id == fixture_id)
+            )
+        ).scalar_one_or_none()
+        if live_state is None:
+            return
+
+        sport_slug = (
+            await db.execute(select(Sport.slug).where(Sport.id == fixture.sport_id))
+        ).scalar_one_or_none()
+        if sport_slug is None:
+            return
+
+        rows = (
+            await db.execute(
+                select(WatchlistItem, User)
+                .join(User, User.id == WatchlistItem.user_id)
+                .where(
+                    WatchlistItem.fixture_id == fixture_id,
+                    # Fires once per saved fixture. Live scores poll every five minutes and an
+                    # at-risk pick usually stays at-risk, so without this one bad scoreline
+                    # would send the same user roughly six notifications about one match.
+                    WatchlistItem.at_risk_alerted_at.is_(None),
+                    # The pick AS SAVED is what gets judged -- not whatever the feed would
+                    # recommend now. Alerting on a pick the user never took would be worse than
+                    # not alerting at all.
+                    WatchlistItem.saved_market.isnot(None),
+                    User.expo_push_token.isnot(None),
+                )
+            )
+        ).all()
+        if not rows:
+            return
+
+        home = (
+            await db.execute(select(Team).where(Team.id == fixture.home_team_id))
+        ).scalar_one_or_none()
+        away = (
+            await db.execute(select(Team).where(Team.id == fixture.away_team_id))
+        ).scalar_one_or_none()
+        matchup = f"{home.name if home else '?'} v {away.name if away else '?'}"
+
+        sent = 0
+        for item, user in rows:
+            state = evaluate_live_risk(
+                sport_slug=sport_slug,
+                market=item.saved_market,
+                selection=item.saved_selection,
+                line=item.saved_line,
+                home_score=live_state.home_score,
+                away_score=live_state.away_score,
+                match_minute=live_state.match_minute,
+            )
+            if not should_alert(state, sport_slug=sport_slug, match_minute=live_state.match_minute):
+                continue
+            await _send_push(
+                db,
+                user,
+                title="Your pick is at risk",
+                # Names the pick AND the reason, never just the fixture: "something happened in
+                # a match you saved" is not actionable, and this is sold as an early warning.
+                body=(
+                    f"{matchup} — your {_pick_label(item)} is at risk. "
+                    f"{_score_phrase(live_state)}"
+                ),
+                data={"fixture_id": str(fixture_id), "url": f"sportpiq://fixture/{fixture_id}"},
+            )
+            item.at_risk_alerted_at = datetime.now(UTC)
+            sent += 1
+        await db.commit()
+        if sent:
+            logger.info("At-risk alert for %s sent to %d watcher(s)", fixture_id, sent)
+
+
+def _pick_label(item: WatchlistItem) -> str:
+    """The saved pick in the words the card used, e.g. "UNDER 2.5" or "1X"."""
+    selection = (item.saved_selection or "").upper()
+    if item.saved_line is not None:
+        return f"{selection} {item.saved_line:g}"
+    return selection
+
+
+def _score_phrase(live_state: FixtureLiveState) -> str:
+    """The evidence, so the alert can be judged without opening the app."""
+    score = f"{live_state.home_score}-{live_state.away_score}"
+    if live_state.match_minute is not None:
+        return f"{score}, {live_state.match_minute}'."
+    return f"{score}."
+
+
+@celery_app.task(name="app.workers.notify_users.notify_at_risk")
+def notify_at_risk(fixture_id: str) -> None:
+    """In-play alert for saved picks that have started going wrong (design spec §4.1).
+
+    Deliberately NOT sent for a pick that is already LOST: by then there is nothing to act on,
+    and a notification confirming a loss is a worse product than silence.
+    """
+    run_task(_notify_at_risk(uuid.UUID(fixture_id)))

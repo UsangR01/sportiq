@@ -47,6 +47,13 @@ export interface BestPick {
   // to stop presenting a moving estimate as timeless rather than to freeze it.
   as_of: string | null;
   previous_probability: number | null;
+  // How this pick is doing RIGHT NOW, for a fixture in play — or null when it cannot be judged.
+  //
+  // NULL MUST RENDER AS NOTHING, not as a neutral badge. Corners have no in-play count at all
+  // (they are written once, at settlement) and basketball reports no clock, so silence is the
+  // honest answer: an absent tag reads as "not applicable", a grey one as "we checked and it
+  // is fine". It also drives the live card's progress-bar colour for the same reason.
+  live_status: "on_track" | "at_risk" | "lost" | null;
   // The three biggest real-world factors behind this pick, largest first — or null.
   //
   // NULL IS ORDINARY, NOT AN ERROR, and must render as nothing rather than a placeholder:

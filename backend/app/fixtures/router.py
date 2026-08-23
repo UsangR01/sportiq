@@ -43,6 +43,8 @@ from app.picks.service import (
     latest_price_per_bookmaker,
 )
 from app.predictions.explanation import explain_pick
+from app.predictions.live_risk import PickState
+from app.predictions.live_risk import evaluate as evaluate_live_risk
 from app.predictions.models import Prediction, PredictionKind
 from app.sports.models import League, Sport
 
@@ -193,6 +195,37 @@ def _to_summary(
         all_market_picks=all_market_picks or [],
         live_state=live_state,
     )
+
+
+def _stamp_live_status(rows, best_picks: dict, live_states: dict) -> None:
+    """Attach the in-play state of each pick, for fixtures that are actually in play.
+
+    Only LIVE fixtures. A scheduled one has nothing to be on track for, and a completed one is
+    settled — the card already shows a tick or a cross there, and a stale "AT RISK" beside a
+    final score would contradict it.
+
+    See app/predictions/live_risk.py for what can and cannot be judged; anything it cannot
+    answer stays None and renders no tag at all.
+    """
+    for row in rows:
+        fixture, sport_slug = row[0], row[1]
+        if fixture.status != FixtureStatus.LIVE:
+            continue
+        pick = best_picks.get(fixture.id)
+        state = live_states.get(fixture.id)
+        if pick is None or state is None:
+            continue
+        evaluated = evaluate_live_risk(
+            sport_slug=sport_slug,
+            market=pick.market,
+            selection=pick.selection,
+            line=pick.line,
+            home_score=state.home_score,
+            away_score=state.away_score,
+            match_minute=state.match_minute,
+        )
+        if evaluated is not PickState.UNKNOWN:
+            pick.live_status = evaluated.value
 
 
 async def _bulk_live_states(db: AsyncSession, fixture_ids: list) -> dict:
@@ -1059,6 +1092,7 @@ async def list_fixtures(
         db, fixture_ids, market=market, line=line, min_probability=min_probability
     )
     live_states = await _bulk_live_states(db, fixture_ids)
+    _stamp_live_status(rows, best_picks, live_states)
 
     # A POSTPONED fixture never gets a best_pick/all_market_picks, regardless of whatever
     # Prediction row might already exist for it — showing "the model would have picked X" for

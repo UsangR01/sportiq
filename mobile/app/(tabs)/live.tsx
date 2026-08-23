@@ -19,11 +19,14 @@ const FOOTBALL_FULL_TIME = 90;
 
 /** Live matches (design spec §4).
  *
- * NO "ON TRACK" / "AT RISK" TAGS YET. Those need the §4.1 rule set, which is Phase 4 — and the
- * measurement behind it decides who can have them at all: football can (it has a real minute),
- * tennis is limited to completed sets, and basketball cannot be supported until its period is
- * ingested. Showing a tag we cannot compute would be inventing a fact, so the card carries the
- * pick without a verdict until then.
+ * The `ON TRACK` / `AT RISK` verdict comes from the server (§4.1), which runs the SAME rules
+ * that decide whether to push an alert — so the badge and the notification cannot disagree.
+ *
+ * WHO GETS A VERDICT AT ALL IS A DATA QUESTION, not a product one. Football can be judged (it
+ * reports a real minute on every row); tennis only at completed-set granularity; basketball not
+ * at all until its period is ingested; and corners never, because counts are written once at
+ * settlement so no in-play value exists. Every one of those renders NO tag and a neutral bar
+ * rather than a reassuring one.
  */
 export default function LiveScreen() {
   const { colors } = useTheme();
@@ -157,7 +160,14 @@ function LiveCard({ fixture, oddsFormat }: { fixture: FixtureSummary; oddsFormat
               width: `${progress * 100}%`,
               height: "100%",
               borderRadius: RADIUS.trackThin,
-              backgroundColor: colors.fail,
+              // THE BAR CARRIES THE VERDICT, not just the clock. Its LENGTH is elapsed time;
+              // its COLOUR is how the pick is doing, so a glance down a list of live cards
+              // reads as green-good / red-trouble without parsing a single tag.
+              //
+              // Neutral when there is no verdict, which is the important case: corners have no
+              // in-play data and basketball reports no clock, so a green bar there would claim
+              // a fact we do not have. Grey says "not applicable" rather than "fine".
+              backgroundColor: trackColour(pick?.live_status, colors),
             }}
           />
         </View>
@@ -169,9 +179,46 @@ function LiveCard({ fixture, oddsFormat }: { fixture: FixtureSummary; oddsFormat
             {pickHeadline(pick)} · {Math.round(pick.probability * 100)}%
             {pick.odds != null ? ` · ${formatOdds(pick.odds, oddsFormat)}` : ""}
           </Text>
+          <StatusTag status={pick.live_status} />
         </View>
       )}
     </Pressable>
+  );
+}
+
+/** The progress track's colour: the pick's verdict, or neutral when there is none. */
+function trackColour(status: string | null | undefined, colors: ReturnType<typeof useTheme>["colors"]) {
+  if (status === "on_track") return colors.success;
+  if (status === "at_risk" || status === "lost") return colors.fail;
+  return colors.textFaint;
+}
+
+/** `ON TRACK` / `AT RISK` (design spec §4, §4.1).
+ *
+ * RENDERS NOTHING when the server sends no status, and that is the whole point. Corners are
+ * written once at settlement so no in-play count exists, and basketball reports no clock — an
+ * absent tag reads as "not applicable", while a grey one would read as "we checked and it is
+ * fine". `lost` shows as AT RISK rather than a third label: by then the pick is gone, and a
+ * card announcing a loss to someone watching the match adds nothing.
+ */
+function StatusTag({ status }: { status: string | null | undefined }) {
+  const { colors } = useTheme();
+  if (status !== "on_track" && status !== "at_risk" && status !== "lost") return null;
+
+  const good = status === "on_track";
+  return (
+    <View
+      style={{
+        paddingHorizontal: 7,
+        paddingVertical: 4,
+        borderRadius: RADIUS.badge,
+        backgroundColor: good ? colors.successSoft : colors.failSoft,
+      }}
+    >
+      <Text style={[TYPE.eyebrowSmall, { color: good ? colors.success : colors.fail }]}>
+        {good ? "ON TRACK" : "AT RISK"}
+      </Text>
+    </View>
   );
 }
 

@@ -79,6 +79,14 @@ class BestPick(BaseModel):
     # cannot be reconstructed after the fact), a draw pick has no expressible direction, and the
     # divergence guard suppresses the panel outright when the market-blind model favours a
     # different outcome from the one on the card.
+    # How this pick is doing RIGHT NOW, for a fixture in play: "on_track" | "at_risk" | "lost",
+    # or null when it cannot be judged (design spec §4.1).
+    #
+    # NULL IS MEANINGFUL AND MUST RENDER AS NOTHING, not as a neutral badge. Corners have no
+    # in-play state at all (counts are written once, at settlement) and basketball reports no
+    # clock, so for those the honest answer is silence — an absent tag reads as "not
+    # applicable", a grey one reads as "we checked and it is fine".
+    live_status: str | None = None
     drivers: list[DriverRow] | None = None
     # True when `drivers` came from a market-blind variant rather than the serving model, so the
     # UI can label them as what the DATA says instead of implying they add up to `probability`.

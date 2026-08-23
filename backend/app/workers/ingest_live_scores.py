@@ -22,6 +22,7 @@ from app.history.models import Outcome
 from app.sports.models import League, Sport
 from app.workers.celery import celery_app, run_task
 from app.workers.ingest_fixtures import _maybe_settle_outcome, _upsert_live_state
+from app.workers.notify_users import notify_at_risk
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,11 @@ async def _ingest_live_scores_for_league(sport: Sport, league: League) -> None:
             days_ahead=LIVE_SCORES_WINDOW_DAYS,
             days_back=LIVE_SCORES_WINDOW_DAYS,
         )
+
+        # Collected during the loop and dispatched AFTER the commit, so a task can never read
+        # a scoreline that is still uncommitted -- it runs in a different process on its own
+        # session and would otherwise see the previous poll's data.
+        at_risk_fixture_ids: list = []
 
         for payload in payloads:
             # Only update fixtures we already know about — a fixture this poll discovers for
@@ -89,6 +95,13 @@ async def _ingest_live_scores_for_league(sport: Sport, league: League) -> None:
                 fixture.status = FixtureStatus.LIVE
 
             await _upsert_live_state(db, fixture.id, payload)
+            if fixture.status is FixtureStatus.LIVE:
+                # Queued from HERE rather than on its own schedule, because the only thing that
+                # can change a pick's in-play state is a new scoreline -- and this is the moment
+                # one lands. No extra API call, and no chance of judging a score we have not
+                # read yet. The task itself is cheap and exits immediately when nobody has
+                # saved this fixture, which is the overwhelmingly common case.
+                at_risk_fixture_ids.append(fixture.id)
             home_team = (
                 await db.execute(select(Team).where(Team.id == fixture.home_team_id))
             ).scalar_one_or_none()
@@ -101,6 +114,9 @@ async def _ingest_live_scores_for_league(sport: Sport, league: League) -> None:
                 )
 
         await db.commit()
+
+    for fixture_id in at_risk_fixture_ids:
+        notify_at_risk.delay(str(fixture_id))
 
 
 # How long after kickoff a still-SCHEDULED fixture is treated as never having been played.

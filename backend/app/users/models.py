@@ -112,6 +112,18 @@ class WatchlistItem(Base):
     # the same user twice about the same fixture — the same idempotency guard style as
     # _maybe_settle_outcome. NULL means "not yet reminded".
     reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Set once an AT RISK alert has gone out for this saved pick, so it fires ONCE per fixture
+    # rather than once per poll. Live scores refresh every 5 minutes and a pick that goes
+    # at-risk usually stays at-risk, so without this a single bad scoreline would send a user
+    # roughly six notifications about the same match — the fastest way to have push disabled.
+    #
+    # Separate from reminded_at because they are different promises: one says a match is about
+    # to start, the other that a pick has started going wrong. Deliberately NOT cleared if the
+    # pick recovers; a second alert for a match that went at-risk, recovered and slipped again
+    # is more noise than signal.
+    at_risk_alerted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class PushTicketRecord(Base):
