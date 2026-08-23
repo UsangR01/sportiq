@@ -1,12 +1,12 @@
 [
   {
     "sport_slug": "football",
-    "version": "football_xgb_v20260819075846",
-    "artefact_path": "football_xgb_20260819075846.joblib",
+    "version": "football_xgb_v20260823131011",
+    "artefact_path": "football_xgb_20260823131011.joblib",
     "accuracy": 0.5082084225553176,
     "rps_score": 0.2084447835600683,
     "roi_simulation": -0.05066153846153845,
-    "trained_at": "2026-08-19T07:58:51.412748+00:00"
+    "trained_at": "2026-08-23T13:10:16.178049+00:00"
   },
   {
     "sport_slug": "football",
