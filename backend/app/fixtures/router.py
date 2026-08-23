@@ -327,11 +327,24 @@ def _all_market_candidates(
     ]
 
 
-def _candidate_to_best_pick(candidate: _MarketCandidate) -> BestPick:
+def _candidate_to_best_pick(candidate: _MarketCandidate, *, with_drivers: bool = False) -> BestPick:
+    """`with_drivers` OFF BY DEFAULT, because only the headline pick is ever explained.
+
+    A fixture yields up to 17 candidates and all_market_picks returns every one of them.
+    Explaining each meant running the grouping over ~24 contributions 17 times per fixture and
+    serialising three driver rows for each -- roughly 850 explanations and 2,550 rows on a
+    single day's feed, none of which any client reads: the mobile app renders drivers from
+    best_pick alone, and the per-market chip breakdown that once consumed all_market_picks was
+    removed. Measured at 443KB for one day's response before this.
+    """
     # Resolved per candidate rather than per fixture: "positive supports the pick" means the
     # contributions flip sign between a home pick and an away one on the same prediction.
-    explanation = explain_pick(
-        candidate.driver_contributions, market=candidate.market, selection=candidate.selection
+    explanation = (
+        explain_pick(
+            candidate.driver_contributions, market=candidate.market, selection=candidate.selection
+        )
+        if with_drivers
+        else None
     )
     return BestPick(
         selection=candidate.selection,
@@ -781,14 +794,18 @@ def _pick_best(
         c for c in priced if c.probability - _implied_probability(c.odds) <= _max_edge_for(c.market)
     ]
     if trustworthy:
-        return _candidate_to_best_pick(max(trustworthy, key=lambda c: c.probability))
+        return _candidate_to_best_pick(
+            max(trustworthy, key=lambda c: c.probability), with_drivers=True
+        )
     # Every priced candidate disagreed implausibly with the market. Rather than fall back to
     # the very picks the guard just rejected, fall back only to unpriced ones — and if there
     # are none, return None so the caller drops the fixture entirely. "We have no pick we
     # trust here" is a more honest answer than a confident-looking pick we've just measured
     # as untrustworthy.
     if unpriced:
-        return _candidate_to_best_pick(max(unpriced, key=lambda c: c.probability))
+        return _candidate_to_best_pick(
+            max(unpriced, key=lambda c: c.probability), with_drivers=True
+        )
     return None
 
 

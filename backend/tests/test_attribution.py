@@ -197,3 +197,35 @@ def test_every_live_model_feature_has_a_display_group(sport: str, names: tuple[s
     """
     known = set(FEATURE_GROUPS) | UNGROUPED_FEATURES
     assert [name for name in names if name not in known] == [], sport
+
+
+def test_only_the_headline_pick_carries_drivers() -> None:
+    """A fixture yields up to 17 candidates and all_market_picks returns every one. Explaining
+    each ran the grouping ~17 times per fixture and serialised three rows for each — none of
+    which any client reads, since the app renders drivers from best_pick alone.
+
+    Pinned by parsing the source because the cost is invisible in behaviour: nothing breaks, the
+    response is merely larger and slower. Measured at 443KB for a single day before this.
+    """
+    import ast
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "fixtures" / "router.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+    builder = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_candidate_to_best_pick"
+    )
+
+    # Keyword-only, and defaulting to OFF.
+    names = [arg.arg for arg in builder.args.kwonlyargs]
+    assert "with_drivers" in names, "explaining every candidate must not be the default"
+    default = builder.args.kw_defaults[names.index("with_drivers")]
+    assert isinstance(default, ast.Constant) and default.value is False
+
+    # The bulk path must not opt in.
+    bulk = source[source.index("all_picks[fixture_id] =") :][:120]
+    assert "with_drivers" not in bulk, "all_market_picks must use the cheap default"
