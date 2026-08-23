@@ -90,3 +90,9 @@ ml/export/*.parquet
 # Generated and regeneratable, same reasoning as ml/data/ and ml/export/*.parquet above — the
 # code that produces them is the source. They also travel with their MLflow run as an artifact.
 ml/evaluation/*.parquet
+# And the reconstructed goal timings (~70KB): the only record of WHEN goals went in, used to
+# re-derive the at-risk thresholds by replaying settled matches minute by minute. Not needed by
+# the image — nothing at runtime reads it — but it cost 4,000 metered API calls to build, and
+# without it the measurement in ml/training/measure_at_risk_thresholds.py cannot be reproduced
+# or extended without spending them again.
+!ml/data/football_goal_events.parquet

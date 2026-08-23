@@ -1,0 +1,19 @@
+replaying 4040 settled fixtures
+
+dropped 39 fixtures whose replayed goals did not reproduce the recorded final score (1.0%)
+
+pick                          n   fires   wrong  caught  median   verdict
+------------------------------------------------------------------------------------
+double_chance:1X           4001   35.6%   15.2%   98.8%     75'   ok
+double_chance:X2           4001   49.7%   11.7%   98.7%     75'   ok
+goals_total:over 1.5       4001   43.0%   42.4%  100.0%     55'   ok
+goals_total:over 2.5       4001   71.4%   32.1%  100.0%     55'   ok
+goals_total:over 3.5       4001   88.6%   20.4%  100.0%     55'   ok
+goals_total:under 1.5      4001   87.8%   16.0%   98.0%     23'   ok
+goals_total:under 2.5      4001   62.2%   22.6%   93.5%     45'   ok
+goals_total:under 3.5      4001   34.8%   26.9%   86.2%     54'   ok
+h2h:away                   4001   51.1%    2.3%   71.9%     70'   ok
+h2h:draw                   4001   84.6%   12.0%   99.1%     75'   ok
+h2h:home                   4001   37.5%    4.4%   64.6%     70'   ok
+
+No rule warns about picks that recover more than half the time.
