@@ -1,19 +1,30 @@
 """A league can be withheld from the feed entirely — and must not take its own history with it.
 
-MLS was suppressed 2026-08-19 on a direct product decision after roughly 4 of 11 settled card
-picks landed. The tests that matter here are the SCOPE ones: hiding a league's undecided
-fixtures is a product choice, while hiding its settled ones would delete the very losses that
-prompted the suppression and make the visible track record better than reality.
+MLS was suppressed 2026-08-19 after roughly 4 of 11 settled card picks landed, and MOVED to the
+include-history set on 2026-08-23 when settled MLS cards kept appearing and that was reported as
+the suppression not working.
+
+The tests that matter here are the SCOPE ones, and they matter more now rather than less: the
+two filters must stay distinguishable, and /history must never learn about either list. Hiding
+cards is a display decision; grading the model on a population chosen after seeing the results
+would not be.
 """
 
 import ast
 from pathlib import Path
 
-from app.fixtures.league_availability import SUPPRESSED_LEAGUES, offers_picks
+from app.fixtures.league_availability import (
+    SUPPRESSED_LEAGUES,
+    SUPPRESSED_LEAGUES_INCLUDING_HISTORY,
+    offers_picks,
+)
 
 
-def test_mls_is_suppressed():
-    assert "mls" in SUPPRESSED_LEAGUES
+def test_mls_is_suppressed_including_its_history():
+    """Moved sets on 2026-08-23. Pinned in the stronger set specifically, because the weaker one
+    exempts settled fixtures and that exemption was what got reported as a bug."""
+    assert "mls" in SUPPRESSED_LEAGUES_INCLUDING_HISTORY
+    assert "mls" not in SUPPRESSED_LEAGUES
     assert offers_picks("mls") is False
 
 
@@ -74,23 +85,27 @@ def test_history_does_not_import_the_suppression_list():
     assert "app.fixtures.league_availability" not in imported_modules
 
 
-def test_emptying_the_set_restores_the_league(monkeypatch):
-    """The lift path, exercised rather than described — deleting the slug is the whole change."""
+def test_emptying_both_sets_restores_the_league(monkeypatch):
+    """The lift path, exercised rather than described — deleting the slug is the whole change.
+
+    Both sets, because offers_picks consults both and a league could be listed in either."""
     monkeypatch.setattr("app.fixtures.league_availability.SUPPRESSED_LEAGUES", frozenset())
+    monkeypatch.setattr(
+        "app.fixtures.league_availability.SUPPRESSED_LEAGUES_INCLUDING_HISTORY", frozenset()
+    )
     assert offers_picks("mls") is True
 
 
 # === The other three operations the runbook documents (docs/suppressing-leagues-and-markets.md)
 
 
-def test_the_include_history_set_is_empty_by_default():
-    """It hides a league's SETTLED cards too, which deletes its losses from view and makes the
-    visible record better than reality. That is a deliberate, narrow tool (a league ingested by
-    mistake, corrupt data, a retirement) and a bad default, so it ships empty and the ordinary
-    suppression above is what "this league is performing badly" should use."""
-    from app.fixtures.league_availability import SUPPRESSED_LEAGUES_INCLUDING_HISTORY
+def test_the_include_history_set_holds_only_what_was_deliberately_put_there():
+    """It hides a league's SETTLED cards too, which removes its losses from view. That is a
+    narrow, deliberate tool rather than a default, so this pins its exact contents: a slug
+    appearing here by accident would silently delete a league's visible record.
 
-    assert SUPPRESSED_LEAGUES_INCLUDING_HISTORY == frozenset()
+    MLS is here on an explicit, repeated instruction. Anything else showing up is a bug."""
+    assert SUPPRESSED_LEAGUES_INCLUDING_HISTORY == frozenset({"mls"})
 
 
 def test_the_stronger_set_also_withholds_picks(monkeypatch):

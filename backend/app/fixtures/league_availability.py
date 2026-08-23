@@ -20,18 +20,22 @@ cost of being wrong is asymmetric: continuing to recommend a league that looks b
 trust far more than withholding a league that turns out to be fine, and withholding is
 reversible in one edit.
 
-=== SCOPE: UPCOMING ONLY. SETTLED FIXTURES STAY VISIBLE, AND THAT IS DELIBERATE ===
+=== SCOPE: EVERYTHING, INCLUDING SETTLED FIXTURES, AS OF 2026-08-23 ===
 
-Only fixtures that have not been decided are hidden. A settled MLS card keeps its result and
-its tick or cross.
+It began as upcoming-only, on the reasoning below. That held for four days and then produced a
+report -- "we took out the MLS games, but they are showing again today (6/11)" -- which was the
+exemption working exactly as designed and being experienced as a failure. Asked a second time
+to hide them including history, MLS moved to SUPPRESSED_LEAGUES_INCLUDING_HISTORY.
 
-Hiding those too would be the more literal reading of "drop it from my cards", and it is
-refused because it would silently IMPROVE the visible track record by deleting the losses that
-prompted this -- exactly the retroactive-filtering bias CLAUDE.md records from the Hearts v
-Dundee Utd incident, where a guard tightened after the fact erased a published, winning pick
-and made the record look better than it was. Withholding a recommendation is a product choice;
-editing the scoreboard is not. /history and /history/summary are untouched for the same reason,
-so MLS keeps counting toward every accuracy this project reports.
+THE ORIGINAL REASONING IS KEPT BECAUSE IT IS STILL TRUE, not because it won: hiding settled
+cards deletes the losses that prompted the suppression, which makes the VISIBLE record better
+than reality -- the retroactive-filtering bias CLAUDE.md records from the Hearts v Dundee Utd
+incident, where a guard tightened after the fact erased a published, winning pick.
+
+What makes it acceptable here is the one thing that has not changed: /history and
+/history/summary read `predictions` directly and are untouched by either set, so every MLS
+result keeps counting toward the accuracy this project reports. The cards are hidden; the
+scoreboard is not edited. If that ever stops being true, this decision needs revisiting.
 
 === LIFTING IT ===
 
@@ -45,11 +49,7 @@ call and not a measurement.
 
 # Every market is withheld for these leagues, on upcoming fixtures only. Empty this set to
 # restore normal behaviour everywhere.
-SUPPRESSED_LEAGUES = frozenset(
-    {
-        "mls",
-    }
-)
+SUPPRESSED_LEAGUES: frozenset[str] = frozenset()
 
 # The SAME suppression, but hiding SETTLED fixtures too, so the league vanishes from the feed
 # entirely including its history.
@@ -64,7 +64,21 @@ SUPPRESSED_LEAGUES = frozenset(
 # Legitimate uses: a league ingested by mistake, a competition with corrupt fixture data, or a
 # league being retired outright. "Its recent results look bad" is NOT one -- use
 # SUPPRESSED_LEAGUES for that.
-SUPPRESSED_LEAGUES_INCLUDING_HISTORY: frozenset[str] = frozenset()
+#
+# MLS MOVED HERE 2026-08-23, on a direct and repeated instruction ("Hide them including
+# history") after settled MLS cards kept appearing in the feed -- which was the upcoming-only
+# suppression working exactly as designed, and reported as it not working.
+#
+# The bias warning above still applies and is not waived: hiding settled cards removes losing
+# results from view. What makes it acceptable rather than a quiet improvement of the record is
+# that /history and /history/summary read `predictions` directly and are untouched by either
+# set, so every MLS loss keeps counting toward the accuracy this project publishes. The cards
+# are hidden; the scoreboard is not edited.
+SUPPRESSED_LEAGUES_INCLUDING_HISTORY: frozenset[str] = frozenset(
+    {
+        "mls",
+    }
+)
 
 # One market withheld for one league: {league_slug: {market, ...}}. Markets are the raw values
 # _all_market_candidates emits -- "h2h", "double_chance", "goals_total", "corners_total".
