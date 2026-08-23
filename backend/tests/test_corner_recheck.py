@@ -166,3 +166,63 @@ async def test_an_old_fixture_is_not_re_read(settled_football_fixture, monkeypat
 
     assert called["n"] == 0
     assert await corners_for(fixture_id) == (5, 4)
+
+
+# === The name tiebreak, added 2026-08-23 ==========================================================
+
+
+def test_two_matches_with_the_same_scoreline_are_separated_by_team_name():
+    """THE REPORTED BUG. Cruzeiro v Flamengo finished 2-1 and stayed ungraded for a day. The
+    fallback matched on DATE + SCORE alone, Brasileirao had a second 2-1 that day (Fluminense v
+    Remo), and an ambiguous set was refused outright — so a pick that had WON (3-3, six corners,
+    under 10.5) showed no verdict while the data was available the whole time.
+
+    Names are a TIEBREAK ONLY: the score must match first, so a cross-provider spelling
+    difference can only fail to disambiguate, never mis-select.
+    """
+    from app.adapters.thestatsapi import _narrow_by_name
+
+    matches = [
+        {"id": "a", "home_team": {"name": "Cruzeiro"}, "away_team": {"name": "Flamengo"}},
+        {"id": "b", "home_team": {"name": "Fluminense"}, "away_team": {"name": "Remo"}},
+    ]
+
+    assert [m["id"] for m in _narrow_by_name(matches, "Cruzeiro", "Flamengo")] == ["a"]
+    assert [m["id"] for m in _narrow_by_name(matches, "Fluminense", "Remo")] == ["b"]
+
+
+def test_a_spelling_difference_gives_no_help_rather_than_mis_selecting():
+    """THE LIMITATION, asserted rather than assumed — my first version of this test got it wrong.
+
+    The tiebreak needs a SHARED WORD on both sides. "Wolves" and "Wolverhampton Wanderers" have
+    none, so it narrows to nothing, the caller keeps the ambiguous set, and the fixture stays
+    ungraded. That is the safe direction and NOT a fix for every case: it rescues fixtures whose
+    names roughly agree — which covers the reported Brasileirão one — and leaves genuinely
+    divergent spellings exactly where they were.
+    """
+    from app.adapters.thestatsapi import _narrow_by_name
+
+    matches = [
+        {
+            "id": "a",
+            "home_team": {"name": "Wolverhampton Wanderers"},
+            "away_team": {"name": "Brentford"},
+        },
+        {"id": "b", "home_team": {"name": "Fulham"}, "away_team": {"name": "Everton"}},
+    ]
+
+    # A shared word is required on BOTH sides, so agreeing on one is not enough.
+    assert _narrow_by_name(matches, "Wolves", "Brentford") == []
+    # The fuller spelling does resolve it.
+    assert _narrow_by_name(matches, "Wolverhampton Wanderers", "Brentford") == [matches[0]]
+    # Nothing in common at all: no help, never a guess.
+    assert _narrow_by_name(matches, "Napoli", "Torino") == []
+
+
+def test_missing_names_give_no_help_at_all():
+    """The caller may have no names; that must degrade to the old refuse-the-ambiguity path."""
+    from app.adapters.thestatsapi import _narrow_by_name
+
+    matches = [{"id": "a", "home_team": {"name": "X"}, "away_team": {"name": "Y"}}]
+    assert _narrow_by_name(matches, None, "Y") == []
+    assert _narrow_by_name(matches, "X", None) == []

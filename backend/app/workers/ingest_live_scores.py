@@ -365,19 +365,31 @@ async def _backfill_corners_from_thestatsapi() -> None:
     Only ever fills a GAP -- a fixture that already has counts is never re-fetched and never
     overwritten, so API-Football stays the primary and this cannot silently disagree with it.
     """
+    from sqlalchemy.orm import aliased
+
     from app.adapters.thestatsapi import (
         COMPETITION_IDS,
         TheStatsAPINotConfigured,
         fetch_corners,
     )
 
+    # Two aliases because a fixture joins Team twice; without them the ORM cannot tell which
+    # side each name belongs to.
+    _home_team = aliased(Team)
+    _away_team = aliased(Team)
+
     now = datetime.now(UTC)
     async with async_session_factory() as db:
         rows = (
             await db.execute(
-                select(Fixture, FixtureLiveState, League.slug)
+                # The two team names come along for the ride because the provider can return
+                # more than one match with the same scoreline on the same day, and the score
+                # alone then cannot pick between them -- see _narrow_by_name.
+                select(Fixture, FixtureLiveState, League.slug, _home_team.name, _away_team.name)
                 .join(Sport, Sport.id == Fixture.sport_id)
                 .join(League, League.id == Fixture.league_id)
+                .join(_home_team, _home_team.id == Fixture.home_team_id)
+                .join(_away_team, _away_team.id == Fixture.away_team_id)
                 .join(FixtureLiveState, FixtureLiveState.fixture_id == Fixture.id)
                 .where(
                     Sport.slug == "football",
@@ -395,13 +407,15 @@ async def _backfill_corners_from_thestatsapi() -> None:
             return
 
         filled = 0
-        for fixture, live_state, league_slug in rows:
+        for fixture, live_state, league_slug, home_name, away_name in rows:
             try:
                 corners = await fetch_corners(
                     league_slug,
                     fixture.kickoff_utc.date(),
                     live_state.home_score,
                     live_state.away_score,
+                    home_name,
+                    away_name,
                 )
             except TheStatsAPINotConfigured as exc:
                 # A deployment gap, not a provider problem, and it applies to every row -- so

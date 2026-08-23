@@ -158,6 +158,34 @@ async def _season_id(client: httpx.AsyncClient, league_slug: str, kickoff: date)
     return resolved
 
 
+def _name_tokens(value: str | None) -> frozenset[str]:
+    """Lowercased word set, so ordering and punctuation stop mattering."""
+    if not value:
+        return frozenset()
+    cleaned = value.casefold().replace("-", " ").replace(".", " ")
+    return frozenset(part for part in cleaned.split() if part)
+
+
+def _narrow_by_name(matches: list, home_name: str | None, away_name: str | None) -> list:
+    """Keep only matches whose team names share a word with ours, on BOTH sides.
+
+    Returns an empty list when nothing matches, which the caller reads as "no help" and falls
+    back to the ambiguous set -- so this can only ever break a tie, never invent one.
+    """
+    ours = (_name_tokens(home_name), _name_tokens(away_name))
+    if not ours[0] or not ours[1]:
+        return []
+    narrowed = []
+    for match in matches:
+        theirs = (
+            _name_tokens((match.get("home_team") or {}).get("name")),
+            _name_tokens((match.get("away_team") or {}).get("name")),
+        )
+        if ours[0] & theirs[0] and ours[1] & theirs[1]:
+            narrowed.append(match)
+    return narrowed
+
+
 def _corners_from_stats(payload: dict) -> tuple[int, int] | None:
     overview = (payload.get("data") or payload).get("overview") or {}
     for key in ("corner_kicks", "corners"):
@@ -175,6 +203,8 @@ async def fetch_corners(
     kickoff: date,
     home_score: int,
     away_score: int,
+    home_name: str | None = None,
+    away_name: str | None = None,
 ) -> tuple[int, int] | None:
     """Corner counts for one settled fixture, or None when they genuinely aren't published yet.
 
@@ -213,6 +243,19 @@ async def fetch_corners(
             if (match.get("score") or {}).get("home") == home_score
             and (match.get("score") or {}).get("away") == away_score
         ]
+        if len(matches) > 1:
+            # TWO MATCHES CAN SHARE A SCORELINE ON ONE DAY, and refusing outright meant those
+            # fixtures were never graded at all. Real case: Brasileirao on 2026-08-22 had both
+            # Cruzeiro 2-1 Flamengo and Fluminense 2-1 Remo, so a won under-10.5 corners pick
+            # (the real count was 3-3) sat ungraded indefinitely while the data was available
+            # the whole time.
+            #
+            # Names are the TIEBREAK ONLY, never the primary key -- which is what the offline
+            # collector has always done and the live path dropped. The score still has to match
+            # first, so a spelling difference ("Wolves" vs "Wolverhampton Wanderers") can only
+            # ever fail to disambiguate, never mis-select: an overlap of zero leaves the
+            # candidate in, and if more than one survives this still refuses.
+            matches = _narrow_by_name(matches, home_name, away_name) or matches
         if len(matches) != 1:
             return None
 
