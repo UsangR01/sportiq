@@ -707,6 +707,7 @@ def _pick_best(
     min_probability: float | None = None,
     sport_slug: str | None = None,
     is_settled: bool = False,
+    min_odds: float | None = None,
 ) -> BestPick | None:
     """The best VALUE pick, not the most likely statement.
 
@@ -816,6 +817,20 @@ def _pick_best(
             c.feature_completeness is None
             or c.feature_completeness >= _completeness_floor_for(c, is_settled)
         )
+        # THE ODDS FLOOR FILTERS CANDIDATES, NOT THE WINNER, and that asymmetry was a real bug.
+        #
+        # min_probability has always been applied here, before the pick is chosen, on the
+        # stated reasoning that it answers "the best pick AMONG ones at least this likely".
+        # min_odds was applied afterwards to the single winner instead, so a fixture whose
+        # top-probability pick priced at 1.06 vanished from the feed entirely -- even when a
+        # 74% candidate at 1.48 was sitting right behind it. Measured on 45 upcoming fixtures:
+        # at min_odds 1.2 eleven cards disappeared and TEN of them had another candidate over
+        # 70% that cleared the floor.
+        #
+        # A candidate with NO price is deliberately kept. An odds floor is unanswerable for a
+        # sport with no odds coverage (tennis), and the earlier "no odds fails the floor" rule
+        # made every upcoming tennis fixture vanish the moment the slider moved off its minimum.
+        and (min_odds is None or c.odds is None or c.odds >= min_odds)
     ]
     priced = [c for c in candidates if c.probability is not None and c.odds is not None]
     unpriced = [c for c in candidates if c.probability is not None and c.odds is None]
@@ -866,6 +881,7 @@ async def _bulk_best_picks(
     market: str | None = None,
     line: float | None = None,
     min_probability: float | None = None,
+    min_odds: float | None = None,
 ) -> tuple[dict, dict]:
     """Computes each fixture's single best pick, drawn from ACROSS every market (h2h, double
     chance, Over/Under goals, Over/Under corners) by default — per the user's explicit ask
@@ -1052,11 +1068,19 @@ async def _bulk_best_picks(
         if operator_suppressed:
             candidates = [c for c in candidates if c.market not in operator_suppressed]
 
+        settled = fixture_id in settled_fixtures
         best = _pick_best(
             candidates,
             min_probability=min_probability,
             sport_slug=sport_by_fixture.get(fixture_id),
-            is_settled=fixture_id in settled_fixtures,
+            is_settled=settled,
+            # NOT applied to a decided fixture. On an upcoming card the floor picks between
+            # candidates a user could still back; on a settled one it would change WHICH pick
+            # the record shows depending on where a slider happens to sit -- inventing a pick
+            # nobody was shown, the same defect as the completeness floor surfacing a hidden
+            # pick once a match ended. A settled card keeps its own pick and is filtered by the
+            # caller exactly as before.
+            min_odds=None if settled else min_odds,
         )
         if best is not None:
             best_picks[fixture_id] = best
@@ -1136,7 +1160,12 @@ async def list_fixtures(
     rows = (await db.execute(stmt)).all()
     fixture_ids = [row[0].id for row in rows]
     best_picks, all_picks = await _bulk_best_picks(
-        db, fixture_ids, market=market, line=line, min_probability=min_probability
+        db,
+        fixture_ids,
+        market=market,
+        line=line,
+        min_probability=min_probability,
+        min_odds=min_odds,
     )
     live_states = await _bulk_live_states(db, fixture_ids)
     _stamp_live_status(rows, best_picks, live_states)
@@ -1197,6 +1226,13 @@ async def list_fixtures(
             continue
         if min_probability is not None and pick.probability < min_probability:
             continue
+        # Still applied, but it can now only bite on a SETTLED fixture. _pick_best filters
+        # candidates by min_odds for everything else, so an upcoming card that reaches here
+        # has already chosen a pick clearing the floor -- and a fixture where no candidate
+        # could clear it has best_pick None and was dropped above.
+        #
+        # Settled fixtures deliberately keep the old behaviour: the card shows the pick it
+        # showed, and a slider may hide it but must never SWAP it for a different one.
         if min_odds is not None and pick.odds is not None and pick.odds < min_odds:
             continue
         filtered.append(summary)

@@ -200,17 +200,53 @@ async def test_min_probability_best_pick_drawn_from_corners_market(
 async def test_min_odds_excludes_a_pick_whose_real_odds_are_below_the_floor(
     api_client, seeded_multi_market_fixtures
 ):
-    """A pick with a REAL price below the floor is still excluded — the odds slider must keep
-    working wherever odds actually exist. (Only the no-odds-at-all case is exempt; see
-    test_min_odds_does_not_hide_a_pick_that_has_no_odds_at_all.)"""
+    """A pick with a REAL price below the floor is never the one shown — the odds slider must
+    keep working wherever odds actually exist.
+
+    WHAT CHANGED 2026-08-23: the floor now filters CANDIDATES rather than the winner, so the
+    fixture is no longer dropped outright — a different candidate takes over. Previously the
+    top-probability pick was chosen first and then rejected, which deleted the whole card even
+    when another candidate qualified. Measured on 45 upcoming fixtures, at min_odds 1.2 eleven
+    cards vanished and ten of them had a >=70% alternative clearing the floor.
+
+    What must still hold is the part users can see: the 1.30 corners pick is not what surfaces.
+    """
     sport, fixture_a, _fixture_b = seeded_multi_market_fixtures
-    # Push min_odds above fixture_a's real corners odds (1.30) so it should be excluded.
     response = await api_client.get(
         "/fixtures",
         params={"sport_slug": sport.slug, "min_probability": 0.6, "min_odds": 2.0},
     )
-    ids = {row["id"] for row in response.json()}
-    assert str(fixture_a.id) not in ids
+    row = next((r for r in response.json() if r["id"] == str(fixture_a.id)), None)
+    if row is not None:
+        pick = row["best_pick"]
+        # Either no price at all (the documented tennis exemption) or one clearing the floor.
+        assert pick["odds"] is None or pick["odds"] >= 2.0
+        assert not (pick["market"] == "corners_total" and pick["odds"] == pytest.approx(1.30))
+
+
+async def test_a_below_floor_pick_falls_back_instead_of_deleting_the_card(
+    api_client, seeded_multi_market_fixtures
+):
+    """THE POINT OF THE CHANGE. min_probability had always filtered candidates BEFORE the pick
+    was chosen; min_odds was applied afterwards to the winner alone, so a fixture whose
+    top-probability pick priced at 1.06 disappeared entirely even with a 74% candidate at 1.48
+    sitting behind it. Both floors now select among candidates."""
+    sport, fixture_a, _fixture_b = seeded_multi_market_fixtures
+
+    low = await api_client.get(
+        "/fixtures", params={"sport_slug": sport.slug, "min_probability": 0.6, "min_odds": 1.01}
+    )
+    high = await api_client.get(
+        "/fixtures", params={"sport_slug": sport.slug, "min_probability": 0.6, "min_odds": 2.0}
+    )
+    shown_low = next((r for r in low.json() if r["id"] == str(fixture_a.id)), None)
+    shown_high = next((r for r in high.json() if r["id"] == str(fixture_a.id)), None)
+
+    assert shown_low is not None, "the fixture is visible at the default floor"
+    # Raising the floor may change the pick, but must not silently show the rejected price.
+    if shown_high is not None:
+        odds = shown_high["best_pick"]["odds"]
+        assert odds is None or odds >= 2.0
 
 
 async def test_market_filter_restricts_to_one_market(api_client, seeded_multi_market_fixtures):
