@@ -20,11 +20,25 @@ const FAVOURITES_KEY = "sportiq_favourite_leagues";
 
 export type Segment = "All" | "Upcoming" | "Finished";
 
-/** Defaults, per §9.1. 0.6 matches the server-side floor the feed has always applied; 1.01 is
- * effectively "any price", chosen after a 1.50 default was measured hiding exactly the picks
- * the model was most confident about. */
+/** Defaults, per §9.1. 0.6 matches the server-side floor the feed has always applied.
+ *
+ * MIN ODDS WENT 1.50 -> 1.01 -> 1.20, and the middle step is why the last one is safe.
+ *
+ * 1.50 was dropped because it HID CARDS: the floor was applied to the winning pick after it had
+ * been chosen, so a fixture whose best pick priced short vanished entirely — including the ones
+ * the model was most confident about, tennis favourites at 1.35-1.45 among them. A day's feed
+ * once rendered empty because both surviving picks sat at 1.24 and 1.42.
+ *
+ * That is no longer what happens. Since 2026-08-23 the floor filters CANDIDATES before the pick
+ * is chosen, so raising it swaps in the next qualifying market instead of deleting the card —
+ * measured at the time, 10 of the 11 fixtures lost at 1.2 had a >=70% alternative waiting. So a
+ * 1.20 default now trades a short price for a different pick rather than for nothing.
+ *
+ * Deliberately a DEFAULT and not a floor: MIN_ODDS_FLOOR stays 1.01, because short-priced picks
+ * are measured as the most reliable band we have (1.00-1.25 hit 87.0% against a claimed 83.9%),
+ * and a user who wants them should be able to ask for them. */
 export const DEFAULT_MIN_PROBABILITY = 0.6;
-export const DEFAULT_MIN_ODDS = 1.01;
+export const DEFAULT_MIN_ODDS = 1.2;
 
 interface PicksState {
   selectedDate: Date;
