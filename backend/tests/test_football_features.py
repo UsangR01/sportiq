@@ -133,6 +133,11 @@ def test_corners_feature_names_extends_feature_names_only_for_corners():
         "corners_against_home",
         "corners_for_away",
         "corners_against_away",
+        # The league's own corner level, added 2026-08-23. league_avg_goals had existed since
+        # partial pooling while corners had no equivalent, so these regressors knew a league's
+        # SCORING level and nothing about its CORNER level -- across 28k fixtures P(over 9.5)
+        # runs 0.435 to 0.607, a spread the model could not see.
+        "league_avg_corners",
     )
     assert not set(new_names) & set(FEATURE_NAMES)
 

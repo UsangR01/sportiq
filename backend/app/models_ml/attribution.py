@@ -78,6 +78,9 @@ FEATURE_GROUPS: dict[str, str] = {
     "elo_diff": "Overall strength",
     "league_avg_goals": "League norms",
     "league_home_win_rate": "League norms",
+    # The league's own corner level, grouped with the other league priors rather than with the
+    # teams' corner history: it says what this COMPETITION is like, not what these sides do.
+    "league_avg_corners": "League norms",
     "corners_for_home": "Corners won and conceded",
     "corners_against_home": "Corners won and conceded",
     "corners_for_away": "Corners won and conceded",

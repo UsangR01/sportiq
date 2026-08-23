@@ -564,6 +564,7 @@ def build_training_examples(
             key_players_per_combined_away=None,
             elo_diff=elo_diff,
             league_avg_goals=(baseline.avg_goals if baseline else None),
+            league_avg_corners=(baseline.avg_corners if baseline else None),
             league_home_win_rate=(baseline.home_win_rate if baseline else None),
         )
         features["label"] = LABEL_BY_CLASS[
@@ -870,6 +871,26 @@ async def main_async() -> None:
     # same loss, and scoring them by a downstream market metric would tune them for one line
     # (9.5) while they also serve 10.5 and the fixture-detail display. Separately, because the
     # away side genuinely wins fewer corners than the home side.
+    #
+    # === league_avg_corners, PRE-REGISTERED 2026-08-23 before the run ===
+    #
+    # WHY: these regressors saw league_avg_goals and league_home_win_rate -- both about GOALS --
+    # and nothing about a league's CORNER level, while P(over 9.5) across 28k fixtures runs
+    # 0.435 (Liga I) to 0.607 (Scottish Premiership). Measured on real cards over Fri/Sat
+    # 2026-08-21/22: every over-9.5 pick claimed on average +18.9pp above its own league's base
+    # rate, and that claim carried no information -- winners +17.6pp, losers +19.8pp, 8/19 landing.
+    #
+    # ADOPT ONLY IF ALL FOUR HOLD:
+    #   1. under-9.5 Brier improves by >= 0.0005. PRIMARY -- it is what the market sells.
+    #   2. corners test MAE does not worsen by more than 0.010.
+    #   3. under-9.5 reliability buckets do not LOSE monotonicity if they have it.
+    #   4. 1X2 accuracy and RPS come back IDENTICAL, and layer1/layer2 boosters hash the same.
+    #      This is a scope proof, not a quality bar: the feature is corners-vector only, so any
+    #      movement in the goals or 1X2 numbers means it leaked where it must not.
+    #
+    # An H2H corners feature was considered and REJECTED on measurement before this ran: 0.58%
+    # of variance alone and 0.205% incremental over team-rolling plus league level, on n=14,162.
+    # Revisit only AFTER this, so its increment is judged against a model that knows the league.
     #
     # PRE-REGISTERED, before the tuned numbers were seen. Adopt only if ALL hold:
     #   1. under-9.5 Brier improves by >= 0.0005. PRIMARY, because it is what the market

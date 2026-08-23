@@ -204,6 +204,17 @@ CORNERS_FEATURE_NAMES = FEATURE_NAMES + (
     "corners_against_home",
     "corners_for_away",
     "corners_against_away",
+    # THE LEAGUE'S OWN CORNER LEVEL, and its absence was a real defect rather than an omission.
+    #
+    # league_avg_goals has existed since partial pooling was introduced, on the argument that
+    # pooled leagues differ and the model should be told WHAT differs. Corners were never given
+    # the same treatment, so these regressors knew a league's scoring level and home advantage
+    # and nothing about its corner level -- while P(over 9.5), measured over 28k fixtures, runs
+    # 0.435 (Liga I) to 0.607 (Scottish Premiership).
+    #
+    # Corners-vector only. Layer 1's goals regressors and Layer 2's 1X2 classifier keep exactly
+    # the vector they had, so their boosters must come back byte-identical.
+    "league_avg_corners",
 )
 
 # TeamStats/TeamFeatures' existing "_5" column-naming convention (form_pts_5, xg_for_5,
@@ -421,6 +432,7 @@ def assemble_from_game_log(
     key_players_per_combined_away: float | None = None,
     elo_diff: float | None = None,
     league_avg_goals: float | None = None,
+    league_avg_corners: float | None = None,
     league_home_win_rate: float | None = None,
     market_implied_home: float | None = None,
     market_implied_away: float | None = None,
@@ -479,6 +491,7 @@ def assemble_from_game_log(
         "win_streak_away": _win_streak(away_games, as_of_date),
         "league_avg_goals": league_avg_goals,
         "league_home_win_rate": league_home_win_rate,
+        "league_avg_corners": league_avg_corners,
         "xg_for_home": xg_for_home,
         "xg_against_home": xg_against_home,
         "xg_for_away": xg_for_away,
@@ -740,6 +753,7 @@ async def assemble_from_live_db(db, fixture, home_features, away_features) -> di
         "xg_against_away": away_features.xg_against_5 if away_features else None,
         "league_avg_goals": league_baseline.avg_goals if league_baseline else None,
         "league_home_win_rate": league_baseline.home_win_rate if league_baseline else None,
+        "league_avg_corners": league_baseline.avg_corners if league_baseline else None,
         "elo_diff": elo_diff,
         "win_streak_home": home_features.win_streak if home_features else None,
         "win_streak_away": away_features.win_streak if away_features else None,

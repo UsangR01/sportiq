@@ -44,6 +44,21 @@ class LeagueBaseline:
 
     avg_goals: float
     home_win_rate: float
+    #: Mean TOTAL corners per match in this league, or None where corners are not collected.
+    #:
+    #: The missing sibling of avg_goals, and the asymmetry was doing real damage. The corners
+    #: regressors saw league_avg_goals and league_home_win_rate -- both about GOALS -- and
+    #: nothing at all about a league's corner level, while P(over 9.5) measured across 28k
+    #: fixtures runs from 0.435 in Liga I to 0.607 in the Scottish Premiership. A 17-point
+    #: spread the model could not see.
+    #:
+    #: Consequence, measured on real cards: every over-9.5 pick claimed on average +18.9pp
+    #: ABOVE its own league's base rate, and the size of that claim carried no information --
+    #: winners claimed +17.6pp, losers +19.8pp.
+    #:
+    #: Nullable rather than defaulted: a league with no corner history must reach XGBoost as
+    #: missing, not as a fabricated average.
+    avg_corners: float | None = None
 
 
 class LeagueBaselines:
@@ -68,6 +83,18 @@ class LeagueBaselines:
         return self._values[league][idx - 1]
 
 
+def _row_corners(row) -> float | None:
+    """Total corners for one fixture, from the columns merge_corners_into_game_log attaches.
+
+    Absent for a league whose corners were never collected, and for individual fixtures the
+    provider published no statistics for -- both must stay None rather than becoming a zero.
+    """
+    for_, against = getattr(row, "CORNERS_FOR", None), getattr(row, "CORNERS_AGAINST", None)
+    if for_ is None or against is None or pd.isna(for_) or pd.isna(against):
+        return None
+    return float(for_) + float(against)
+
+
 def compute_league_baselines(games: pd.DataFrame) -> LeagueBaselines:
     """Walks the pooled game log once in date order, accumulating per-league running means.
 
@@ -83,6 +110,7 @@ def compute_league_baselines(games: pd.DataFrame) -> LeagueBaselines:
 
     # Global running totals, used as the fallback while a league is still too thin to trust.
     all_goals = all_home_wins = all_matches = 0
+    all_corners = all_corner_matches = 0.0
     per_league: dict[str, list[int | float]] = {}
     dates: dict[str, list[date]] = {}
     values: dict[str, list[LeagueBaseline]] = {}
@@ -92,7 +120,8 @@ def compute_league_baselines(games: pd.DataFrame) -> LeagueBaselines:
         goals = int(row.GF) + int(row.GA)
         home_win = 1 if row.WDL == "W" else 0
 
-        stats = per_league.setdefault(league, [0, 0, 0])  # goals, home wins, matches
+        # goals, home wins, matches, corners, matches WITH a real corner count
+        stats = per_league.setdefault(league, [0, 0, 0, 0.0, 0])
         stats[0] += goals
         stats[1] += home_win
         stats[2] += 1
@@ -100,10 +129,27 @@ def compute_league_baselines(games: pd.DataFrame) -> LeagueBaselines:
         all_home_wins += home_win
         all_matches += 1
 
+        # Corners are counted on their OWN denominator, because coverage is partial and uneven
+        # -- Veikkausliiga sits at 44% where most leagues clear 90%. Dividing corner totals by
+        # the match count would silently deflate exactly the leagues with the thinnest data.
+        corners = _row_corners(row)
+        if corners is not None:
+            stats[3] += corners
+            stats[4] += 1
+            all_corners += corners
+            all_corner_matches += 1
+
         if stats[2] >= MIN_MATCHES_FOR_OWN_BASELINE:
-            baseline = LeagueBaseline(stats[0] / stats[2], stats[1] / stats[2])
+            avg_goals, home_rate = stats[0] / stats[2], stats[1] / stats[2]
         else:
-            baseline = LeagueBaseline(all_goals / all_matches, all_home_wins / all_matches)
+            avg_goals, home_rate = all_goals / all_matches, all_home_wins / all_matches
+        if stats[4] >= MIN_MATCHES_FOR_OWN_BASELINE:
+            avg_corners = stats[3] / stats[4]
+        elif all_corner_matches >= MIN_MATCHES_FOR_OWN_BASELINE:
+            avg_corners = all_corners / all_corner_matches
+        else:
+            avg_corners = None
+        baseline = LeagueBaseline(avg_goals, home_rate, avg_corners)
 
         dates.setdefault(league, []).append(row.GAME_DATE)
         values.setdefault(league, []).append(baseline)
@@ -135,6 +181,10 @@ async def league_baseline_from_db(db, league_id, as_of) -> LeagueBaseline | None
                 func.avg(
                     func.cast(FixtureLiveState.home_score > FixtureLiveState.away_score, Integer)
                 ),
+                # Its own COUNT and AVG: corner coverage is partial, so these must not be
+                # divided by the goals denominator. NULLs are excluded by both aggregates.
+                func.count(FixtureLiveState.home_corners),
+                func.avg(FixtureLiveState.home_corners + FixtureLiveState.away_corners),
             )
             .select_from(Fixture)
             .join(FixtureLiveState, FixtureLiveState.fixture_id == Fixture.id)
@@ -150,7 +200,12 @@ async def league_baseline_from_db(db, league_id, as_of) -> LeagueBaseline | None
 
     if row is None:
         return None
-    count, avg_goals, home_rate = row
+    count, avg_goals, home_rate, corner_count, avg_corners = row
     if not count or count < MIN_MATCHES_FOR_OWN_BASELINE or avg_goals is None:
         return None
-    return LeagueBaseline(float(avg_goals), float(home_rate or 0.0))
+    corners = (
+        float(avg_corners)
+        if corner_count and corner_count >= MIN_MATCHES_FOR_OWN_BASELINE and avg_corners is not None
+        else None
+    )
+    return LeagueBaseline(float(avg_goals), float(home_rate or 0.0), corners)
