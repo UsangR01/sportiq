@@ -22,14 +22,22 @@ still uses today's odds. pick_snapshots is the only thing that can do that and h
 before 2026-08-10 -- the reported fixture is 08-09.
 """
 
+from datetime import timedelta
+
 import pytest
 
 from app.fixtures.router import (
+    FEATURE_COMPLETENESS_FLOOR_RAISED_AT,
     MAX_EDGE_OVER_MARKET,
     MIN_FEATURE_COMPLETENESS,
     _MarketCandidate,
     _pick_best,
 )
+
+#: Predicted while the floor was still 0.25, so a sub-0.35 pick genuinely reached a card.
+OLD_ERA = FEATURE_COMPLETENESS_FLOOR_RAISED_AT - timedelta(days=4)
+#: Predicted after the raise, so the same completeness was NEVER shown to anybody.
+NEW_ERA = FEATURE_COMPLETENESS_FLOOR_RAISED_AT + timedelta(days=9)
 
 
 def _candidate(
@@ -40,6 +48,7 @@ def _candidate(
     selection="under",
     market="corners_total",
     line=10.5,
+    as_of=OLD_ERA,
 ):
     return _MarketCandidate(
         selection=selection,
@@ -48,6 +57,7 @@ def _candidate(
         market=market,
         line=line,
         feature_completeness=completeness,
+        as_of=as_of,
     )
 
 
@@ -121,3 +131,43 @@ def test_a_settled_pick_below_the_old_floor_stays_hidden(completeness):
         _pick_best([_candidate(0.71, completeness=completeness, odds=2.05)], is_settled=True)
         is None
     )
+
+
+# === The opposite failure, reported 2026-08-23 ===================================================
+
+
+def test_a_pick_made_after_the_raise_never_appears_once_the_match_is_over():
+    """THE REPORTED BUG, in the other direction.
+
+    "We didn't have Hull vs Manchester United on the card but surprisingly it came on after the
+    game was completed." Verified against the real row: completeness 0.265, predicted 02:08 on
+    2026-08-22 — nine hours BEFORE an 11:30 kickoff, so a genuine pre-match forecast that the
+    0.35 floor correctly hid. Settling it then dropped the floor to 0.25 and the pick surfaced.
+
+    Revealing a pick nobody could have acted on is the same defect as deleting one they saw. At
+    the time this was found, ELEVEN settled cards were doing it and not one of them predated the
+    raise.
+    """
+    candidate = _candidate(0.7032, completeness=0.265, odds=2.05, as_of=NEW_ERA)
+
+    assert _pick_best([candidate]) is None, "hidden before kickoff, as it was"
+    assert _pick_best([candidate], is_settled=True) is None, "and it must stay hidden after"
+
+
+def test_the_two_eras_are_distinguished_by_when_the_prediction_was_made():
+    """The whole fix in one assertion: identical completeness, opposite outcomes, decided only
+    by whether the floor in force at the time would have published it."""
+    old = _candidate(0.71, completeness=0.30, odds=2.05, as_of=OLD_ERA)
+    new = _candidate(0.71, completeness=0.30, odds=2.05, as_of=NEW_ERA)
+
+    assert _pick_best([old], is_settled=True) is not None
+    assert _pick_best([new], is_settled=True) is None
+
+
+def test_an_undated_candidate_errs_toward_hiding():
+    """as_of is populated on every real pick (141 of 141 checked in production), so this is a
+    defensive branch. It hides rather than reveals, because inventing a record is worse than
+    omitting one."""
+    candidate = _candidate(0.71, completeness=0.30, odds=2.05, as_of=None)
+
+    assert _pick_best([candidate], is_settled=True) is None

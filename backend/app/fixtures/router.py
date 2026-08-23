@@ -2,7 +2,7 @@ import dataclasses
 import logging
 import uuid
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -604,6 +604,37 @@ MIN_FEATURE_COMPLETENESS = 0.35
 # refusing what it never did.
 SETTLED_FEATURE_COMPLETENESS_FLOOR = 0.25
 
+#: When MIN_FEATURE_COMPLETENESS was raised 0.25 -> 0.35.
+#:
+#: THIS DATE IS WHY THE SETTLED FLOOR EXISTS AT ALL, and applying that floor without it was a
+#: real bug. A prediction made BEFORE this was judged against 0.25 and may genuinely have been
+#: published at 0.32; one made AFTER was judged against 0.35 and was never shown to anybody.
+#: Using the old floor for both meant a settled card could reveal a pick that had never appeared
+#: while the match was playable -- reported as fixtures "coming on after the game was completed",
+#: e.g. Hull City v Manchester United at completeness 0.265 on 2026-08-22.
+#:
+#: Measured when it was found: ELEVEN settled cards were showing a pick in the 0.25-0.35 band and
+#: ALL ELEVEN had been predicted after this date, so none was the case the exemption protects.
+#: Inventing a pick nobody saw is the same defect as deleting one they did -- the Hearts v Dundee
+#: Utd complaint in the other direction -- and this is the second time that principle has had to
+#: be applied to the same guard.
+FEATURE_COMPLETENESS_FLOOR_RAISED_AT = datetime(2026, 8, 13, tzinfo=UTC)
+
+
+def _completeness_floor_for(candidate: "_MarketCandidate", is_settled: bool) -> float:
+    """The floor this pick was actually judged against when it could still be acted on.
+
+    KNOWN LIMIT, stated rather than hidden: as_of is the prediction's created_at, which
+    REGENERATION RESETS (91 football rows were reset on 2026-08-10 by a model change). A genuine
+    old pick that has since been regenerated will therefore look new and stay hidden. That errs
+    toward showing less rather than inventing more, which is the safer direction for a record.
+    """
+    if not is_settled:
+        return MIN_FEATURE_COMPLETENESS
+    if candidate.as_of is not None and candidate.as_of < FEATURE_COMPLETENESS_FLOOR_RAISED_AT:
+        return SETTLED_FEATURE_COMPLETENESS_FLOOR
+    return MIN_FEATURE_COMPLETENESS
+
 
 def _base_rate(candidate: _MarketCandidate, sport_slug: str | None = None) -> float | None:
     """The share of real fixtures this outcome occurs in regardless of who is playing.
@@ -783,8 +814,7 @@ def _pick_best(
         # exemption overshot and surfaced picks nobody was ever shown.
         and (
             c.feature_completeness is None
-            or c.feature_completeness
-            >= (SETTLED_FEATURE_COMPLETENESS_FLOOR if is_settled else MIN_FEATURE_COMPLETENESS)
+            or c.feature_completeness >= _completeness_floor_for(c, is_settled)
         )
     ]
     priced = [c for c in candidates if c.probability is not None and c.odds is not None]
