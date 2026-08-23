@@ -54,4 +54,19 @@ ENV FOOTBALL_DATA_DIR=/app/ml_data
 # shell while gunicorn kept serving until it was killed outright, cutting in-flight requests
 # instead of draining them. exec replaces the shell, so gunicorn IS PID 1 and shuts down
 # gracefully. (This is what Docker's JSONArgsRecommended warning is really about.)
-CMD exec gunicorn -w 2 -k uvicorn.workers.UvicornWorker app.main:app --bind "0.0.0.0:${PORT:-8000}"
+#
+# WORKER COUNT COMES FROM THE PLATFORM, and it used to be a hardcoded `-w 2` that silently
+# overrode it. Render logs "Setting WEB_CONCURRENCY=1 by default, based on available CPUs" on
+# every boot — a starter instance has half a CPU — and gunicorn then booted TWO workers anyway,
+# because the flag wins over the environment variable.
+#
+# Two workers means TWO FULL COPIES of the app: ~128MB each on a 512MB instance, plus the
+# master, plus a SQLAlchemy pool apiece, plus whatever a request allocates. That left almost no
+# headroom, and the symptom was not an error — the container was killed and restarted with no
+# traceback at all, nine times in twenty minutes, every boot logging a clean "Application
+# startup complete" just before dying. An OOM kill looks exactly like a healthy service that
+# keeps restarting.
+#
+# UvicornWorker is async, so one worker is not one concurrent request: it serves the whole event
+# loop. The default stays 2 for local `docker run`, where no platform sets the variable.
+CMD exec gunicorn -w "${WEB_CONCURRENCY:-2}" -k uvicorn.workers.UvicornWorker app.main:app --bind "0.0.0.0:${PORT:-8000}"
