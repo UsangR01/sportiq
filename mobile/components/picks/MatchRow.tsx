@@ -307,6 +307,27 @@ function Chevron({ open, color }: { open: boolean; color: string }) {
   );
 }
 
+/** How a factor moved the estimate, in the units the market is actually about.
+ *
+ * "For"/"Against" is right for an OUTCOME market -- h2h and double chance decompose a log odds
+ * RATIO, so a positive contribution genuinely argues for the selection.
+ *
+ * IT IS WRONG FOR A COUNT MARKET, and it misled a real reader. On an OVER 9.5 CORNERS pick at
+ * 68%, two of three rows read "Against", which looks like the panel contradicting the
+ * recommendation. It was not: those rows decompose an expected CORNER COUNT, summed to -0.037
+ * on a log-rate scale, and moved the estimate from about 11.6 corners to 11.2 -- still
+ * comfortably over the line. "Against" meant "fewer corners than the baseline", not "this pick
+ * is wrong", and nothing on the card said so.
+ */
+function directionLabel(supports: boolean, market: string, selection: string): string {
+  const isCount = market === "goals_total" || market === "corners_total";
+  if (!isCount) return supports ? "For" : "Against";
+  // A contribution is negated server-side for an UNDER pick so that positive always supports
+  // the selection -- which means the real-world direction flips back here.
+  const wantsMore = selection !== "under";
+  return supports === wantsMore ? "More" : "Fewer";
+}
+
 /** The three factor rows (spec §3.2): 112px label, a proportional track, a direction word.
  *
  * DIRECTION AND RELATIVE WEIGHT, NEVER A PERCENTAGE. A figure like "48%" sitting inches from
@@ -317,7 +338,15 @@ function Chevron({ open, color }: { open: boolean; color: string }) {
  * always fills the track. Scaling by share instead would make a pick with several balanced
  * drivers render as three stubs, which reads as "weak evidence" when it means the opposite.
  */
-function FactorRows({ rows }: { rows: DriverRow[] }) {
+function FactorRows({
+  rows,
+  market,
+  selection,
+}: {
+  rows: DriverRow[];
+  market: string;
+  selection: string;
+}) {
   const { colors } = useTheme();
   const largest = Math.max(...rows.map((row) => Math.abs(row.contribution)), 1e-9);
 
@@ -354,7 +383,7 @@ function FactorRows({ rows }: { rows: DriverRow[] }) {
                 { color: supports ? colors.text : colors.textFaint, width: 52, textAlign: "right" },
               ]}
             >
-              {supports ? "For" : "Against"}
+              {directionLabel(supports, market, selection)}
             </Text>
           </View>
         );
@@ -405,7 +434,11 @@ function ExpandedPanel({
         </Text>
 
         {drivers && drivers.length > 0 ? (
-          <FactorRows rows={drivers} />
+          <FactorRows
+            rows={drivers}
+            market={fixture.best_pick?.market ?? "h2h"}
+            selection={fixture.best_pick?.selection ?? ""}
+          />
         ) : (
           <Text style={[TYPE.body, { color: colors.textSub, marginBottom: 4 }]}>
             {/* Deliberately vague about WHICH reason: a user does not need to know whether this
