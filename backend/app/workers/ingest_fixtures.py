@@ -352,6 +352,7 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
                     tournament_name=payload.tournament_name,
                     tournament_surface=payload.tournament_surface,
                     tournament_location=payload.tournament_location,
+                    tournament_end_utc=payload.tournament_end_utc,
                     kickoff_is_estimated=payload.kickoff_is_estimated,
                 )
                 db.add(fixture)
@@ -397,6 +398,8 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
                     existing.tournament_surface = payload.tournament_surface
                 if payload.tournament_location is not None:
                     existing.tournament_location = payload.tournament_location
+                if payload.tournament_end_utc is not None:
+                    existing.tournament_end_utc = payload.tournament_end_utc
 
                 # Refresh the kickoff time, which used to be written on INSERT only.
                 #

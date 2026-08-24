@@ -83,7 +83,7 @@ completed with a synthetic 0-0-shaped score) is a real, live-data-dependent judg
 revisit once real match_status proportions are visible (ALL-STAR tier)."""
 
 import asyncio
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
 import httpx
 
@@ -383,8 +383,25 @@ def _map_match_to_fixture_payload(match: dict, tour: str) -> FixturePayload:
         tournament_name=tournament.get("name"),
         tournament_surface=tournament.get("surface"),
         tournament_location=tournament.get("location"),
+        tournament_end_utc=_tournament_end(tournament),
         kickoff_is_estimated=_match_kickoff_is_estimated(match),
     )
+
+
+def _tournament_end(tournament: dict) -> datetime | None:
+    """The tournament's advertised close, as an aware UTC datetime, or None if absent.
+
+    Used only to bound a placeholder kickoff -- see ingest_live_scores._roll_forward_stale_
+    placeholders. A missing or unparseable date must return None rather than a guess, because
+    the caller falls back to a duration rule that is deliberately more generous.
+    """
+    raw = tournament.get("end_date")
+    if not raw:
+        return None
+    try:
+        return datetime.combine(date.fromisoformat(str(raw)[:10]), time(23, 59, 59), tzinfo=UTC)
+    except ValueError:
+        return None
 
 
 def _current_streak(

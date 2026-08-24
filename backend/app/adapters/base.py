@@ -71,6 +71,11 @@ class FixturePayload:
     tournament_name: str | None = None
     tournament_surface: str | None = None
     tournament_location: str | None = None
+    # When the competition itself finishes. Carried so a fixture with a PLACEHOLDER kickoff can
+    # be bounded: a timeless match inherits its tournament's START date and is rolled forward
+    # day by day, which for a match that will never be played means it follows the feed
+    # forever. The tournament's end is the exact point after which that is no longer possible.
+    tournament_end_utc: datetime | None = None
     # True when kickoff_utc was INFERRED rather than reported by the provider, so the client
     # can say "time TBC" instead of stating a precise time we don't actually have. Real and
     # common for tennis: measured across a full ATP tournament, 570 of 600 matches had no

@@ -12,7 +12,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from app.adapters.base import FixturePayload
 from app.adapters.factory import AdapterFactory
@@ -288,6 +288,19 @@ async def _team_external_id(db, team_id) -> str | None:
     ).scalar_one_or_none()
 
 
+# The fallback bound, for a fixture whose tournament end we do not know — every tennis row
+# ingested before tournament_end_utc existed.
+#
+# DERIVED FROM REAL TOURNAMENT DURATIONS rather than picked: of 64 ATP events with dates, the
+# median runs 6 days, the 90th percentile 11, and the longest exactly 14 (US Open, Roland
+# Garros, Australian Open; Wimbledon 13). A placeholder carries its tournament's START date, so
+# 14 days covers even a Grand Slam end to end. Two more for a rain-delayed finish.
+#
+# Deliberately the GENEROUS side: rolling a real match one day too long is a cosmetic error,
+# while retiring one that is still to be played deletes a pick a user could act on.
+MAX_PLACEHOLDER_ROLL_DAYS = 16
+
+
 async def _roll_forward_stale_placeholders() -> None:
     """Move a PLACEHOLDER kickoff that has fallen into the past up to today.
 
@@ -310,6 +323,17 @@ async def _roll_forward_stale_placeholders() -> None:
     Only ever moves a placeholder FORWARD, and only one whose day has already ended. A real
     kickoff is never touched: that provider owns the schedule, and a genuinely missed match
     should be retired by the clock sweep, not quietly rescheduled.
+
+    AND IT IS NOW BOUNDED, because unbounded it carried phantoms forever. A match the provider
+    published and never played -- Toby Samuel v J.J. Wolf, stamped 11 August, still on the feed
+    on the 24th -- keeps reporting `scheduled`, so _reconcile_vanished_fixtures cannot see it
+    (its id is still in the payload) and the clock sweep exempts placeholders by design. This
+    was the only thing still touching it, and it was moving it onto each new day.
+
+    A fixture is not rolled past the end of its own tournament, which is the exact point after
+    which it cannot be played; it is retired there instead, hidden the same way a withdrawn
+    draw is. Where no tournament end is known -- rows ingested before that column existed --
+    a duration bound stands in. See MAX_PLACEHOLDER_ROLL_DAYS.
     """
     today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     async with async_session_factory() as db:
@@ -320,6 +344,12 @@ async def _roll_forward_stale_placeholders() -> None:
                         Fixture.status == FixtureStatus.SCHEDULED,
                         Fixture.kickoff_is_estimated.is_(True),
                         Fixture.kickoff_utc < today,
+                        # Never roll a fixture past its own tournament's close. Rows with no
+                        # known end still qualify and are bounded by duration below.
+                        or_(
+                            Fixture.tournament_end_utc.is_(None),
+                            Fixture.tournament_end_utc >= today,
+                        ),
                         ~select(FixtureLiveState.fixture_id)
                         .where(FixtureLiveState.fixture_id == Fixture.id)
                         .exists(),
@@ -330,15 +360,46 @@ async def _roll_forward_stale_placeholders() -> None:
             .scalars()
             .all()
         )
-        if not stale:
-            return
+        expired = (
+            (
+                await db.execute(
+                    select(Fixture).where(
+                        Fixture.status == FixtureStatus.SCHEDULED,
+                        Fixture.kickoff_is_estimated.is_(True),
+                        Fixture.kickoff_utc < today - timedelta(days=MAX_PLACEHOLDER_ROLL_DAYS),
+                        ~select(FixtureLiveState.fixture_id)
+                        .where(FixtureLiveState.fixture_id == Fixture.id)
+                        .exists(),
+                        ~select(Outcome.id).where(Outcome.fixture_id == Fixture.id).exists(),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for fixture in expired:
+            # Same treatment a withdrawn draw gets: POSTPONED keeps every status-based path
+            # working, and `withdrawn` hides it, because this was never a real scheduled match.
+            fixture.status = FixtureStatus.POSTPONED
+            fixture.withdrawn = True
+
         for fixture in stale:
             fixture.kickoff_utc = today
-        await db.commit()
-        logger.info(
-            "Rolled %d placeholder kickoff(s) forward to today; they remain Time-TBC",
-            len(stale),
-        )
+        if stale or expired:
+            await db.commit()
+        if stale:
+            logger.info(
+                "Rolled %d placeholder kickoff(s) forward to today; they remain Time-TBC",
+                len(stale),
+            )
+        if expired:
+            # WARNING so it reaches Sentry: every previous instance of a fixture outliving its
+            # own match was found by a user rather than by us.
+            logger.warning(
+                "Retired %d placeholder fixture(s) that outlived their tournament or %d days",
+                len(expired),
+                MAX_PLACEHOLDER_ROLL_DAYS,
+            )
 
 
 # The second corner source runs on its OWN, SLOWER schedule rather than inside the 5-minute

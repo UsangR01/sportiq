@@ -108,6 +108,20 @@ class Fixture(Base):
     tournament_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     tournament_surface: Mapped[str | None] = mapped_column(String(30), nullable=True)
     tournament_location: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # When the competition finishes, so a PLACEHOLDER kickoff can be bounded.
+    #
+    # A tennis match with no scheduled_time inherits its TOURNAMENT'S START date, and
+    # _roll_forward_stale_placeholders moves such a fixture to today once its day has passed --
+    # correct for a real match still to be played, and unbounded for one that never will be.
+    # Measured: a Toby Samuel v J.J. Wolf phantom stamped 11 Aug was still riding the feed on
+    # 24 Aug, because BallDontLie keeps reporting it `scheduled` and never withdraws it, so
+    # neither the vanished-fixture reconciliation nor the clock sweep can see it.
+    #
+    # The tournament's own close is the exact point after which the match cannot happen. Null
+    # for football and basketball, and for tennis rows ingested before this existed.
+    tournament_end_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # True when kickoff_utc was INFERRED rather than reported by the provider, so the client
     # can show "Time TBC" instead of a precise time we don't actually have. Tennis in practice:
     # ~95% of ATP matches carry no usable kickoff time, and falling back to the tournament's
