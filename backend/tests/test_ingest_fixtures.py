@@ -1039,3 +1039,83 @@ async def test_a_redrawn_fixture_updates_its_players(monkeypatch):
             await db.execute(delete(League).where(League.sport_id == sport.id))
             await db.execute(delete(Sport).where(Sport.id == sport.id))
             await db.commit()
+
+
+async def test_the_daily_ingest_fans_out_one_task_per_league(monkeypatch):
+    """THE MEMORY FIX, and it is why a manual run drained the queue and changed nothing.
+
+    Ingesting ONE league peaks around 359MB. The worker sits at ~278MB with a model loaded, on
+    a 512MB instance — so walking 24 leagues in one process ran out of memory partway through.
+    An OOM kill is silent: the container restarts, the task is gone, the queue is empty, and
+    nothing happened. Football's 22 leagues were processed ahead of tennis and never reached it.
+
+    Per league, each task starts fresh and releases its memory when it ends.
+    """
+    from app.workers import ingest_fixtures as module
+
+    tag = uuid.uuid4().hex[:8]
+    async with async_session_factory() as db:
+        sport = Sport(slug=f"fan-{tag}", name="Fan", model_type="x", active=True)
+        db.add(sport)
+        await db.flush()
+        db.add(League(sport_id=sport.id, slug=f"lg-{tag}", name="L", tier=1, active=True))
+        # An INACTIVE league must not be dispatched.
+        db.add(League(sport_id=sport.id, slug=f"off-{tag}", name="Off", tier=1, active=False))
+        await db.commit()
+        sport_id = sport.id
+
+    sent: list[tuple[str, str]] = []
+
+    class _Recorder:
+        @staticmethod
+        def delay(sport_slug, league_slug):
+            sent.append((sport_slug, league_slug))
+
+    monkeypatch.setattr(module, "ingest_fixtures_for_league", _Recorder)
+    try:
+        await module._fan_out_league_ingests()
+        assert (f"fan-{tag}", f"lg-{tag}") in sent, "an active league must be dispatched"
+        assert (f"fan-{tag}", f"off-{tag}") not in sent, "an inactive league must not be"
+    finally:
+        async with async_session_factory() as db:
+            await db.execute(delete(League).where(League.sport_id == sport_id))
+            await db.execute(delete(Sport).where(Sport.id == sport_id))
+            await db.commit()
+
+
+async def test_a_single_league_ingest_is_addressable_by_slug(monkeypatch):
+    """The manual entry point: re-ingesting one competition must not cost all 24."""
+    from app.workers import ingest_fixtures as module
+
+    called: list[tuple[str, str]] = []
+
+    async def _fake(sport, league):
+        called.append((sport.slug, league.slug))
+
+    monkeypatch.setattr(module, "_ingest_fixtures_for_league", _fake)
+
+    async with async_session_factory() as db:
+        row = (
+            await db.execute(
+                select(Sport.slug, League.slug)
+                .join(League, League.sport_id == Sport.id)
+                .where(Sport.active.is_(True), League.active.is_(True))
+                .limit(1)
+            )
+        ).first()
+    if row is None:
+        pytest.skip("no active sport/league seeded")
+
+    await module._ingest_one_league(row[0], row[1])
+    assert called == [(row[0], row[1])]
+
+
+async def test_an_unknown_league_is_a_warning_not_a_crash(monkeypatch):
+    """A slug that no longer exists must not kill a worker task."""
+    from app.workers import ingest_fixtures as module
+
+    async def _fake(sport, league):  # pragma: no cover - must not be reached
+        raise AssertionError("should not ingest an unknown league")
+
+    monkeypatch.setattr(module, "_ingest_fixtures_for_league", _fake)
+    await module._ingest_one_league("no-such-sport", "no-such-league")

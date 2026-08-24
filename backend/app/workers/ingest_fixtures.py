@@ -642,8 +642,70 @@ async def _ingest_fixtures() -> None:
 
 @celery_app.task(name="app.workers.ingest_fixtures.ingest_fixtures")
 def ingest_fixtures() -> None:
-    """Celery beat triggers this daily at 02:00 UTC (TDD §2.3)."""
-    run_task(_ingest_fixtures())
+    """Celery beat triggers this daily at 02:00 UTC (TDD §2.3).
+
+    FANS OUT ONE TASK PER LEAGUE rather than walking all of them in this process, and the
+    reason is memory rather than tidiness.
+
+    Measured 2026-08-24: ingesting a SINGLE league peaks around 359MB — fixtures, features and,
+    for tennis, the cached history retrodiction reads. The worker sits at ~278MB once a model
+    is loaded, on a 512MB instance. Doing 24 leagues back to back in one process therefore ran
+    it out of memory partway through, and an OOM kill is silent: the container restarts, the
+    task is simply gone, the queue drains, and nothing has changed.
+
+    That was not hypothetical. A manually enqueued run drained the queue and altered nothing --
+    no fixture updated, no prediction regenerated, no error anywhere -- while football's 22
+    leagues were processed ahead of tennis and never reached it. The nightly run had almost
+    certainly been dying the same way.
+
+    Per league, each task starts fresh and its memory is released when it ends. It also means
+    one league's failure can no longer take the rest of the run with it, which the inner
+    try/except was already trying to achieve and could not once the process itself died.
+    """
+    run_task(_fan_out_league_ingests())
+
+
+async def _fan_out_league_ingests() -> None:
+    async with async_session_factory() as db:
+        rows = (
+            await db.execute(
+                select(Sport.slug, League.slug)
+                .join(League, League.sport_id == Sport.id)
+                .where(Sport.active.is_(True), League.active.is_(True))
+            )
+        ).all()
+    for sport_slug, league_slug in rows:
+        ingest_fixtures_for_league.delay(sport_slug, league_slug)
+    logger.info("Fanned out %d per-league fixture ingests", len(rows))
+
+
+@celery_app.task(name="app.workers.ingest_fixtures.ingest_fixtures_for_league")
+def ingest_fixtures_for_league(sport_slug: str, league_slug: str) -> None:
+    """One league, so the process's peak memory is one league's worth.
+
+    Also the manual entry point: enqueueing a single league is what you want when a specific
+    competition needs re-ingesting, rather than paying for all 24.
+    """
+    run_task(_ingest_one_league(sport_slug, league_slug))
+
+
+async def _ingest_one_league(sport_slug: str, league_slug: str) -> None:
+    async with async_session_factory() as db:
+        sport = (
+            await db.execute(select(Sport).where(Sport.slug == sport_slug))
+        ).scalar_one_or_none()
+        league = (
+            await db.execute(
+                select(League).where(
+                    League.sport_id == sport.id if sport else False,
+                    League.slug == league_slug,
+                )
+            )
+        ).scalar_one_or_none()
+    if sport is None or league is None:
+        logger.warning("No active sport/league for %s/%s", sport_slug, league_slug)
+        return
+    await _ingest_fixtures_for_league(sport, league)
 
 
 # How long before kickoff the reminder fires (TDD §5.4).
