@@ -367,6 +367,23 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
                 new_status = FixtureStatus(payload.status)
                 if existing.status != new_status:
                     existing.status = new_status
+                # THE PLAYERS CAN CHANGE UNDER A FIXED MATCH ID, and they were written on
+                # INSERT only -- so whichever pairing we saw first stuck forever.
+                #
+                # Reported as "the players don't match the games for today". Measured against
+                # the live provider: we were showing Majchrzak v Jarry where the provider had
+                # Majchrzak v BONZI, and Comesana v Bellucci where it had Comesana v YIBING WU
+                # -- the same match id, the same player on one side, a different opponent on
+                # the other. A qualifying draw is published provisionally and then filled in as
+                # earlier rounds settle, and BallDontLie updates the existing record rather
+                # than issuing a new one, so _reconcile_vanished_fixtures could never see it
+                # either: the id is still in the payload, so the fixture is not "vanished".
+                #
+                # Assigned unconditionally rather than guarded on a change: the ids come from
+                # get_or_create_team above, so an unchanged pairing is a no-op write, and any
+                # condition here would be another place for this to silently stop happening.
+                existing.home_team_id = home_team.id
+                existing.away_team_id = away_team.id
                 # The provider is listing it again, so whatever caused it to be treated as
                 # withdrawn no longer holds. Clearing here is what makes _reconcile_vanished_
                 # fixtures reversible — a withdrawn draw CAN be republished, and a fixture that

@@ -947,3 +947,95 @@ async def test_a_prediction_from_a_superseded_model_is_regenerated(monkeypatch):
             await db.execute(delete(League).where(League.sport_id == sport.id))
             await db.execute(delete(Sport).where(Sport.id == sport.id))
             await db.commit()
+
+
+async def test_a_redrawn_fixture_updates_its_players(monkeypatch):
+    """THE REPORTED BUG: "the players don't match the games for today".
+
+    A qualifying draw is published provisionally and filled in as earlier rounds settle, and
+    BallDontLie updates the EXISTING record rather than issuing a new one. Team ids were written
+    on INSERT only, so whichever pairing we saw first stuck forever — measured against the live
+    provider, we showed Majchrzak v Jarry where it had Majchrzak v BONZI, and Comesana v
+    Bellucci where it had Comesana v YIBING WU.
+
+    _reconcile_vanished_fixtures structurally cannot catch this: the id is still in the
+    payload, so the fixture has not vanished. Only the update path can.
+    """
+    kickoff = datetime.now(UTC) + timedelta(days=1)
+    async with async_session_factory() as db:
+        sport = Sport(
+            slug=f"test-tennis-{uuid.uuid4().hex[:8]}", name="Tennis", model_type="t", active=True
+        )
+        db.add(sport)
+        await db.flush()
+        league = League(
+            sport_id=sport.id, slug="atp", name="ATP", country=None, tier=1, active=True
+        )
+        db.add(league)
+        await db.commit()
+        await db.refresh(sport)
+        await db.refresh(league)
+
+    def payload(away_external: str, away_name: str) -> FixturePayload:
+        return FixturePayload(
+            external_id="atp:redraw-1",
+            league_external_id="atp",
+            home_team_external_id="atp:p-home",
+            away_team_external_id=away_external,
+            kickoff_utc=kickoff,
+            season="2026",
+            home_team_name="Kamil Majchrzak",
+            away_team_name=away_name,
+            status="scheduled",
+        )
+
+    import app.adapters.factory as factory_module
+
+    async def players() -> tuple[str, str]:
+        async with async_session_factory() as db:
+            fx = (
+                await db.execute(select(Fixture).where(Fixture.external_id == "atp:redraw-1"))
+            ).scalar_one()
+            home = (await db.execute(select(Team).where(Team.id == fx.home_team_id))).scalar_one()
+            away = (await db.execute(select(Team).where(Team.id == fx.away_team_id))).scalar_one()
+            return home.name, away.name
+
+    try:
+        monkeypatch.setattr(
+            factory_module.AdapterFactory,
+            "get_stats_adapter",
+            lambda slug: FakeAdapter([payload("atp:p-jarry", "Nicolas Jarry")]),
+        )
+        await _ingest_fixtures_for_league(sport, league)
+        assert (await players())[1] == "Nicolas Jarry"
+
+        # The provider fills the real opponent in under the SAME match id.
+        monkeypatch.setattr(
+            factory_module.AdapterFactory,
+            "get_stats_adapter",
+            lambda slug: FakeAdapter([payload("atp:p-bonzi", "Benjamin Bonzi")]),
+        )
+        await _ingest_fixtures_for_league(sport, league)
+
+        home_name, away_name = await players()
+        assert home_name == "Kamil Majchrzak", "the unchanged side must stay put"
+        assert away_name == "Benjamin Bonzi", "the redrawn opponent must be picked up"
+    finally:
+        async with async_session_factory() as db:
+            ids = (
+                (await db.execute(select(Fixture.id).where(Fixture.sport_id == sport.id)))
+                .scalars()
+                .all()
+            )
+            if ids:
+                # Children first: team_features and predictions both reference the fixture.
+                await db.execute(delete(TeamFeatures).where(TeamFeatures.fixture_id.in_(ids)))
+                await db.execute(delete(Prediction).where(Prediction.fixture_id.in_(ids)))
+                await db.execute(
+                    delete(FixtureLiveState).where(FixtureLiveState.fixture_id.in_(ids))
+                )
+            await db.execute(delete(Fixture).where(Fixture.sport_id == sport.id))
+            await db.execute(delete(Team).where(Team.sport_id == sport.id))
+            await db.execute(delete(League).where(League.sport_id == sport.id))
+            await db.execute(delete(Sport).where(Sport.id == sport.id))
+            await db.commit()
