@@ -11,7 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.core.database import get_db
-from app.fixtures.corners_availability import offers_corners
+from app.fixtures.corners_availability import (
+    corner_selection_is_publishable,
+    offers_corners,
+)
 from app.fixtures.goals_availability import offers_goals
 from app.fixtures.league_availability import (
     SUPPRESSED_LEAGUES,
@@ -1057,6 +1060,16 @@ async def _bulk_best_picks(
         # to a market that settles from the score and can always be graded.
         if not offers_corners(league_by_fixture.get(fixture_id)):
             candidates = [c for c in candidates if c.market != "corners_total"]
+
+        # And a side of a LINE, rather than a league: over-9.5 is calibrated on average and
+        # overconfident exactly in the band picks are drawn from (claimed 0.69 vs actual 0.59
+        # at predicted >= 0.65). See corners_availability.OVERSTATED_CORNER_SELECTIONS for the
+        # measurement, and for why under-10.5 is deliberately untouched.
+        candidates = [
+            c
+            for c in candidates
+            if c.market != "corners_total" or corner_selection_is_publishable(c.selection, c.line)
+        ]
 
         # Operator override, applying to ANY market for ANY league — including h2h and
         # double_chance, which have no measured gate of their own. Kept separate from the two

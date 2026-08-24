@@ -101,3 +101,55 @@ def test_the_conference_league_is_barred_for_absent_skill_not_supply():
     assert not offers_corners("uecl")
     assert offers_corners("ucl")
     assert "uecl" not in LEAGUES_WITHOUT_PROMPT_CORNERS
+
+
+# === A side of a line, not a league (2026-08-24) ==================================================
+
+
+def test_over_9_5_is_barred_from_the_headline():
+    """THE MEASUREMENT. The model is calibrated on average and overconfident exactly where picks
+    are drawn from — on the served model's own test parquet, P(over 9.5) claimed 0.634 against
+    an actual 0.566 at predicted >= 0.60, and 0.736 against 0.600 at >= 0.70. The gap GROWS with
+    confidence, and a pick must clear ~0.5955 to reach a card at all.
+
+    Confirmed live: 69 settled over-9.5 picks hit 52% against a claimed 67%, with the claim
+    outside the interval's upper bound of 64%. 52% is the pooled base rate, so they added
+    nothing.
+    """
+    from app.fixtures.corners_availability import corner_selection_is_publishable
+
+    assert corner_selection_is_publishable("over", 9.5) is False
+
+
+def test_under_10_5_is_deliberately_untouched():
+    """Why this is a side-of-a-line rule and not "corners are broken": 18 settled under-10.5
+    picks hit 72% against a claimed 70%. Barring the whole market would have deleted a
+    well-calibrated one along with the bad one."""
+    from app.fixtures.corners_availability import corner_selection_is_publishable
+
+    assert corner_selection_is_publishable("under", 10.5) is True
+    assert corner_selection_is_publishable("over", 10.5) is True
+    assert corner_selection_is_publishable("under", 9.5) is True
+
+
+def test_a_line_less_candidate_is_never_barred():
+    """Defensive: every corners candidate carries a line, but a None must not be silently
+    treated as a barred one."""
+    from app.fixtures.corners_availability import corner_selection_is_publishable
+
+    assert corner_selection_is_publishable("over", None) is True
+
+
+def test_the_bar_is_applied_where_the_headline_is_chosen():
+    """Pinned by source order like the other two gates: the behaviour lives in one branch of one
+    function and a silent removal would be invisible in the response."""
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "fixtures" / "router.py").read_text(
+        encoding="utf-8"
+    )
+    picks = source[source.index("async def _bulk_best_picks") :]
+    body = picks[: picks.index("return best_picks")]
+    assert "corner_selection_is_publishable(" in body
+    assert body.index("offers_corners(") < body.index("corner_selection_is_publishable(")
+    assert body.index("corner_selection_is_publishable(") < body.index("_pick_best(")

@@ -87,3 +87,46 @@ def offers_corners(league_slug: str | None) -> bool:
     if league_slug in LEAGUES_WITHOUT_DEMONSTRATED_CORNERS_SIGNAL:
         return False
     return league_slug not in LEAGUES_WITHOUT_PROMPT_CORNERS
+
+
+# A THIRD reason, and the first that is about a SIDE OF A LINE rather than a league: the model
+# is calibrated on average and overconfident exactly where picks are drawn from.
+#
+# Measured 2026-08-24 on the served model's own test parquet (5,970 fixtures with real corner
+# counts), P(over 9.5) predicted vs observed:
+#
+#     all fixtures        claimed 0.532  actual 0.512  gap +0.02
+#     predicted >= 0.60   claimed 0.634  actual 0.566  gap +0.07   n=1050
+#     predicted >= 0.65   claimed 0.689  actual 0.591  gap +0.10   n= 225
+#     predicted >= 0.70   claimed 0.736  actual 0.600  gap +0.14   n=  65
+#
+# THE GAP GROWS WITH CONFIDENCE. A pick must clear ~0.5955 to pass MIN_EDGE_OVER_BASE_RATE, so
+# every over-9.5 pick that reaches a card is drawn from precisely the band where the model is
+# worst. The headline "2-point gap" over all fixtures is real and irrelevant: it averages over
+# thousands of fixtures that could never be picked.
+#
+# Confirmed live rather than inferred: 69 settled over-9.5 card picks hit 52% against a claimed
+# 67%, a 15-point overstatement whose claim sits outside the 95% interval's upper bound of 64%.
+# 52% is also the pooled base rate, so those picks were adding nothing.
+#
+# UNDER 10.5 IS DELIBERATELY NOT BARRED and is the reason this is a side-of-a-line rule rather
+# than "corners are broken": 18 settled picks, 72% against a claimed 70%. Its picks sit in a
+# better-behaved part of the same distribution.
+#
+# THIS IS A HOLDING MEASURE. The real fix is calibrating the derived over/under probability --
+# the artefact calibrates the corner RATE and never the probability derived from it -- after
+# which MIN_EDGE_OVER_BASE_RATE would drop these on its own and this set can be emptied. Lift
+# it when a served model shows the >=0.65 band inside ~3 points.
+OVERSTATED_CORNER_SELECTIONS: frozenset[tuple[str, float]] = frozenset({("over", 9.5)})
+
+
+def corner_selection_is_publishable(selection: str, line: float | None) -> bool:
+    """False for a corners side measured to overstate itself where picks are actually drawn.
+
+    Barred from WINNING the headline only. The selection still appears in all_market_picks and
+    in the fixture detail, and an explicit request for it is still honoured — the same
+    treatment NO_DEMONSTRATED_SIGNAL_MARKETS gives goals.
+    """
+    if line is None:
+        return True
+    return (selection, float(line)) not in OVERSTATED_CORNER_SELECTIONS
