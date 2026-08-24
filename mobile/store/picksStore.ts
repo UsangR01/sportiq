@@ -42,8 +42,11 @@ export const DEFAULT_MIN_ODDS = 1.2;
 
 interface PicksState {
   selectedDate: Date;
-  sport: string | null;
-  subSport: string | null;
+  // ARRAYS, NOT SINGLE VALUES, so several sports or tours can be shown at once. Empty means
+  // "no restriction" rather than "nothing": an empty list is what the All chip produces, and a
+  // feed showing nothing because every chip was deselected would be a trap.
+  sports: string[];
+  subSports: string[];
   segment: Segment;
   minProbability: number;
   minOdds: number;
@@ -57,7 +60,9 @@ interface PicksState {
   favouritesHydrated: boolean;
 
   setSelectedDate: (date: Date) => void;
-  setSport: (sport: string | null, subSport: string | null) => void;
+  toggleSport: (slug: string) => void;
+  toggleSubSport: (slug: string) => void;
+  clearSports: () => void;
   setSegment: (segment: Segment) => void;
   setMinProbability: (value: number) => void;
   setMinOdds: (value: number) => void;
@@ -81,12 +86,25 @@ interface PicksState {
  */
 export const DEFAULT_SPORT = "football";
 
+/** Which tours/leagues belong to each sport, so deselecting a sport can drop its tours too.
+ * Mirrors the chip list in components/picks/FilterSheet.tsx; football has no sub-selection. */
+export const SUB_SPORTS: Record<string, string[]> = {
+  nba: ["nba", "wnba"],
+  tennis: ["atp", "wta"],
+};
+
+/** Order-insensitive comparison — the selection is a SET wearing an array, and [a,b] must not
+ * read as "changed" against [b,a] on the Filters dot. */
+function sameSet(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((value) => b.includes(value));
+}
+
 /** Everything the "Reset filters" affordance clears. Deliberately NOT the date or favourites:
  * the user did not set the date by accident, and a reset that silently unstars their leagues
  * would be destructive rather than corrective. */
 const FILTER_DEFAULTS = {
-  sport: DEFAULT_SPORT as string | null,
-  subSport: null as string | null,
+  sports: [DEFAULT_SPORT] as string[],
+  subSports: [] as string[],
   segment: "All" as Segment,
   minProbability: DEFAULT_MIN_PROBABILITY,
   minOdds: DEFAULT_MIN_ODDS,
@@ -106,7 +124,28 @@ export const usePicksStore = create<PicksState>((set, get) => ({
     // leaving it set makes an unrelated row on the new day appear pre-opened.
     set({ selectedDate, expanded: null }),
 
-  setSport: (sport, subSport) => set({ sport, subSport }),
+  toggleSport: (slug) => {
+    const current = get().sports;
+    const sports = current.includes(slug)
+      ? current.filter((s) => s !== slug)
+      : [...current, slug];
+    // Deselecting a sport must take its tours with it, or a hidden ATP selection keeps
+    // filtering the feed after Tennis itself is gone — a filter the user cannot see is worse
+    // than one they cannot set.
+    const allowed = new Set(sports.flatMap((s) => SUB_SPORTS[s] ?? []));
+    set({ sports, subSports: get().subSports.filter((sub) => allowed.has(sub)) });
+  },
+
+  toggleSubSport: (slug) => {
+    const current = get().subSports;
+    set({
+      subSports: current.includes(slug)
+        ? current.filter((s) => s !== slug)
+        : [...current, slug],
+    });
+  },
+
+  clearSports: () => set({ sports: [], subSports: [] }),
   setSegment: (segment) => set({ segment }),
   setMinProbability: (minProbability) => set({ minProbability }),
   setMinOdds: (minOdds) => set({ minOdds }),
@@ -149,8 +188,8 @@ export const usePicksStore = create<PicksState>((set, get) => ({
  * filtering, and dotting the button for it would train users to ignore the dot. */
 export function hasActiveFilters(state: PicksState): boolean {
   return (
-    state.sport !== FILTER_DEFAULTS.sport ||
-    state.subSport !== FILTER_DEFAULTS.subSport ||
+    !sameSet(state.sports, FILTER_DEFAULTS.sports) ||
+    state.subSports.length > 0 ||
     state.segment !== FILTER_DEFAULTS.segment ||
     state.minProbability !== FILTER_DEFAULTS.minProbability ||
     state.minOdds !== FILTER_DEFAULTS.minOdds ||

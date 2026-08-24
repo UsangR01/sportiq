@@ -27,9 +27,11 @@ export const MIN_ODDS_CEILING = 3.0;
 export function FilterSheet({
   visible,
   onClose,
-  sport,
-  subSport,
-  onSelectSport,
+  sports,
+  subSports,
+  onToggleSport,
+  onToggleSubSport,
+  onClearSports,
   minProbability,
   onMinProbabilityChange,
   minOdds,
@@ -40,9 +42,11 @@ export function FilterSheet({
 }: {
   visible: boolean;
   onClose: () => void;
-  sport: string | null;
-  subSport: string | null;
-  onSelectSport: (sport: string | null, subSport: string | null) => void;
+  sports: string[];
+  subSports: string[];
+  onToggleSport: (slug: string) => void;
+  onToggleSubSport: (slug: string) => void;
+  onClearSports: () => void;
   minProbability: number;
   onMinProbabilityChange: (value: number) => void;
   minOdds: number;
@@ -52,7 +56,9 @@ export function FilterSheet({
   onReset: () => void;
 }) {
   const { colors, elevation } = useTheme();
-  const active = SPORTS.find((entry) => entry.slug === sport);
+  // Every SELECTED sport that has tours contributes its own group, so choosing Tennis AND
+  // NBA Basketball shows both sets rather than only the most recent.
+  const withTours = SPORTS.filter((entry) => entry.slug && entry.subs && sports.includes(entry.slug));
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
@@ -101,9 +107,16 @@ export function FilterSheet({
               {SPORTS.map((entry) => (
                 <Chip
                   key={entry.label}
+                  // "All" is not a sport but the ABSENCE of a restriction, so it lights up when
+                  // nothing is chosen and clears the selection when tapped — it is not
+                  // deselectable in the way the others are.
                   label={entry.label}
-                  selected={entry.slug === sport}
-                  onPress={() => onSelectSport(entry.slug, null)}
+                  selected={
+                    entry.slug === null ? sports.length === 0 : sports.includes(entry.slug)
+                  }
+                  onPress={() =>
+                    entry.slug === null ? onClearSports() : onToggleSport(entry.slug)
+                  }
                 />
               ))}
             </View>
@@ -111,8 +124,9 @@ export function FilterSheet({
 
           {/* Only for sports that genuinely have sub-competitions, and indented behind a rule so
               it reads as belonging to the chip above rather than as a peer filter. */}
-          {active?.subs && (
+          {withTours.map((entry) => (
             <View
+              key={entry.slug}
               style={{
                 borderLeftWidth: 2,
                 borderLeftColor: colors.mutedBg,
@@ -120,24 +134,23 @@ export function FilterSheet({
                 marginLeft: 2,
               }}
             >
-              <Section label={sport === "tennis" ? "Tour" : "League"}>
+              <Section label={entry.slug === "tennis" ? "Tour" : "League"}>
                 <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-                  {active.subs.map((sub) => (
+                  {entry.subs?.map((sub) => (
                     <Chip
                       key={sub.slug}
                       label={sub.label}
-                      selected={sub.slug === subSport}
-                      // Tapping the selected chip clears it — otherwise a sub-tour can only be
-                      // escaped by changing sport and coming back.
-                      onPress={() =>
-                        onSelectSport(sport, sub.slug === subSport ? null : sub.slug)
-                      }
+                      selected={subSports.includes(sub.slug)}
+                      // Tapping a selected chip deselects it. Selecting NONE within a sport
+                      // means every tour of that sport, not none of them — the same "empty is
+                      // no restriction" rule the sport row follows.
+                      onPress={() => onToggleSubSport(sub.slug)}
                     />
                   ))}
                 </View>
               </Section>
             </View>
-          )}
+          ))}
 
           <SliderRow
             label="Minimum probability"

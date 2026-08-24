@@ -19,7 +19,12 @@ import { countryForTournamentLocation } from "@/lib/countryFlags";
 import { toOddsFormat } from "@/lib/oddsFormat";
 import { GAP, SCREEN, TYPE, useTheme } from "@/lib/theme";
 import { useAuthStore } from "@/store/authStore";
-import { hasActiveFilters, usePicksStore, type Segment } from "@/store/picksStore";
+import {
+  hasActiveFilters,
+  SUB_SPORTS,
+  usePicksStore,
+  type Segment,
+} from "@/store/picksStore";
 import { useThemeStore } from "@/store/themeStore";
 
 const FIXTURES_PAGE_LIMIT = 200;
@@ -127,16 +132,24 @@ export default function PicksScreen() {
     queryKey: [
       "fixtures",
       store.selectedDate.toDateString(),
-      store.sport,
-      store.subSport,
+      // NO sport/tour here, deliberately. The request does not carry them, so including them
+      // would mint a fresh cache entry on every chip tap — and with no placeholder the feed
+      // empties to "0 matches" mid-fetch. Measured: adding Tennis alongside Football took a
+      // 5-match card to 0 until the needless refetch landed.
       store.minProbability,
       store.minOdds,
     ],
     queryFn: () => {
       const { from, to } = dayBounds(store.selectedDate);
+      // FETCHED WITHOUT A SPORT PARAM and filtered below, because the endpoint takes a single
+      // slug and the selection is now a set. One request per day beats one per selected sport,
+      // the day's whole card is ~60 fixtures, and it means the cache key is the DAY rather
+      // than day-plus-selection — so toggling a chip re-filters instantly instead of refetching.
+      //
+      // It also keeps league suppression applied: passing league_slug deliberately BYPASSES
+      // SUPPRESSED_LEAGUES server-side so deep links keep working, which would have quietly
+      // reintroduced MLS the moment a tour chip was selected.
       return listFixtures({
-        sport_slug: store.sport ?? undefined,
-        league_slug: store.subSport ?? undefined,
         date_from: from,
         date_to: to,
         limit: FIXTURES_PAGE_LIMIT,
@@ -165,7 +178,21 @@ export default function PicksScreen() {
    * from the result of the FAVOURITES step but BEFORE the country filter, so switching country
    * is never a dead end. */
   const { groups, countries, visibleCount } = useMemo(() => {
-    const all = fixturesQuery.data ?? [];
+    const everything = fixturesQuery.data ?? [];
+
+    // 1. SPORT / TOUR, applied here rather than server-side because the selection is a SET and
+    //    the endpoint takes one slug. An empty list means "no restriction" — that is what the
+    //    All chip produces, and a feed emptied by deselecting every chip would be a trap.
+    //
+    //    A tour selection only narrows the sport it belongs to: picking ATP must not also hide
+    //    football. Sports with no tours (football) are unaffected by the second test.
+    const all = everything.filter((fixture) => {
+      if (store.sports.length && !store.sports.includes(fixture.sport_slug)) return false;
+      const tours = SUB_SPORTS[fixture.sport_slug];
+      if (!tours || !store.subSports.length) return true;
+      const chosen = store.subSports.filter((tour) => tours.includes(tour));
+      return chosen.length === 0 || chosen.includes(fixture.league_slug);
+    });
 
     // 2. Postponed fixtures survive every threshold — the server already exempts them, and a
     //    called-off match is worth seeing on the day's schedule.
@@ -217,7 +244,16 @@ export default function PicksScreen() {
       countries: countryOptions,
       visibleCount: filtered.reduce((sum, group) => sum + group.matches.length, 0),
     };
-  }, [fixturesQuery.data, store.segment, store.onlyFavourites, store.favourites, store.country]);
+  }, [
+    fixturesQuery.data,
+    // Both are replaced wholesale on every toggle, so referential deps are enough here.
+    store.sports,
+    store.subSports,
+    store.segment,
+    store.onlyFavourites,
+    store.favourites,
+    store.country,
+  ]);
 
   async function onRefresh() {
     setRefreshing(true);
@@ -325,9 +361,11 @@ export default function PicksScreen() {
       <FilterSheet
         visible={filtersOpen}
         onClose={() => setFiltersOpen(false)}
-        sport={store.sport}
-        subSport={store.subSport}
-        onSelectSport={store.setSport}
+        sports={store.sports}
+        subSports={store.subSports}
+        onToggleSport={store.toggleSport}
+        onToggleSubSport={store.toggleSubSport}
+        onClearSports={store.clearSports}
         minProbability={store.minProbability}
         onMinProbabilityChange={store.setMinProbability}
         minOdds={store.minOdds}
