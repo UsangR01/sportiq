@@ -80,34 +80,29 @@ def test_the_worker_recycles_its_child_periodically():
     assert "--max-tasks-per-child" in RENDER_YAML
 
 
-def test_worker_and_beat_wait_for_the_schema_before_starting():
-    """preDeployCommand runs on the WEB service alone and a blueprint starts services in
-    parallel, so the worker can come up against an unmigrated database. Its ORM then selects a
-    column that does not exist, every query raises, and ingest's per-league try/except swallows
-    it — a run that completes, changes nothing and logs no error."""
-    # Counted as INVOCATIONS, not mentions: the surrounding comment names the script too.
-    invocations = [
-        line
-        for line in RENDER_YAML.splitlines()
-        if line.strip().startswith("dockerCommand:") and "wait_for_schema.py" in line
-    ]
+def test_no_docker_command_chains_with_a_shell_operator():
+    """THE INCIDENT THIS REPLACES A GATE-PRESENCE ASSERTION WITH.
 
-    assert len(invocations) == 2, f"both worker and beat must wait, found {invocations}"
-    # And exactly one service may MIGRATE: three racing alembic processes is worse than
-    # starting late, since alembic takes no lock by default.
-    assert RENDER_YAML.count("alembic upgrade head") == 1
+    Render runs dockerCommand EXEC-STYLE. A chained `a && b` therefore does not chain: the rest
+    becomes stray argv to `a`, `a` exits 0, and the container ends. Shipping
+    `python scripts/wait_for_schema.py && celery ...` restart-looped both background services,
+    logging only that the schema check had PASSED — no error, no traceback, a healthy-looking
+    line every few minutes.
+
+    Anything needing to happen before the long-running process belongs INSIDE it, or in the
+    image's own ENTRYPOINT where shell semantics are explicit.
+    """
+    for line in RENDER_YAML.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("dockerCommand:"):
+            assert "&&" not in stripped, f"exec-style command cannot chain: {stripped}"
+            assert ";" not in stripped, f"exec-style command cannot sequence: {stripped}"
 
 
-def test_the_schema_gate_fails_rather_than_proceeding():
-    """A loud restart loop is far easier to diagnose than a worker running against a schema it
-    does not match and silently doing nothing."""
-    from pathlib import Path
-
-    source = (Path(__file__).resolve().parents[1] / "scripts" / "wait_for_schema.py").read_text(
-        encoding="utf-8"
-    )
-
-    assert "raise SystemExit(1)" in source
+def test_no_docker_command_uses_yaml_folding():
+    """A folded scalar (>-) joins lines into one exec-style string that reads like a shell
+    command and is not one. That is exactly how the broken gate shipped."""
+    assert "dockerCommand: >-" not in RENDER_YAML
 
 
 def test_a_chained_docker_command_is_wrapped_in_a_shell():

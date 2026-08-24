@@ -124,16 +124,19 @@ services:
     # The schema gate runs FIRST: preDeployCommand lives on the web service alone, and a
     # blueprint starts services in parallel, so without this the worker can come up against an
     # unmigrated database and fail silently. See scripts/wait_for_schema.py.
-    # WRAPPED IN /bin/sh -c, AND THAT IS NOT COSMETIC. Render runs dockerCommand exec-style,
-    # so a bare `a && b` does not chain: everything after && is passed to `a` as stray argv,
-    # the gate script exits 0, and the container ends because that WAS the whole command.
-    # Measured the hard way — the worker restart-looped every few minutes logging only
-    # "schema is at ...; starting", with celery never once reaching its own banner.
+    # NO SHELL CHAINING HERE. A schema gate was tried as
+    #     python scripts/wait_for_schema.py && celery ...
+    # and it took both background services down: Render runs dockerCommand EXEC-STYLE, so &&
+    # never chained — the gate ran, printed "starting", exited 0, and the container ended
+    # because that was the whole command. Wrapping it in /bin/sh -c was then attempted while
+    # the workers were already down, which is not the moment to test a second assumption about
+    # how this field is parsed.
     #
-    # `exec` on the celery half so it becomes PID 1 and receives Render's SIGTERM directly;
-    # without it the shell holds PID 1 and does not forward signals, which is the same trap
-    # the Dockerfile's own CMD documents.
-    dockerCommand: /bin/sh -c "python scripts/wait_for_schema.py && exec celery -A app.workers.celery worker --loglevel=info --concurrency=1 --max-tasks-per-child=20"
+    # The gate is deferred rather than abandoned; scripts/wait_for_schema.py is kept and works
+    # when run by hand. If it returns it belongs INSIDE the process, not in the command string.
+    # The race it guards is real but rare (a migration-bearing deploy, services starting in
+    # parallel); a worker that cannot start at all is neither.
+    dockerCommand: celery -A app.workers.celery worker --loglevel=info --concurrency=1 --max-tasks-per-child=20
     envVars: *shared_env
 
   # ---------------------------------------------------------------- Celery beat
@@ -146,5 +149,5 @@ services:
     # Exactly ONE beat instance, ever. Two schedulers against one broker double-dispatch every
     # periodic task, which for this project means double the external API spend against
     # quotas that are already the binding constraint.
-    dockerCommand: /bin/sh -c "python scripts/wait_for_schema.py && exec celery -A app.workers.celery beat --loglevel=info"
+    dockerCommand: celery -A app.workers.celery beat --loglevel=info
     envVars: *shared_env
