@@ -110,7 +110,24 @@ services:
     plan: starter
     dockerfilePath: ./backend/Dockerfile
     dockerContext: .
-    dockerCommand: celery -A app.workers.celery worker --loglevel=info --concurrency=2
+    # CONCURRENCY 1, NOT 2, and this is the same mistake the API had with gunicorn's -w 2.
+    #
+    # Each prefork child that runs a prediction loads a model: measured at ~278MB, and a single
+    # league's fixture ingest peaks around 359MB. Two children on a 512MB starter cannot both
+    # do that, and the failure is silent — the container is OOM-killed, the task disappears,
+    # the queue drains and nothing has changed. That is exactly what happened to the daily
+    # ingest, which drained its queue and altered not one fixture.
+    #
+    # max-tasks-per-child recycles the process periodically so a loaded model does not pin
+    # memory for the lifetime of the worker; 20 is high enough that the reload cost is rare.
+    #
+    # The schema gate runs FIRST: preDeployCommand lives on the web service alone, and a
+    # blueprint starts services in parallel, so without this the worker can come up against an
+    # unmigrated database and fail silently. See scripts/wait_for_schema.py.
+    dockerCommand: >-
+      python scripts/wait_for_schema.py &&
+      celery -A app.workers.celery worker --loglevel=info
+      --concurrency=1 --max-tasks-per-child=20
     envVars: *shared_env
 
   # ---------------------------------------------------------------- Celery beat
@@ -123,5 +140,7 @@ services:
     # Exactly ONE beat instance, ever. Two schedulers against one broker double-dispatch every
     # periodic task, which for this project means double the external API spend against
     # quotas that are already the binding constraint.
-    dockerCommand: celery -A app.workers.celery beat --loglevel=info
+    dockerCommand: >-
+      python scripts/wait_for_schema.py &&
+      celery -A app.workers.celery beat --loglevel=info
     envVars: *shared_env

@@ -57,3 +57,54 @@ def test_every_service_runs_from_the_same_image():
     hours to workers running with no beat — so nothing executed on the schedule at all."""
     for name in ("sportpiq-api", "sportpiq-worker", "sportpiq-beat"):
         assert f"name: {name}" in RENDER_YAML, name
+
+
+# === The worker, added 2026-08-24 after it OOM'd itself ===========================================
+
+
+def test_the_celery_worker_runs_one_child_not_two():
+    """THE SAME MISTAKE THE API HAD WITH -w 2, in the other service.
+
+    A prefork child that runs a prediction loads a model (~278MB measured), and one league's
+    fixture ingest peaks around 359MB. Two children on a 512MB starter cannot both do that, and
+    an OOM kill is silent: the container restarts, the task vanishes, the queue drains, nothing
+    changed. That is precisely how the daily ingest failed — draining its queue and altering not
+    one fixture, with no error anywhere.
+    """
+    assert "--concurrency=2" not in RENDER_YAML, "two prefork children do not fit in 512MB"
+    assert "--concurrency=1" in RENDER_YAML
+
+
+def test_the_worker_recycles_its_child_periodically():
+    """Without this a loaded model pins memory for the worker's whole lifetime."""
+    assert "--max-tasks-per-child" in RENDER_YAML
+
+
+def test_worker_and_beat_wait_for_the_schema_before_starting():
+    """preDeployCommand runs on the WEB service alone and a blueprint starts services in
+    parallel, so the worker can come up against an unmigrated database. Its ORM then selects a
+    column that does not exist, every query raises, and ingest's per-league try/except swallows
+    it — a run that completes, changes nothing and logs no error."""
+    # Counted as INVOCATIONS, not mentions: the surrounding comment names the script too.
+    invocations = [
+        line
+        for line in RENDER_YAML.splitlines()
+        if line.strip().startswith("python scripts/wait_for_schema.py")
+    ]
+
+    assert len(invocations) == 2, f"both worker and beat must wait, found {invocations}"
+    # And exactly one service may MIGRATE: three racing alembic processes is worse than
+    # starting late, since alembic takes no lock by default.
+    assert RENDER_YAML.count("alembic upgrade head") == 1
+
+
+def test_the_schema_gate_fails_rather_than_proceeding():
+    """A loud restart loop is far easier to diagnose than a worker running against a schema it
+    does not match and silently doing nothing."""
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "scripts" / "wait_for_schema.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "raise SystemExit(1)" in source
