@@ -89,7 +89,7 @@ def test_worker_and_beat_wait_for_the_schema_before_starting():
     invocations = [
         line
         for line in RENDER_YAML.splitlines()
-        if line.strip().startswith("python scripts/wait_for_schema.py")
+        if line.strip().startswith("dockerCommand:") and "wait_for_schema.py" in line
     ]
 
     assert len(invocations) == 2, f"both worker and beat must wait, found {invocations}"
@@ -108,3 +108,28 @@ def test_the_schema_gate_fails_rather_than_proceeding():
     )
 
     assert "raise SystemExit(1)" in source
+
+
+def test_a_chained_docker_command_is_wrapped_in_a_shell():
+    """THE BUG THIS ASSERTION EXISTS FOR, and it took the worker down.
+
+    Render runs dockerCommand EXEC-STYLE, so `a && b` does not chain: everything after && is
+    passed to `a` as stray argv, `a` exits 0, and the container ends because that was the whole
+    command. The worker restart-looped every few minutes logging only "schema is at ...;
+    starting" — celery never reached its own banner, and nothing said why.
+
+    Any command using && must therefore go through /bin/sh -c, and the long-running half must
+    be exec'd so it becomes PID 1 and receives SIGTERM.
+    """
+    for line in RENDER_YAML.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("dockerCommand:") or "&&" not in stripped:
+            continue
+        assert "/bin/sh -c" in stripped, f"chained command not shell-wrapped: {stripped}"
+        assert "&& exec " in stripped, f"the long-running half must be exec'd: {stripped}"
+
+
+def test_no_docker_command_uses_yaml_folding_with_a_chain():
+    """A folded scalar (>-) joins lines with spaces and still produces one exec-style string,
+    so it looks like a shell command and is not one. That is exactly how this shipped broken."""
+    assert "dockerCommand: >-" not in RENDER_YAML
