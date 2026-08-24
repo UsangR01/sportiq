@@ -38,7 +38,13 @@ from app.fixtures.schemas import (
     TotalsProbability,
 )
 from app.models_ml.corners_reference import blend_probability, bulk_corners_reference
-from app.models_ml.markets import CORNERS_LINES, GOALS_LINES, double_chance_probs, over_under_probs
+from app.models_ml.markets import (
+    CORNERS_DISPERSION,
+    CORNERS_LINES,
+    GOALS_LINES,
+    double_chance_probs,
+    over_under_probs,
+)
 from app.odds.models import Odds
 from app.picks.service import (
     best_available_odds,
@@ -103,13 +109,15 @@ def _build_extra_markets(
         else None
     )
     goals_probs = over_under_probs(goals_total, GOALS_LINES)
-    reference_probs = over_under_probs(reference_corners, CORNERS_LINES)
+    reference_probs = over_under_probs(reference_corners, CORNERS_LINES, CORNERS_DISPERSION)
     corners_probs = {
         line: (
             blend_probability(under, reference_probs.get(line, (None, None))[0]),
             blend_probability(over, reference_probs.get(line, (None, None))[1]),
         )
-        for line, (under, over) in over_under_probs(corners_total, CORNERS_LINES).items()
+        for line, (under, over) in over_under_probs(
+            corners_total, CORNERS_LINES, CORNERS_DISPERSION
+        ).items()
     }
     return ExtraMarketsResponse(
         double_chance_home_or_draw_prob=home_or_draw,
@@ -307,8 +315,10 @@ def _all_market_candidates(
     # probabilities are blended toward a rolling attack/defence reference before they can
     # become a pick. See app/models_ml/corners_reference.py for the measurement and for why
     # head-to-head, the intuitive choice, is deliberately not the reference.
-    reference_probs = over_under_probs(reference_corners, CORNERS_LINES)
-    for line, (under, over) in over_under_probs(corners_total, CORNERS_LINES).items():
+    reference_probs = over_under_probs(reference_corners, CORNERS_LINES, CORNERS_DISPERSION)
+    for line, (under, over) in over_under_probs(
+        corners_total, CORNERS_LINES, CORNERS_DISPERSION
+    ).items():
         ref_under, ref_over = reference_probs.get(line, (None, None))
         under = blend_probability(under, ref_under)
         over = blend_probability(over, ref_over)

@@ -49,8 +49,42 @@ def _poisson_cdf(k: int, rate: float) -> float:
     return sum(_poisson_pmf(i, rate) for i in range(k + 1))
 
 
+#: var/mean of real total corners, measured on 23,782 fixtures from the TRAIN seasons only
+#: (2025 held out). Poisson assumes exactly 1.0.
+#:
+#: THIS IS THE OPPOSITE OF THE GOALS FINDING, AND BOTH ARE MEASURED. Total goals came out at
+#: var/mean 1.003 across 8,718 fixtures, which is why a Negative Binomial was investigated for
+#: goals and deliberately NOT built -- it would have fitted a dispersion that does not exist.
+#: Nobody had measured CORNERS separately, and they are genuinely overdispersed.
+#:
+#: The cost of assuming Poisson was concentrated exactly where picks are drawn from: tails too
+#: thin, so extreme probabilities came out too extreme. On the served model's test parquet,
+#: P(over 9.5) at predicted >= 0.60 claimed 0.634 against an actual 0.566.
+CORNERS_DISPERSION = 1.189
+
+
+def _count_cdf(k: int, mean: float, dispersion: float) -> float:
+    """P(total <= k) for a count with this mean, Poisson at dispersion 1.0 and Negative Binomial
+    above it.
+
+    Falls back to Poisson for dispersion <= 1: a Negative Binomial cannot represent var < mean at
+    all, and this codebase has already measured 9 of 18 leagues as UNDERdispersed on goals -- so
+    silently coercing one would be worse than the assumption it replaces.
+    """
+    if dispersion <= 1.0 or mean <= 0:
+        return _poisson_cdf(k, mean)
+    # Standard mean/variance parameterisation: var = dispersion * mean.
+    prob = 1.0 / dispersion
+    size = mean * prob / (1.0 - prob)
+    from scipy.stats import nbinom
+
+    return float(nbinom.cdf(k, size, prob))
+
+
 def over_under_probs(
-    expected_total: float | None, lines: tuple[float, ...]
+    expected_total: float | None,
+    lines: tuple[float, ...],
+    dispersion: float = 1.0,
 ) -> dict[float, tuple[float | None, float | None]]:
     """{line: (P(under line), P(over line))} for every line in `lines`, treating the total as
     Poisson(expected_total) — see module docstring. expected_total is xg_home + xg_away (goals)
@@ -65,7 +99,7 @@ def over_under_probs(
     for line in lines:
         # A .5 line has no exact-total edge case to worry about (total goals/corners are
         # always integers), so floor(line) is always the correct "under" boundary.
-        under_prob = _poisson_cdf(math.floor(line), expected_total)
+        under_prob = _count_cdf(math.floor(line), expected_total, dispersion)
         over_prob = 1.0 - under_prob
         result[line] = (under_prob, over_prob)
     return result

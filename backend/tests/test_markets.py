@@ -72,3 +72,45 @@ def test_over_under_probs_high_expected_total_favours_over():
     result = over_under_probs(15.0, CORNERS_LINES)
     under_prob, over_prob = result[CORNERS_LINES[0]]
     assert over_prob > 0.9
+
+
+# === Corners are overdispersed; goals are not (2026-08-24) ========================================
+
+
+def test_corners_use_a_wider_distribution_than_poisson():
+    """Measured on 23,782 TRAIN-season fixtures: total corners have var/mean 1.189, so Poisson
+    tails are too thin and extreme probabilities come out too extreme — exactly where picks are
+    drawn from. A wider distribution must pull them toward the middle."""
+    from app.models_ml.markets import CORNERS_DISPERSION, over_under_probs
+
+    poisson_under, poisson_over = over_under_probs(11.5, (9.5,))[9.5]
+    nb_under, nb_over = over_under_probs(11.5, (9.5,), CORNERS_DISPERSION)[9.5]
+
+    assert poisson_over > nb_over, "the wider distribution must be less extreme"
+    assert nb_over > 0.5, "and must not overshoot past the midpoint"
+
+
+def test_goals_are_left_on_poisson_deliberately():
+    """THE CONTRAST, and both halves are measured. Total goals came out at var/mean 1.003 over
+    8,718 fixtures, which is why a Negative Binomial was investigated for goals and rejected —
+    it would fit a dispersion that does not exist. Corners were never measured separately."""
+    from app.models_ml.markets import over_under_probs
+
+    default_under, _ = over_under_probs(2.7, (2.5,))[2.5]
+    explicit_poisson, _ = over_under_probs(2.7, (2.5,), 1.0)[2.5]
+
+    assert default_under == explicit_poisson
+
+
+def test_underdispersion_falls_back_to_poisson_rather_than_coercing():
+    """A Negative Binomial cannot represent var < mean at all, and 9 of 18 leagues measured
+    UNDERdispersed on goals — so a dispersion below 1 must degrade, not raise or distort."""
+    from app.models_ml.markets import over_under_probs
+
+    assert over_under_probs(9.8, (9.5,), 0.85)[9.5] == over_under_probs(9.8, (9.5,), 1.0)[9.5]
+
+
+def test_a_missing_total_is_still_never_fabricated():
+    from app.models_ml.markets import CORNERS_DISPERSION, over_under_probs
+
+    assert over_under_probs(None, (9.5,), CORNERS_DISPERSION)[9.5] == (None, None)

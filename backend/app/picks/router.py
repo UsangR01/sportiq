@@ -9,7 +9,13 @@ from sqlalchemy.orm import aliased
 from app.core.database import get_db
 from app.core.redis import get_redis
 from app.fixtures.models import Fixture, FixtureStatus, Team
-from app.models_ml.markets import CORNERS_LINES, GOALS_LINES, double_chance_probs, over_under_probs
+from app.models_ml.markets import (
+    CORNERS_DISPERSION,
+    CORNERS_LINES,
+    GOALS_LINES,
+    double_chance_probs,
+    over_under_probs,
+)
 from app.odds.models import Odds, OddsMarket
 from app.picks.schemas import PickResponse
 from app.picks.service import (
@@ -83,7 +89,10 @@ def _build_outcome(
             if prediction.corners_xg_home is not None and prediction.corners_xg_away is not None
             else None
         )
-    under_prob, over_prob = over_under_probs(expected_total, (line,))[line]
+    # Corners are overdispersed (var/mean 1.189 measured); goals are not (1.003), so only the
+    # corners market departs from Poisson. See markets.CORNERS_DISPERSION.
+    dispersion = CORNERS_DISPERSION if market == "corners_total" else 1.0
+    under_prob, over_prob = over_under_probs(expected_total, (line,), dispersion)[line]
     over_odds, under_odds = best_totals_odds(odds_rows, line)
     return best_outcome_from_candidates(
         [
