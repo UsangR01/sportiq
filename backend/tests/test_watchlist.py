@@ -310,7 +310,9 @@ async def test_a_broker_failure_does_not_lose_the_save(api_client):
 # === The saved pick: a receipt, frozen at the moment the user acted ==========================
 
 
-async def _seed_prediction(fixture_id: uuid.UUID, home_prob: float) -> None:
+async def _seed_prediction(
+    fixture_id: uuid.UUID, home_prob: float, draw_prob: float | None = None
+) -> None:
     """A real Prediction row so the endpoint has a pick to capture."""
     from app.predictions.models import ConfidenceTier, PredictionKind
 
@@ -320,8 +322,8 @@ async def _seed_prediction(fixture_id: uuid.UUID, home_prob: float) -> None:
                 fixture_id=fixture_id,
                 model_version="watchlist-test-v1",
                 home_prob=home_prob,
-                draw_prob=None,
-                away_prob=1 - home_prob,
+                draw_prob=draw_prob,
+                away_prob=1 - home_prob - (draw_prob or 0.0),
                 confidence_tier=ConfidenceTier.HIGH,
                 kind=PredictionKind.PRE_MATCH,
             )
@@ -380,3 +382,89 @@ async def test_a_fixture_with_no_pick_still_saves(api_client):
     item = (await api_client.get("/user/watchlist", headers=auth)).json()[0]
     assert item["saved_market"] is None
     assert item["saved_probability"] is None
+
+
+# === The card and the receipt must agree, added 2026-08-25 =======================================
+
+
+async def test_the_receipt_is_the_pick_the_card_showed_not_the_servers_own_choice(api_client):
+    """THE REPORTED BUG. Saved "Bodo/Glimt HOME at 1.55" from the feed; the saved page read
+    "1X at 1.17".
+
+    Both numbers were right about their own question, which is why nothing looked broken. The
+    card only ranks candidates that clear the user's odds slider -- 1.20 by default -- so a
+    1.17 price was never eligible there. This endpoint recomputed with NO floor, where the
+    double chance wins on probability alone. The receipt recorded a pick that had never been
+    on screen.
+
+    The sliders live on the device and are not persisted, so the server cannot re-derive what
+    was displayed. The client now says, and the claim is confirmed against the real candidates.
+    """
+    token = await _register(api_client)
+    auth = {"Authorization": f"Bearer {token}"}
+    fixture_id = await _seed_fixture()
+    # Home 0.655 with a draw at 0.161 makes 1X = 0.816 -- so the server, left to itself, picks
+    # the double chance, exactly as it did on the reported fixture.
+    await _seed_prediction(fixture_id, home_prob=0.655, draw_prob=0.161)
+
+    await api_client.post(
+        "/user/watchlist",
+        json={
+            "fixture_id": str(fixture_id),
+            "shown_market": "h2h",
+            "shown_selection": "home",
+            "shown_probability": 0.655,
+            "shown_odds": 1.55,
+        },
+        headers=auth,
+    )
+    item = (await api_client.get("/user/watchlist", headers=auth)).json()[0]
+
+    assert item["saved_market"] == "h2h"
+    assert item["saved_selection"] == "home"
+    assert item["saved_odds"] == pytest.approx(1.55)
+
+
+async def test_a_client_cannot_invent_a_market_the_fixture_has_not_got(api_client):
+    """Confirmed, not trusted. A stale or broken client claiming a candidate that does not
+    exist must not have it written down -- the endpoint falls back to its own computation
+    rather than storing fiction."""
+    token = await _register(api_client)
+    auth = {"Authorization": f"Bearer {token}"}
+    fixture_id = await _seed_fixture()
+    await _seed_prediction(fixture_id, home_prob=0.655, draw_prob=0.161)
+
+    await api_client.post(
+        "/user/watchlist",
+        json={
+            "fixture_id": str(fixture_id),
+            "shown_market": "corners_total",
+            "shown_selection": "under",
+            "shown_line": 9.5,
+            "shown_odds": 1.80,
+        },
+        headers=auth,
+    )
+    item = (await api_client.get("/user/watchlist", headers=auth)).json()[0]
+
+    assert item["saved_market"] != "corners_total"
+    assert item["saved_odds"] != pytest.approx(1.80)
+
+
+async def test_an_impossible_price_is_rejected_rather_than_stored(api_client):
+    token = await _register(api_client)
+    auth = {"Authorization": f"Bearer {token}"}
+    fixture_id = await _seed_fixture()
+    await _seed_prediction(fixture_id, home_prob=0.655, draw_prob=0.161)
+
+    response = await api_client.post(
+        "/user/watchlist",
+        json={
+            "fixture_id": str(fixture_id),
+            "shown_market": "h2h",
+            "shown_selection": "home",
+            "shown_odds": 0.5,  # a price below evens pays less than the stake
+        },
+        headers=auth,
+    )
+    assert response.status_code == 422

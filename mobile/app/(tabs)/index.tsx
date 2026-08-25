@@ -12,7 +12,7 @@ import { PicksHeader } from "@/components/picks/PicksHeader";
 import { SegmentedControl } from "@/components/picks/SegmentedControl";
 import { SummaryStrip, type CountryOption } from "@/components/picks/SummaryStrip";
 import { listFixtures } from "@/lib/api/fixtures";
-import type { FixtureSummary } from "@/lib/api/types";
+import type { BestPick, FixtureSummary } from "@/lib/api/types";
 import { getPreferences } from "@/lib/api/users";
 import { addToWatchlist, listWatchlist, removeFromWatchlist } from "@/lib/api/watchlist";
 import { countryForTournamentLocation } from "@/lib/countryFlags";
@@ -169,8 +169,10 @@ export default function PicksScreen() {
     [watchlistQuery.data]
   );
   const saveMutation = useMutation({
-    mutationFn: ({ id, saved }: { id: string; saved: boolean }) =>
-      saved ? removeFromWatchlist(id) : addToWatchlist(id),
+    mutationFn: ({ id, saved, pick }: { id: string; saved: boolean; pick?: BestPick | null }) =>
+      // The rendered pick travels with the save. The server ranks candidates without this
+      // screen's odds slider, so left to itself it can record a market the card never showed.
+      saved ? removeFromWatchlist(id) : addToWatchlist(id, pick),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["watchlist"] }),
   });
 
@@ -348,6 +350,7 @@ export default function PicksScreen() {
                         : saveMutation.mutate({
                             id: fixture.id,
                             saved: savedIds.has(fixture.id),
+                            pick: fixture.best_pick,
                           })
                     }
                   />

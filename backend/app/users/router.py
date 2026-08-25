@@ -1,5 +1,7 @@
 import logging
 import uuid
+from types import SimpleNamespace
+from typing import Any
 
 from exponent_server_sdk import PushClient
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -145,6 +147,59 @@ async def list_watchlist(
     ]
 
 
+def _receipt(body: WatchlistAdd, candidates: list) -> Any | None:
+    """The pick the CLIENT says it was showing, confirmed against the real candidate set.
+
+    Reported as: saved "Bodo/Glimt HOME at 1.55" from the feed and the saved page then read
+    "1X at 1.17". Both numbers were right about their own question. The card ranks only
+    candidates that clear the user's odds slider (1.20 by default), so 1.17 was never eligible
+    there; this endpoint recomputed with NO floor, where 1X wins on probability. The receipt
+    recorded a pick that had never been on screen.
+
+    The sliders are device state and are not persisted, so the server genuinely cannot re-derive
+    what was displayed -- the client has to say. It is CONFIRMED rather than trusted: the
+    market/selection/line must exist among this fixture's real candidates, so a stale or broken
+    client cannot invent a market. The probability and price are then stored AS DISPLAYED, which
+    is the whole point of a receipt -- if odds moved between render and tap, the user acted on
+    what they saw, not on what the row says a second later.
+
+    Returns None when the client sent nothing (older builds) or when the claim does not match,
+    leaving the caller to fall back to recomputation.
+    """
+    if not body.shown_market or not body.shown_selection:
+        return None
+    for candidate in candidates:
+        if candidate.market != body.shown_market or candidate.selection != body.shown_selection:
+            continue
+        # Lines must agree as a pair: a totals market without a line, or a line that differs,
+        # is a different bet -- under 9.5 corners is not under 10.5.
+        if (candidate.line is None) != (body.shown_line is None):
+            continue
+        if candidate.line is not None and abs(candidate.line - body.shown_line) > 1e-9:
+            continue
+        return SimpleNamespace(
+            market=body.shown_market,
+            selection=body.shown_selection,
+            line=body.shown_line,
+            # Fall back to the server's figure per field, so a client that sends the selection
+            # but omits a price still records the right MARKET rather than nothing at all.
+            probability=(
+                body.shown_probability
+                if body.shown_probability is not None
+                else candidate.probability
+            ),
+            odds=body.shown_odds if body.shown_odds is not None else candidate.odds,
+        )
+    logger.warning(
+        "Saved pick %s/%s/%s is not among fixture %s's candidates; recomputing instead",
+        body.shown_market,
+        body.shown_selection,
+        body.shown_line,
+        body.fixture_id,
+    )
+    return None
+
+
 @router.post("/user/watchlist", status_code=status.HTTP_204_NO_CONTENT)
 async def add_to_watchlist(
     body: WatchlistAdd,
@@ -184,8 +239,10 @@ async def add_to_watchlist(
     try:
         from app.fixtures.router import _bulk_best_picks
 
-        best, _ = await _bulk_best_picks(db, [body.fixture_id])
-        saved = best.get(body.fixture_id)
+        best, all_candidates = await _bulk_best_picks(db, [body.fixture_id])
+        saved = _receipt(body, all_candidates.get(body.fixture_id) or []) or best.get(
+            body.fixture_id
+        )
     except Exception:
         logger.exception("Could not capture the shown pick for fixture %s", body.fixture_id)
 

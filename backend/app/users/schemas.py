@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # Kept in lock-step with app/users/models.py:ThemePreference. Literal rather than the enum
 # itself so the wire format is the lowercase value ("dark") the mobile client already uses,
@@ -33,6 +33,25 @@ class PushTokenUpdate(BaseModel):
 
 class WatchlistAdd(BaseModel):
     fixture_id: uuid.UUID
+
+    # THE PICK THE CARD WAS SHOWING WHEN THE USER TAPPED SAVE.
+    #
+    # The server cannot re-derive it. best_pick is chosen from the candidates that clear the
+    # user's OWN probability and odds sliders, those live only on the device, and the sliders
+    # are not persisted to user_preferences -- so recomputing here silently applies NO floor
+    # and can pick a different market entirely. Measured on the reported fixture (Bodo/Glimt v
+    # NEC Nijmegen): the card showed HOME at 1.55, and the same call with no floor returns
+    # double chance 1X at 1.17, because a 1.17 price is excluded at the default 1.20 floor.
+    #
+    # Optional, because an older client does not send it and must keep working -- that path
+    # falls back to recomputation, which is what every existing row was built from.
+    shown_market: str | None = None
+    shown_selection: str | None = None
+    shown_line: float | None = None
+    # Bounded rather than trusted: this is the user's own private receipt, so there is nothing
+    # to gain by forging it, but a client bug must not be able to store an impossible number.
+    shown_probability: float | None = Field(default=None, ge=0.0, le=1.0)
+    shown_odds: float | None = Field(default=None, gt=1.0, le=1000.0)
 
 
 class WatchlistItemResponse(BaseModel):
