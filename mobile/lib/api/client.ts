@@ -49,7 +49,27 @@ export async function rawFetch<T>(path: string, options: RequestInit = {}): Prom
   return response.json();
 }
 
-async function refreshTokens(): Promise<boolean> {
+/** In-flight rotation, shared by every caller that needs one.
+ *
+ * WITHOUT THIS, OPENING THE APP LOGS YOU OUT. Refresh tokens rotate: /auth/refresh revokes
+ * the presented token before issuing the next pair. The access token lasts 15 minutes, so
+ * any open after that expires 401s EVERY authenticated request at once -- the feed alone
+ * fires preferences and watchlist together -- and each one independently posted the same
+ * stored refresh token. Measured against the real API: of two concurrent refreshes with one
+ * token, the first returns 200 and the second returns 401. The loser then cleared the
+ * session, which is why signing in was needed at practically every launch.
+ *
+ * One promise, so the second caller waits for the first rotation instead of racing it. */
+let inFlightRefresh: Promise<boolean> | null = null;
+
+function refreshTokens(): Promise<boolean> {
+  inFlightRefresh ??= rotate().finally(() => {
+    inFlightRefresh = null;
+  });
+  return inFlightRefresh;
+}
+
+async function rotate(): Promise<boolean> {
   const { refreshToken, email } = getTokens();
   if (!refreshToken) return false;
   try {
@@ -59,8 +79,15 @@ async function refreshTokens(): Promise<boolean> {
     });
     await setTokens(pair.access_token, pair.refresh_token, email);
     return true;
-  } catch {
-    await clearTokens();
+  } catch (error) {
+    // ONLY A REJECTED TOKEN ENDS THE SESSION. This used to clear on ANY failure, so a
+    // request that never reached the server -- no signal, aeroplane mode, or the API cold
+    // -- signed the user out on the strength of evidence that says nothing about whether
+    // their token is still good. Keep it and let the next attempt decide; the request still
+    // fails, which is honest, but the session survives.
+    if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+      await clearTokens();
+    }
     return false;
   }
 }
@@ -78,10 +105,14 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}): Prom
     },
   });
 
-  let response = await fetch(`${BASE_URL}${path}`, withAuth(getTokens().accessToken));
+  // Remembered, so the 401 below can tell "my token expired" from "someone else already
+  // replaced it while this request was in flight" -- the latter needs a retry, not a rotation.
+  const tokenUsed = getTokens().accessToken;
+  let response = await fetch(`${BASE_URL}${path}`, withAuth(tokenUsed));
 
-  if (response.status === 401 && getTokens().accessToken) {
-    const refreshed = await refreshTokens();
+  if (response.status === 401 && tokenUsed) {
+    const alreadyRotated = getTokens().accessToken !== tokenUsed;
+    const refreshed = alreadyRotated || (await refreshTokens());
     if (refreshed) {
       response = await fetch(`${BASE_URL}${path}`, withAuth(getTokens().accessToken));
     }

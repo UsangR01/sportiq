@@ -12,6 +12,12 @@ const BIOMETRIC_ENABLED_FLAG_KEY = "sportiq_biometric_enabled";
 // x@y.com" without forcing a biometric prompt just to render a label.
 const BIOMETRIC_EMAIL_KEY = "sportiq_biometric_email";
 
+// EVERY entry point guards on web, not just the two that already did. expo-secure-store has
+// no web implementation at all -- a browser has no keychain -- and calling one throws
+// "ExpoSecureStore.default.getValueWithKeyAsync is not a function" straight into the error
+// overlay, taking the login screen down with it. Found while driving the web target, which is
+// the dev/QA harness for this app; native is unaffected either way.
+
 export async function isBiometricHardwareAvailable(): Promise<boolean> {
   if (Platform.OS === "web") return false;
   const [hasHardware, isEnrolled] = await Promise.all([
@@ -36,6 +42,7 @@ export async function isBiometricLoginEnabled(): Promise<boolean> {
  * the backend's rotation policy without storing something less sensitive than the real
  * refresh token instead. */
 export async function storeBiometricRefreshToken(refreshToken: string, email: string): Promise<void> {
+  if (Platform.OS === "web") return;
   await SecureStore.setItemAsync(BIOMETRIC_REFRESH_TOKEN_KEY, refreshToken, {
     keychainService: BIOMETRIC_KEYCHAIN_SERVICE,
     requireAuthentication: true,
@@ -58,6 +65,7 @@ export async function enableBiometricLogin(refreshToken: string, email: string):
 }
 
 export async function disableBiometricLogin(): Promise<void> {
+  if (Platform.OS === "web") return;
   await SecureStore.deleteItemAsync(BIOMETRIC_REFRESH_TOKEN_KEY, {
     keychainService: BIOMETRIC_KEYCHAIN_SERVICE,
   });
@@ -66,6 +74,7 @@ export async function disableBiometricLogin(): Promise<void> {
 }
 
 export async function getBiometricEmail(): Promise<string | null> {
+  if (Platform.OS === "web") return null;
   return SecureStore.getItemAsync(BIOMETRIC_EMAIL_KEY);
 }
 
@@ -73,6 +82,7 @@ export async function getBiometricEmail(): Promise<string | null> {
  * separate authenticateAsync() call needed here. Returns null if the user isn't enrolled,
  * cancels, or never enabled biometric login. */
 export async function getBiometricRefreshToken(): Promise<string | null> {
+  if (Platform.OS === "web") return null;
   return SecureStore.getItemAsync(BIOMETRIC_REFRESH_TOKEN_KEY, {
     keychainService: BIOMETRIC_KEYCHAIN_SERVICE,
     requireAuthentication: true,
