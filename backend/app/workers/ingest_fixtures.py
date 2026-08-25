@@ -516,6 +516,7 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
                         key_players_per_combined=key_players_per_combined,
                         win_streak=stats.win_streak,
                         losing_streak=stats.losing_streak,
+                        recent_form=stats.recent_form,
                         rank_points=stats.rank_points,
                         rank_position=stats.rank_position,
                     )

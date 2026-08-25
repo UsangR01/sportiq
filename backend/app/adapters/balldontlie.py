@@ -3,6 +3,9 @@ from datetime import UTC, date, datetime, timedelta
 
 import httpx
 
+# Imported rather than re-declared: two sports rendering different run lengths in the
+# same panel would look like a data gap rather than a deliberate choice.
+from app.adapters.api_football import RECENT_FORM_LENGTH
 from app.adapters.base import (
     DataSourceAdapter,
     FixturePayload,
@@ -180,6 +183,8 @@ def _compute_team_stats(team_external_id: str, games: list[dict], n_matches: int
     completed.sort(key=lambda g: g["datetime"], reverse=True)
 
     recent = completed[:n_matches]
+    # Basketball has no draws, so every result is W or L -- no "D" can ever appear here.
+    recent_form = "".join("W" if won(g) else "L" for g in completed[:RECENT_FORM_LENGTH]) or None
     # NBA has no draws, so this is a plain 0.0-1.0 win-rate fraction over the recent window —
     # not the football-style 3/1/0 points-per-game convention the field name suggests.
     form_pts_5 = (sum(1 for g in recent if won(g)) / len(recent)) if recent else None
@@ -216,6 +221,7 @@ def _compute_team_stats(team_external_id: str, games: list[dict], n_matches: int
         home_win_rate=home_win_rate,
         away_win_rate=away_win_rate,
         season_point_diff=season_point_diff,
+        recent_form=recent_form,
     )
 
 

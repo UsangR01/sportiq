@@ -87,6 +87,7 @@ from datetime import UTC, date, datetime, time, timedelta
 
 import httpx
 
+from app.adapters.api_football import RECENT_FORM_LENGTH
 from app.adapters.base import (
     DataSourceAdapter,
     FixturePayload,
@@ -526,6 +527,16 @@ def _compute_team_stats(
     win_streak, losing_streak = (
         _current_streak(completed, player_external_id) if completed else (None, None)
     )
+    # Tennis cannot draw, so a result is W or L and nothing else. A retirement still has a real
+    # winner (see _match_result_type), so it counts -- it decided the match, whatever a
+    # bookmaker did with the bet.
+    recent_form = (
+        "".join(
+            "W" if _match_winner_id(m) == player_external_id else "L"
+            for m in completed[:RECENT_FORM_LENGTH]
+        )
+        or None
+    )
     days_since_last_match = (
         (datetime.now(UTC).date() - _match_date(completed[0])).days if completed else None
     )
@@ -536,6 +547,7 @@ def _compute_team_stats(
         days_since_last_match=days_since_last_match,
         win_streak=win_streak,
         losing_streak=losing_streak,
+        recent_form=recent_form,
         rank_points=_latest_rank_points(rankings),
         rank_position=_latest_rank_position(rankings),
     )

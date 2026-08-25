@@ -14,6 +14,11 @@ class TeamFeaturesResponse(BaseModel):
     days_since_last_match: int | None = None
     home_win_rate: float | None = None
     away_win_rate: float | None = None
+    # Recent results as W/D/L, MOST RECENT FIRST -- "WWLDW" reads left to right as newest to
+    # oldest. Variable length: a side five matches into a season has five characters, one that
+    # has played twice has two, and a sport or league we hold no settled results for has None
+    # rather than an empty string, so the client can tell "no history" from "no results yet".
+    recent_form: str | None = None
 
 
 class DriverRow(BaseModel):

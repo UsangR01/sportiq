@@ -196,6 +196,10 @@ class TeamFeatures(Base):
     # None for sports/adapters with no streak source yet (NBA).
     win_streak: Mapped[float | None] = mapped_column(Float, nullable=True)
     losing_streak: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # The last few results as W/D/L, MOST RECENT FIRST -- see TeamStats.recent_form. Display
+    # only: no model reads it, and nothing may start to without appearing in FEATURE_NAMES and
+    # in both the training and serving assembly paths.
+    recent_form: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # Tennis only (app/models_ml/tennis_features.py) — real ATP/WTA ranking points, sourced
     # from TeamStats.rank_points (app/adapters/balldontlie_tennis.py). None for every other
     # sport. Deliberately NOT storing a surface-specific win rate here: that signal is

@@ -102,6 +102,13 @@ export default function FixtureDetailScreen() {
 
       {fixture.prediction?.extra_markets && <ExtraMarkets markets={fixture.prediction.extra_markets} />}
 
+      <RecentForm
+        homeTeam={fixture.home_team}
+        awayTeam={fixture.away_team}
+        homeForm={fixture.home_team_form?.recent_form ?? null}
+        awayForm={fixture.away_team_form?.recent_form ?? null}
+      />
+
       {fixture.head_to_head && (
         <HeadToHead
           headToHead={fixture.head_to_head}
@@ -295,6 +302,88 @@ function MatchStats({
  *
  * Null (not a fabricated empty state) when the two have genuinely never met — common in early
  * tennis rounds, where the provider answers 404 rather than a zeroed record. */
+/** Each side's own recent run, which head-to-head deliberately does not tell you.
+ *
+ * H2H answers "how do these two compare against each other", often over meetings months or
+ * years apart. It says nothing about whether a side has won four straight or lost four
+ * straight going into THIS match, which is the first thing anyone checks.
+ *
+ * A SEQUENCE, not a count. The model already carries win_streak, but "three in a row" cannot
+ * distinguish WWWLL from WWWWW, and those are not the same team. Newest first, left to right.
+ *
+ * Costs no request anywhere: all three adapters already hold the completed matches they derive
+ * form from, so this is data that was being computed and thrown away.
+ *
+ * Rendered for TEAMS and PLAYERS alike -- a tennis player is a Team row of one, so the same
+ * component serves both without a sport branch.
+ */
+function RecentForm({
+  homeTeam,
+  awayTeam,
+  homeForm,
+  awayForm,
+}: {
+  homeTeam: string;
+  awayTeam: string;
+  homeForm: string | null;
+  awayForm: string | null;
+}) {
+  // Nothing to say for either side: show nothing rather than two empty rows. An early-season
+  // fixture legitimately has one result, and one chip is worth showing.
+  if (!homeForm && !awayForm) return null;
+
+  return (
+    <View className="mb-6">
+      <Text className="mb-2 text-sm font-semibold uppercase text-gray-400">Recent Form</Text>
+      <View className="rounded-lg bg-gray-50 p-3 dark:bg-gray-900">
+        <FormRow team={homeTeam} form={homeForm} />
+        <FormRow team={awayTeam} form={awayForm} />
+      </View>
+      <Text className="mt-1 text-xs text-gray-400">Most recent first</Text>
+    </View>
+  );
+}
+
+function FormRow({ team, form }: { team: string; form: string | null }) {
+  const results = (form ?? "").split("");
+  return (
+    <View className="flex-row items-center py-1.5">
+      <Text
+        numberOfLines={1}
+        className="flex-1 pr-3 text-sm text-gray-700 dark:text-gray-200"
+      >
+        {team}
+      </Text>
+      {results.length === 0 ? (
+        // Explicitly "no results", never an empty gap that reads as a rendering fault.
+        <Text className="text-xs text-gray-400">No results yet</Text>
+      ) : (
+        <View className="flex-row gap-1">
+          {results.map((result, index) => (
+            <FormChip key={index} result={result} />
+          ))}
+        </View>
+      )}
+    </View>
+  );
+}
+
+/** Letter AND colour, never colour alone -- the same accessibility rule the win/loss verdict
+ * badges follow, and the reason they carry a tick or a cross rather than just going green. */
+function FormChip({ result }: { result: string }) {
+  const style =
+    result === "W"
+      ? "bg-green-600"
+      : result === "L"
+        ? "bg-red-500"
+        : "bg-gray-400";
+  return (
+    <View className={`h-6 w-6 items-center justify-center rounded-full ${style}`}>
+      <Text className="text-xs font-bold text-white">{result}</Text>
+    </View>
+  );
+}
+
 function HeadToHead({
   headToHead,
   homeTeam,

@@ -112,6 +112,18 @@ class TeamStats:
     # overloaded 0 that could mean either "no streak" or "streak of length 0".
     win_streak: float | None = None
     losing_streak: float | None = None
+    # THE SEQUENCE behind those two counters: the last few results as "W"/"D"/"L" characters,
+    # MOST RECENT FIRST. win_streak says "three in a row" and stops there; a run reading WWWLL
+    # and one reading WWWWW are the same number and are not the same team.
+    #
+    # Most-recent-first because that is the reading order the card renders in, and because the
+    # string is variable length -- a team six matches into a season has six, and left-aligning
+    # on the newest result keeps the leftmost chip meaning the same thing on every row.
+    # Deliberately NOT the provider's own order: API-Football's form string is oldest-first.
+    #
+    # Free for all three sports -- each adapter already holds the completed matches it derives
+    # form from, so this adds no request anywhere.
+    recent_form: str | None = None
     # Tennis only — real, provider-computed ATP/WTA ranking points (BallDontLie's /rankings).
     # Used as the primary relative-strength signal instead of a hand-rolled Elo approximation
     # (unlike football, which added one later) — simpler and more honest than approximating a

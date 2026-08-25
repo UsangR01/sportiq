@@ -173,6 +173,10 @@ export interface TeamFeaturesResponse {
   days_since_last_match: number | null;
   home_win_rate: number | null;
   away_win_rate: number | null;
+  /** Recent results as W/D/L characters, MOST RECENT FIRST — "WWLDW" reads newest to oldest.
+   * Variable length: a side one match into a new season genuinely has one character, and that
+   * is the honest thing to show. null means no settled results are held for it at all. */
+  recent_form: string | null;
 }
 
 // Real head-to-head history — replaces the raw bookmaker-odds table on the fixture detail

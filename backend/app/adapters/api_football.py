@@ -385,6 +385,21 @@ def _parse_streaks(form: str | None) -> tuple[float | None, float | None]:
     return 0.0, float(streak)
 
 
+# How many results the card shows. Five is the convention every football table uses and is
+# what a fixture's own form row already averages over.
+RECENT_FORM_LENGTH = 5
+
+
+def _recent_form(form: str | None) -> str | None:
+    """API-Football's "WWDLW" string is OLDEST-FIRST; the card reads newest-first, so this
+    reverses it. Only W/D/L are kept -- the field occasionally carries other characters for
+    an unplayed or awarded match, and a chip we cannot label is worse than a shorter run."""
+    if not form:
+        return None
+    kept = [c for c in reversed(form) if c in "WDL"][:RECENT_FORM_LENGTH]
+    return "".join(kept) or None
+
+
 def _compute_team_stats(team_external_id: str, stats: dict) -> TeamStats:
     """Derives everything real /teams/statistics provides (form, goals-average, home/away
     win rate) — confirmed live (see CLAUDE.md): no elo_rating/xg fields exist in this
@@ -419,6 +434,7 @@ def _compute_team_stats(team_external_id: str, stats: dict) -> TeamStats:
     )
 
     win_streak, losing_streak = _parse_streaks(stats.get("form"))
+    recent_form = _recent_form(stats.get("form"))
 
     return TeamStats(
         team_external_id=team_external_id,
@@ -426,6 +442,7 @@ def _compute_team_stats(team_external_id: str, stats: dict) -> TeamStats:
         attack_str=float(attack_str_raw) if attack_str_raw is not None else None,
         defence_str=float(defence_str_raw) if defence_str_raw is not None else None,
         form_pts_5=_parse_form_points(stats.get("form")),
+        recent_form=recent_form,
         xg_for_5=None,
         xg_against_5=None,
         days_since_last_match=None,  # not derivable from this aggregate-only endpoint
