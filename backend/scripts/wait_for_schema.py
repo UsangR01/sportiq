@@ -26,9 +26,10 @@ import sys
 import time
 from pathlib import Path
 
+from sqlalchemy import text
+
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import text
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 

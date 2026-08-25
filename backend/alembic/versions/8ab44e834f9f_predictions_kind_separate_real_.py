@@ -48,13 +48,15 @@ def upgrade() -> None:
         "predictions",
         sa.Column("kind", prediction_kind, server_default="UNKNOWN", nullable=False),
     )
-    op.execute("""
+    op.execute(
+        """
         UPDATE predictions
            SET kind = 'PRE_MATCH'
           FROM fixtures
          WHERE fixtures.id = predictions.fixture_id
            AND predictions.created_at < fixtures.kickoff_utc
-        """)
+        """
+    )
 
 
 def downgrade() -> None:

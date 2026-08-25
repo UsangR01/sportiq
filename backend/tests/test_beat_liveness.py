@@ -91,7 +91,7 @@ def test_long_cadence_tasks_use_wall_clock_schedules():
     longer must be a crontab (absolute wall clock, survives restarts)."""
     for name, entry in celery_app.conf.beat_schedule.items():
         schedule = entry["schedule"]
-        if isinstance(schedule, (int, float)):
+        if isinstance(schedule, int | float):
             assert float(schedule) < 3600, (
                 f"{name} uses a {schedule}s interval; a deploy resets it before it comes due — "
                 "use crontab"

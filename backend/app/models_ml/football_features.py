@@ -559,7 +559,7 @@ def devig_1x2(home: float | None, draw: float | None, away: float | None):
     or the feature means different things at train and serve time. Requires all three prices:
     normalising two legs of a three-way market fabricates a probability."""
     prices = (home, draw, away)
-    if any(not isinstance(v, (int, float)) or not v or v <= 1.0 for v in prices):
+    if any(not isinstance(v, int | float) or not v or v <= 1.0 for v in prices):
         return None
     inverses = [1.0 / v for v in prices]
     total = sum(inverses)
@@ -568,7 +568,7 @@ def devig_1x2(home: float | None, draw: float | None, away: float | None):
 
 def devig_over(over: float | None, under: float | None) -> float | None:
     """Decimal Over/Under prices -> implied P(over), overround removed."""
-    if any(not isinstance(v, (int, float)) or not v or v <= 1.0 for v in (over, under)):
+    if any(not isinstance(v, int | float) or not v or v <= 1.0 for v in (over, under)):
         return None
     inv_over, inv_under = 1.0 / over, 1.0 / under
     return inv_over / (inv_over + inv_under)

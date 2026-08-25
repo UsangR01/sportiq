@@ -36,11 +36,15 @@ depends_on = None
 def upgrade() -> None:
     # Handles both separators: rows were written on Windows, but a mixed-history database
     # could hold either. Rows already stored as a bare filename match neither and are skipped.
-    op.execute(sa.text(r"""
+    op.execute(
+        sa.text(
+            r"""
             UPDATE models_registry
             SET artefact_path = regexp_replace(artefact_path, '^.*[\\/]', '')
             WHERE artefact_path ~ '[\\/]'
-            """))
+            """
+        )
+    )
 
 
 def downgrade() -> None:

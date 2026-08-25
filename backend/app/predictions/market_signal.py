@@ -117,7 +117,8 @@ async def measure_goals_total_signal(db: AsyncSession) -> MarketSignal:
     """
     rows = (
         await db.execute(
-            text("""
+            text(
+                """
                 select (p.xg_home + p.xg_away) as predicted,
                        (o.home_score + o.away_score) as actual
                 from predictions p
@@ -129,7 +130,8 @@ async def measure_goals_total_signal(db: AsyncSession) -> MarketSignal:
                   and p.xg_home is not null
                   and p.xg_away is not null
                   and p.model_version >= :min_version
-                """),
+                """
+            ),
             {"min_version": MIN_MODEL_VERSION},
         )
     ).all()
@@ -151,7 +153,8 @@ async def measure_goals_total_signal_by_league(db: AsyncSession) -> list[MarketS
     """
     rows = (
         await db.execute(
-            text("""
+            text(
+                """
                 select l.slug,
                        (p.xg_home + p.xg_away) as predicted,
                        (o.home_score + o.away_score) as actual
@@ -165,7 +168,8 @@ async def measure_goals_total_signal_by_league(db: AsyncSession) -> list[MarketS
                   and p.xg_home is not null
                   and p.xg_away is not null
                   and p.model_version >= :min_version
-                """),
+                """
+            ),
             {"min_version": MIN_MODEL_VERSION},
         )
     ).all()
