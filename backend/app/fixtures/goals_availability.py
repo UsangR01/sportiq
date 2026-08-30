@@ -1,12 +1,27 @@
-"""Which leagues have DEMONSTRATED goals-market signal — the opposite polarity to corners.
+"""Whether a league may lead with the goals market — now open by default, with revocation.
 
-corners_availability.py answers "can this league SETTLE a corners pick promptly" and defaults to
-YES, because that gate is about data supply and an unmeasured league deserves the benefit of the
-doubt. This gate is about MODEL SKILL, and the default runs the other way: goals_total stays
-barred (NO_DEMONSTRATED_SIGNAL_MARKETS in router.py) unless a league has EARNED inclusion with a
-measurement. Pooled across all 18 leagues the market is a base rate wearing a prediction —
-r=+0.049 live when barred — and a market must demonstrate signal before users are told to bet
-on it, never the reverse.
+THE POLARITY FLIPPED ON 2026-08-30, and the reason is the whole point of pre-registering.
+
+This file used to answer "has this league EARNED goals", defaulting closed, because pooled
+across all 18 leagues the market measured r=+0.049 live and a market must demonstrate signal
+before users are told to bet on it. Re-measured on live settled fixtures over 24 days, using
+market_signal.py's own thresholds fixed long before this number existed:
+
+    goals_total     n=234   Spearman +0.197   CI [+0.071, +0.317]   -> ADMISSION PASSES
+    corners_total   n=232   Spearman -0.039   CI [-0.167, +0.090]   -> REVOCATION TRIGGERS
+
+Goals clears MIN_N, MIN_R and MIN_CI_LOW together, so the pooled bar that made this gate
+necessary is gone (see router.NO_DEMONSTRATED_SIGNAL_MARKETS, which now holds corners instead).
+A per-league inclusion list on top of a market that passes pooled would keep 14 leagues out on
+evidence that no longer says to.
+
+WHAT SURVIVES IS THE REVOCATION HALF, and it is not decoration: check_market_signal.py measures
+this live every week, and a league whose own interval settles below the bar goes in the set
+below. Open by default is a measurement, not an assumption, and it is auditable either way.
+
+THE ORIGINAL PER-LEAGUE ADMISSION EVIDENCE IS KEPT BELOW rather than deleted -- it is what
+justified the four-league exception while the pooled bar stood, and a future re-bar should be
+able to read it.
 
 MEASURED PER LEAGUE, 2026-08-18, on the held-out 2025 test season of the served model
 (ml/evaluation/test_predictions_football_xgb_v20260813153115.parquet), against the same
@@ -21,41 +36,29 @@ the 95% CI's lower bound above 0.05):
     eliteserien    n=241  r=+0.150  CI [+0.024, ...]      unstable (+0.023 / +0.243), excluded
     every other league    r <= +0.14, most under +0.10
 
-The four admitted leagues' under-3.5 reliability buckets are monotonic and within ~0.01 of the
-diagonal (pooled n=1,374), so the probabilities shown are honest as well as discriminating.
-
-STATED PLAINLY: this is TEST-SPLIT evidence, and market_signal.py's pre-registration says the
-pooled bar lifts on LIVE evidence. The per-league gate is a deliberate, user-directed exception
-to that, taken because live evidence for these leagues is structurally unavailable — their
-seasons opened the same week — and withholding the market all season pending data that cannot
-exist yet serves nobody. The compensating control is real: check_market_signal.py now measures
-the LIVE per-league signal weekly, and a gated league whose live interval settles BELOW the bar
-(n >= MIN_N and ci_high < MIN_R) is flagged for revocation. The gate is auditable, not a leap
-of faith.
-
-Re-derive candidates from a training run's per-fixture parquet rather than editing by hand —
+Re-derive candidates from a training run's per-fixture parquet rather than editing by hand --
 the measurement block above is reproducible from that file alone.
 """
 
-# Leagues whose goals_total predictions cleared the pre-registered signal bar per league.
-# Empty this set to bar goals from the headline pick everywhere again.
-LEAGUES_WITH_DEMONSTRATED_GOALS_SIGNAL = frozenset(
-    {
-        "laliga",
-        "ekstraklasa",
-        "bundesliga",
-        "seriea",
-    }
-)
+# Leagues whose LIVE goals signal has settled BELOW the bar they are served on.
+#
+# EMPTY IS THE OPEN STATE, not an oversight -- goals passes pooled, so every league leads with
+# it unless its own live evidence says otherwise. Populated from check_market_signal.py's
+# weekly audit, never by hand: the condition is n >= MIN_N with the 95% CI's upper bound below
+# MIN_R, i.e. the interval excludes the level that would admit it.
+#
+# Adding a league here is the same act as barring a market pooled, one league wide.
+LEAGUES_WITH_REVOKED_GOALS_SIGNAL: frozenset[str] = frozenset()
 
 
 def offers_goals(league_slug: str | None) -> bool:
-    """True only for a league measured to have real goals signal.
+    """True unless this league's own live evidence has put it below the bar.
 
-    An unknown league returns False — the OPPOSITE default to offers_corners, deliberately:
-    corners defaults open because its gate is about settlement supply, while this gate is about
-    demonstrated model skill, and skill is earned by measurement, never presumed. A league with
-    no measurement gets no goals headline pick."""
-    if not league_slug:
-        return False
-    return league_slug in LEAGUES_WITH_DEMONSTRATED_GOALS_SIGNAL
+    OPEN BY DEFAULT since 2026-08-30, when goals cleared the pooled trigger -- the opposite of
+    what this function did before, and the reason an unknown league now returns True. That
+    still is not "presumed skill": the presumption is the POOLED MEASUREMENT, which every
+    league inherits until its own numbers contradict it.
+    """
+    if league_slug is None:
+        return True
+    return league_slug not in LEAGUES_WITH_REVOKED_GOALS_SIGNAL

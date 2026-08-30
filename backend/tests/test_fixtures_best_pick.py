@@ -201,28 +201,34 @@ async def test_list_fixtures_best_pick_falls_back_to_probability_when_no_odds(ap
             await db.commit()
 
 
-def test_goals_total_cannot_win_the_default_pick_but_corners_can():
-    """The two Over/Under markets were assumed to be the same case and measurement says they
-    are not, so only one is barred:
+def test_corners_cannot_win_the_default_pick_but_goals_can():
+    """THE TWO OVER/UNDER MARKETS SWAPPED PLACES ON 2026-08-30, and this test swapped with them.
 
-        goals_total     n=242   r=+0.049   0.2% of variance explained
-        corners_total   n=234   r=+0.288   8.3% of variance explained
+    Exactly one is barred, and which one is a measurement, not a preference. Originally:
 
-    Pinned because a future reader would reasonably assume symmetry and 'tidy up' by barring
-    both — which would discard a market that earns its place on real evidence."""
+        goals_total     n=242   r=+0.049   0.2% of variance   -> barred
+        corners_total   n=234   r=+0.288   8.3% of variance   -> kept
+
+    Re-measured live over 24 days against market_signal.py's pre-registered thresholds:
+
+        goals_total     n=234   Spearman +0.197  CI [+0.071, +0.317]  -> admission passes
+        corners_total   n=232   Spearman -0.039  CI [-0.167, +0.090]  -> revocation triggers
+
+    Still pinned because a future reader would reasonably assume symmetry and 'tidy up' by
+    barring both or neither. The asymmetry is the finding."""
     from app.fixtures.router import NO_DEMONSTRATED_SIGNAL_MARKETS
 
-    assert "goals_total" in NO_DEMONSTRATED_SIGNAL_MARKETS
-    assert "corners_total" not in NO_DEMONSTRATED_SIGNAL_MARKETS
+    assert "corners_total" in NO_DEMONSTRATED_SIGNAL_MARKETS
+    assert "goals_total" not in NO_DEMONSTRATED_SIGNAL_MARKETS
     assert "h2h" not in NO_DEMONSTRATED_SIGNAL_MARKETS
     assert "double_chance" not in NO_DEMONSTRATED_SIGNAL_MARKETS
 
 
 @pytest.mark.asyncio
-async def test_an_explicit_goals_total_request_is_still_honoured(monkeypatch):
+async def test_an_explicit_barred_market_request_is_still_honoured(monkeypatch):
     """Barred from WINNING the default cross-market ranking is not the same as removed. A
     caller naming the market wants that market, and the fixture detail screen still shows it —
-    the pick is demoted, not hidden."""
+    the pick is demoted, not hidden. True of whichever market currently sits in the set."""
     import app.fixtures.router as router
 
     captured: list[list] = []

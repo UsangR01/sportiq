@@ -181,15 +181,44 @@ async def test_min_probability_drops_fixtures_below_threshold(
     assert str(fixture_b.id) not in ids
 
 
-async def test_min_probability_best_pick_drawn_from_corners_market(
+async def test_min_probability_best_pick_is_drawn_from_beyond_h2h(
     api_client, seeded_multi_market_fixtures
 ):
+    """This fixture's h2h probabilities are all under 60%, so a pick can only appear at all if
+    the ranking really does reach across markets.
+
+    IT USED TO ASSERT CORNERS SPECIFICALLY, and stopped on 2026-08-30 when corners was barred
+    from the headline (router.NO_DEMONSTRATED_SIGNAL_MARKETS -- live Spearman -0.039 on n=232).
+    The property worth pinning was never "corners wins"; it is that the winner comes from
+    somewhere other than h2h and clears the floor. Corners is still asserted, one test below,
+    to be reachable by naming it."""
     sport, fixture_a, _fixture_b = seeded_multi_market_fixtures
     response = await api_client.get(
         "/fixtures", params={"sport_slug": sport.slug, "min_probability": 0.6}
     )
     body = response.json()
     row = next(r for r in body if r["id"] == str(fixture_a.id))
+    assert row["best_pick"]["market"] not in ("h2h", "corners_total")
+    assert row["best_pick"]["probability"] >= 0.6
+
+
+async def test_a_barred_corners_pick_is_still_reachable_by_naming_the_market(
+    api_client, seeded_multi_market_fixtures
+):
+    """Demoted, not hidden. The same fixture's corners candidate is still served -- with its
+    real line and price -- to a caller who asks for that market, which is what makes the bar a
+    ranking decision rather than a deletion."""
+    sport, fixture_a, _fixture_b = seeded_multi_market_fixtures
+    response = await api_client.get(
+        "/fixtures",
+        params={
+            "sport_slug": sport.slug,
+            "min_probability": 0.6,
+            "market": "corners_total",
+            "line": 9.5,
+        },
+    )
+    row = next(r for r in response.json() if r["id"] == str(fixture_a.id))
     assert row["best_pick"]["market"] == "corners_total"
     assert row["best_pick"]["selection"] == "under"
     assert row["best_pick"]["line"] == 9.5

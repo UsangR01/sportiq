@@ -1187,6 +1187,72 @@ indefensible while its window was borrowed without comment.
 
 ---
 
+## The bar changed hands: corners out, goals in (2026-08-30)
+
+Asked to evaluate the week's results. The week itself was unremarkable — 272 graded card picks,
+football 0.606, tennis 0.590, WNBA 0.684 — with **one market dragging everything down**:
+
+    h2h             n=115   0.609   +20.5pp over base
+    double chance   n= 95   0.726   +10.9pp
+    corners         n= 55   0.364   -15.3pp      <- the only market losing to its own base rate
+    goals           n=  7   0.857   (too few to read)
+
+Corners' 95% CI upper bound (0.50) sits BELOW its base rate (0.517). It was ~20% of the cards.
+
+**BOTH SIDES OF THE SAME LINE WERE OVERCONFIDENT IN THE SAME DIRECTION**, which is the clue that
+this was not a calibration problem — an over-confident model pushes over too high and under too
+LOW, not both:
+
+    picked OVER 10.5    n=69   claimed 0.561   delivered 0.377
+    picked UNDER 10.5   n=53   claimed 0.714   delivered 0.528
+
+So discrimination was measured directly, over EVERY settled football fixture carrying a corners
+prediction rather than only those where corners won the headline (that subset is selected, and
+the original r=+0.288 was not):
+
+    corners_total   n=232   Spearman -0.039   CI [-0.167, +0.090]   REVOCATION TRIGGERS
+    goals_total     n=234   Spearman +0.197   CI [+0.071, +0.317]   ADMISSION PASSES
+
+**Both verdicts come from `market_signal.py`'s own pre-registered thresholds** (MIN_N 200,
+MIN_R 0.15, MIN_CI_LOW 0.05, plus the revocation test used for gated goals leagues: n >= MIN_N
+with the CI's upper bound below MIN_R). Those were fixed long before these numbers existed,
+which is the entire reason this was a decision to read off rather than to argue.
+
+**Counterfactual on 8 days of real cards**, graded with `app/predictions/grading.py`:
+
+    as shown (corners eligible)   103/167 = 0.617   CI [0.54, 0.69]
+    with corners barred           109/167 = 0.653   CI [0.58, 0.72]
+    cards left with no pick:      0
+
+**What changed:**
+- `NO_DEMONSTRATED_SIGNAL_MARKETS` = `{"corners_total"}` (was `{"goals_total"}`).
+- **The bar is now applied UNCONDITIONALLY**, not wrapped in `if not offers_goals(...)`. That
+  wrapper was correct while the set held goals and would have been a silent bug the moment it
+  held corners: a league cleared for goals would have had its CORNERS pick let through too.
+  Pinned by `test_the_gate_no_longer_wraps_the_barred_market_rule`.
+- `goals_availability.py` **flipped polarity** — from "earned inclusion, default closed" to
+  "open by default, with revocation". `LEAGUES_WITH_DEMONSTRATED_GOALS_SIGNAL` (four leagues)
+  became `LEAGUES_WITH_REVOKED_GOALS_SIGNAL` (empty). 14 leagues gain the market. The
+  four-league test-split evidence is KEPT in that module rather than deleted — it justified the
+  exception while the pooled bar stood, and a future re-bar should be able to read it.
+- `check_market_signal.py`'s weekly audit follows the new polarity; its `gated` variable still
+  means "currently leads with goals", so only the membership test is negated.
+
+**A claim of mine that did not survive its own sample.** On the first 78 fixtures the ordering
+looked INVERTED — over picks averaging FEWER real corners (9.28) than under picks (10.24). At
+n=122 the difference was **0.03** with t=0.05. It is absence of signal, not reversal, and the
+smaller number was noise. Recorded because the wrong version was the more dramatic one.
+
+**HONEST LIMITS.** The live measurement ranks fixtures by P(over line) rather than the predicted
+total, because `/fixtures` does not expose `corners_xg` — Spearman is therefore exactly the
+pre-registered quantity while Pearson is a close relative. MLS is hidden from the feed's history
+(`SUPPRESSED_LEAGUES_INCLUDING_HISTORY`) so it is absent from the 232. Per-league corners cuts
+are all n < 26 and establish nothing individually.
+
+**Watch next: single-market concentration, the same thing flagged when corners reached 50%.**
+Post-change the local mix is double chance 42% / h2h 38% / goals 20%. Goals climbing toward a
+third of cards would be the shape of the original "every card shows UNDER 3.5" complaint.
+
 ## Measuring whether the predictions work
 
 Spec: `docs/history-metrics-spec.md`, written **before** the endpoint was touched so its shape
@@ -1863,6 +1929,12 @@ fixtures, predicted total against actual total:
 
     goals_total     n=242   r=+0.049   0.2% of variance explained   <- barred
     corners_total   n=234   r=+0.288   8.3% of variance explained   <- kept
+
+> **SUPERSEDED 2026-08-30 — THE TWO MARKETS SWAPPED PLACES. See "The bar changed hands" above.**
+> Corners now measures Spearman **-0.039** live (n=232, CI [-0.167, +0.090]) and goals **+0.197**
+> (n=234, CI [+0.071, +0.317]). `NO_DEMONSTRATED_SIGNAL_MARKETS` holds `corners_total`, not
+> `goals_total`. The paragraph below was true when written and is kept because the reasoning is
+> what the later measurement re-ran, not because it still describes the code.
 
 **Corners was assumed to be the same case and is NOT** — the assumption was about to be stated
 before it was measured. At n=234, r=+0.288 is roughly 4.4 standard errors from zero: a real if

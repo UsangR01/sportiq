@@ -47,10 +47,17 @@ async def api_client():
 
 @pytest.fixture
 async def corners_card_fixture():
-    """The reported fixture, rebuilt: a 4-0 home win with 7-2 corners, where the card shows
-    UNDER 10.5 CORNERS (a WIN) and the 1X2 call is away (a LOSS).
+    """The reported fixture, rebuilt: a 4-0 home win with 7-2 corners, where the card wins on a
+    total while the 1X2 call is away and LOSES.
 
-    Probabilities are chosen so away is the 1X2 argmax while corners wins the cross-market
+    THE CARD'S MARKET CHANGED ON 2026-08-30 and the disagreement did not. The real Hearts fixture
+    showed UNDER 10.5 CORNERS; corners is now barred from the headline
+    (router.NO_DEMONSTRATED_SIGNAL_MARKETS -- live Spearman -0.039 on n=232) so the same scoreline
+    surfaces OVER 3.5 GOALS instead, which a 4-0 also wins. Both corners and goals odds are seeded
+    so the fixture keeps exercising a real cross-market ranking rather than having one candidate
+    left standing.
+
+    Probabilities are chosen so away is the 1X2 argmax while a total wins the cross-market
     ranking -- the two verdicts must genuinely disagree or the test proves nothing."""
     async with async_session_factory() as db:
         slug = f"test-card-{uuid.uuid4().hex[:8]}"
@@ -90,6 +97,10 @@ async def corners_card_fixture():
                 # Drives the corners market: a low total keeps P(under 10.5) high.
                 corners_xg_home=5.7,
                 corners_xg_away=3.2,
+                # Drives goals: a high expected total makes OVER 3.5 the model's own call,
+                # which a 4-0 wins.
+                xg_home=3.4,
+                xg_away=1.9,
                 confidence_tier=ConfidenceTier.LOW,
                 created_at=now - timedelta(days=2),
                 kind=PredictionKind.PRE_MATCH,
@@ -103,6 +114,17 @@ async def corners_card_fixture():
                 line=10.5,
                 over_odds=1.70,
                 under_odds=2.05,
+                updated_at=now,
+            )
+        )
+        db.add(
+            Odds(
+                fixture_id=fixture.id,
+                bookmaker="test-book",
+                market=OddsMarket.TOTAL,
+                line=3.5,
+                over_odds=1.95,
+                under_odds=1.85,
                 updated_at=now,
             )
         )
@@ -157,10 +179,11 @@ async def test_the_two_verdicts_disagree_and_both_are_reported(api_client, corne
     assert entry["predicted_outcome"] == "away"
     assert entry["was_correct"] is False, "the 1X2 call was away against a 4-0 home win"
 
-    assert entry["pick_market"] == "corners_total"
-    assert entry["pick_selection"] == "under"
-    assert entry["pick_line"] == 10.5
-    assert entry["pick_was_correct"] is True, "7 + 2 = 9 corners is under 10.5"
+    assert entry["pick_market"] == "goals_total"
+    assert entry["pick_selection"] == "over"
+    assert entry["pick_line"] == 3.5
+    assert entry["pick_was_correct"] is True, "4 + 0 = 4 goals is over 3.5"
+    assert entry["pick_market"] != "corners_total", "corners must not lead the card any more"
 
 
 async def test_summary_reports_the_card_accuracy_alongside_the_1x2_one(

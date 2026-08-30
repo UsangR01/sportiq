@@ -703,16 +703,30 @@ def _expected_value(candidate: _MarketCandidate) -> float:
 #     goals_total     n=242   r=+0.049   0.2% of variance explained   <- barred
 #     corners_total   n=234   r=+0.288   8.3% of variance explained   <- kept
 #
-# Corners is deliberately KEPT. The two were assumed to be the same case and are not: at
-# n=234, r=+0.288 sits about 4.4 standard errors from zero, a real if modest signal. Goals is
-# indistinguishable from zero and no further calibration can change that — the model's own
-# reliability buckets for under 3.5 all land on the base rate, and two independent
-# measurements agree. See CLAUDE.md, "Negative Binomial ... DELIBERATELY NOT BUILT".
+# THE TWO SWAPPED PLACES, AND THIS SET SWAPPED WITH THEM ON 2026-08-30. Re-measured live over
+# 24 days of settled fixtures, against market_signal.py's thresholds — fixed in advance, long
+# before these numbers existed, precisely so this decision could not be argued afterwards:
 #
-# Goals still appears in all_market_picks and in the fixture detail's Other Markets, so nothing
-# is hidden; it simply cannot be the pick we lead with. An explicit market=goals_total request
-# is still honoured — asking for it is different from it winning by default.
-NO_DEMONSTRATED_SIGNAL_MARKETS = frozenset({"goals_total"})
+#     goals_total     n=234   Spearman +0.197   CI [+0.071, +0.317]   ADMISSION PASSES
+#     corners_total   n=232   Spearman -0.039   CI [-0.167, +0.090]   REVOCATION TRIGGERS
+#
+# Corners is now the market that cannot discriminate, and it is not a near miss: the interval
+# straddles zero and its upper bound (+0.090) sits below the +0.15 that would admit it. What
+# users saw while it led the card was worse than a coin flip — 54/122 = 0.443 over the same
+# window — and BOTH SIDES of the 10.5 line were overconfident in the same direction (over
+# claimed 0.561 and delivered 0.377; under claimed 0.714 and delivered 0.528), which
+# calibration alone cannot produce and absence of signal explains exactly.
+#
+# Counterfactual on 8 days of real cards, graded with app/predictions/grading.py:
+#
+#     as shown (corners eligible)   103/167 = 0.617
+#     with corners barred           109/167 = 0.653
+#     cards left with no pick at all: 0
+#
+# Nothing is hidden either way: a barred market still appears in all_market_picks and in the
+# fixture detail's Other Markets, and an explicit market=corners_total request is still
+# honoured — asking for it is different from it winning by default.
+NO_DEMONSTRATED_SIGNAL_MARKETS = frozenset({"corners_total"})
 
 
 def _pick_best(
@@ -1049,14 +1063,17 @@ async def _bulk_best_picks(
             # fixture's pick outright, while this one only decides which market wins the
             # headline, and it decides that the same way on every day at once.
             #
-            # Per-league exception (2026-08-18): four leagues measured real goals signal on the
-            # held-out test season — see goals_availability.py for the numbers, the polarity
-            # (earned inclusion, unlike corners' presumed inclusion), and the live-audit
-            # arrangement in check_market_signal.py that can revoke a league.
+            candidates = [c for c in candidates if c.market not in NO_DEMONSTRATED_SIGNAL_MARKETS]
+
+            # DECOUPLED FROM THE BAR ABOVE, deliberately. This used to wrap it — the bar only
+            # applied where offers_goals said no — which was right while the set held goals and
+            # would be a silent bug now that it holds corners: a league cleared for goals would
+            # have had its CORNERS pick let through as well.
+            #
+            # goals_availability.py flipped polarity on the same evidence and is now open by
+            # default, so this excludes only a league whose own live signal has been revoked.
             if not offers_goals(league_by_fixture.get(fixture_id)):
-                candidates = [
-                    c for c in candidates if c.market not in NO_DEMONSTRATED_SIGNAL_MARKETS
-                ]
+                candidates = [c for c in candidates if c.market != "goals_total"]
 
         # A corners pick in a league that cannot settle corners at full time sits GREY through
         # the whole window users open the app in -- half a day, structurally, because

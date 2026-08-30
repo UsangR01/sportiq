@@ -16,7 +16,7 @@ Costs one query and no API calls.
 import logging
 
 from app.core.database import async_session_factory
-from app.fixtures.goals_availability import LEAGUES_WITH_DEMONSTRATED_GOALS_SIGNAL
+from app.fixtures.goals_availability import LEAGUES_WITH_REVOKED_GOALS_SIGNAL
 from app.predictions.market_signal import (
     MIN_N,
     MIN_R,
@@ -33,11 +33,14 @@ async def _check_market_signals() -> None:
         signal = await measure_goals_total_signal(db)
         per_league = await measure_goals_total_signal_by_league(db)
 
-    # The per-league goals gate was admitted on test-split evidence (goals_availability.py);
-    # this is its live audit. Both conditions were fixed there before any live number existed.
+    # The live audit of the per-league goals gate. Its POLARITY FLIPPED on 2026-08-30 when
+    # goals cleared the pooled trigger: the set now names leagues whose signal has been
+    # REVOKED rather than leagues admitted -- so the membership test below is negated while
+    # `gated` keeps its original meaning, "this league currently leads with goals". Both
+    # conditions are unchanged and still pre-registered.
     for league_signal in per_league:
         slug = league_signal.market.split("[", 1)[1].rstrip("]")
-        gated = slug in LEAGUES_WITH_DEMONSTRATED_GOALS_SIGNAL
+        gated = slug not in LEAGUES_WITH_REVOKED_GOALS_SIGNAL
         revoke = (
             gated
             and league_signal.n >= MIN_N
@@ -47,22 +50,22 @@ async def _check_market_signals() -> None:
         admit = not gated and league_signal.meets_trigger
         if revoke:
             logger.warning(
-                "GOALS GATE REVOCATION CONDITION MET — %s. Live evidence sits below the bar the "
-                "league was admitted on; remove it from LEAGUES_WITH_DEMONSTRATED_GOALS_SIGNAL "
-                "in app/fixtures/goals_availability.py.",
+                "GOALS GATE REVOCATION CONDITION MET — %s. Live evidence sits below the bar "
+                "this league is served on; ADD it to LEAGUES_WITH_REVOKED_GOALS_SIGNAL in "
+                "app/fixtures/goals_availability.py.",
                 league_signal.describe(),
             )
         elif admit:
             logger.warning(
-                "GOALS GATE ADMISSION CANDIDATE — %s cleared the full trigger LIVE. Consider "
-                "adding it to LEAGUES_WITH_DEMONSTRATED_GOALS_SIGNAL in "
+                "GOALS GATE READMISSION CANDIDATE — %s cleared the full trigger LIVE. Consider "
+                "REMOVING it from LEAGUES_WITH_REVOKED_GOALS_SIGNAL in "
                 "app/fixtures/goals_availability.py.",
                 league_signal.describe(),
             )
         else:
             logger.info(
                 "goals per-league signal (%s) — %s",
-                "gated" if gated else "ungated",
+                "serving" if gated else "revoked",
                 league_signal.describe(),
             )
 
