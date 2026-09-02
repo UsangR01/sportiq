@@ -1256,9 +1256,22 @@ async def list_fixtures(
     # POSTPONED fixtures stay fully exempt: they have no best_pick at all (the backend nulls it
     # out so a pre-postponement prediction can't be shown as if the game were still on), so
     # every branch below would drop them — exactly the bug the user reported.
+    #
+    # LIVE FIXTURES ARE EXEMPT TOO, added 2026-09-02 for a different reason worth stating.
+    # Reported as "the live page read the same as the saved page — 1X @ 1.17", i.e. the Live tab
+    # and the Picks feed showed DIFFERENT picks for one fixture. best_pick is recomputed per
+    # request from the candidates that clear the caller's floors, and the Live tab passed none
+    # at all, so a 1.17 price it ranked first was one the Picks feed had already excluded. Same
+    # root cause as the watchlist receipt bug: one fixture, two callers, two answers.
+    #
+    # The fix is for the Live tab to pass the user's own floors, and this exemption is what
+    # makes that safe. Without it a live match would VANISH from a live-scores screen because
+    # its pick was too short-priced for the odds slider — a worse bug than the one being fixed.
+    # A live match is being watched, not staked, so it is listed either way and simply carries
+    # no pick badge when nothing clears the bar.
     filtered = []
     for summary in summaries:
-        if summary.status == "postponed":
+        if summary.status in ("postponed", "live"):
             filtered.append(summary)
             continue
         pick = summary.best_pick

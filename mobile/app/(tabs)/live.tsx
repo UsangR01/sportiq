@@ -9,6 +9,7 @@ import { formatOdds, toOddsFormat, type OddsFormat } from "@/lib/oddsFormat";
 import { pickHeadline } from "@/lib/pickFormat";
 import { GAP, ONE_LINE, RADIUS, SCREEN, TRACK_HEIGHT, TYPE, useTheme, useScreenInsets } from "@/lib/theme";
 import { useAuthStore } from "@/store/authStore";
+import { usePicksStore } from "@/store/picksStore";
 
 /** Football's regulation time, used only to draw the elapsed-time track.
  *
@@ -33,9 +34,28 @@ export default function LiveScreen() {
   const insets = useScreenInsets();
   const accessToken = useAuthStore((state) => state.accessToken);
 
+  // THE USER'S OWN FLOORS, not "no filtering". best_pick is recomputed per request from the
+  // candidates that clear them, so a screen that passes none ranks a different set and can show
+  // a different pick for the SAME fixture -- reported as the Live tab reading 1X @ 1.17 where
+  // the card read HOME @ 1.55, because 1.17 is below the 1.20 odds default and the card had
+  // already excluded it.
+  //
+  // No live match is lost by this: list_fixtures exempts live fixtures from the floor-driven
+  // drop, exactly as it does postponed ones, so a match whose pick clears nothing is still
+  // listed and simply carries no pick badge. A live-scores screen must show what is being
+  // played.
+  const minProbability = usePicksStore((state) => state.minProbability);
+  const minOdds = usePicksStore((state) => state.minOdds);
+
   const liveQuery = useQuery({
-    queryKey: ["fixtures", "live"],
-    queryFn: () => listFixtures({ status: "live", limit: 100 }),
+    queryKey: ["fixtures", "live", minProbability, minOdds],
+    queryFn: () =>
+      listFixtures({
+        status: "live",
+        limit: 100,
+        min_probability: minProbability,
+        min_odds: minOdds,
+      }),
     refetchInterval: 60 * 1000,
   });
 
