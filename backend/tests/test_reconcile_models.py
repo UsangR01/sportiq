@@ -18,9 +18,9 @@ import pytest
 from sqlalchemy import delete, select
 
 from app.core.database import async_session_factory
+from app.models_ml import registry_repair as rm
 from app.predictions.models import ModelRegistry
 from app.sports.models import Sport
-from app.workers import reconcile_models as rm
 
 
 @pytest.fixture
@@ -226,6 +226,48 @@ async def test_repairing_is_idempotent(staged, football_sport):
             )
         ).all()
     assert len(actives) == 1, "exactly one active row per sport, always"
+
+
+def test_the_api_reconciles_at_startup_too():
+    """THE REDUNDANCY IS THE POINT, and it is why this is not just a worker concern. During the
+    September 2026 outage the API redeployed within three minutes of the push while the worker
+    had not restarted forty minutes later -- a repair living only in the worker would not have
+    run when it was most needed."""
+    import ast
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    handler = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_repair_serving_models"
+    )
+    # The DOCSTRING is stripped before matching -- it talks about Celery, and an earlier
+    # version of this test failed on its own prose rather than on any code.
+    statements = [
+        n
+        for n in handler.body
+        if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant))
+    ]
+    code = chr(10).join(ast.unparse(n) for n in statements)
+    assert "reconcile" in code
+    # Celery must never reach the API process: two gunicorn workers on a 512MB instance have
+    # already been OOM-killed once by an import they did not need.
+    assert "celery" not in code.lower()
+    assert any(isinstance(node, ast.Try) for node in ast.walk(handler))
+
+
+def test_the_repair_module_never_imports_celery():
+    """Pinned at the module level as well as the call site, because the cheap way to 'tidy' this
+    is to move the task wrapper back in beside it."""
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "app" / "models_ml" / "registry_repair.py"
+    ).read_text(encoding="utf-8")
+    assert "import celery" not in source
+    assert "from app.workers" not in source
 
 
 def test_the_worker_reconciles_on_every_start():

@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
@@ -14,6 +16,8 @@ from app.picks.router import router as picks_router
 from app.sports.router import router as sports_router
 from app.users.router import router as users_router
 
+logger = logging.getLogger(__name__)
+
 
 def create_app() -> FastAPI:
     settings = get_settings()
@@ -24,6 +28,33 @@ def create_app() -> FastAPI:
 
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+    @app.on_event("startup")
+    async def _repair_serving_models() -> None:
+        """Make sure every sport's active model can actually be LOADED from this image.
+
+        THE API RUNS THIS TOO, not only the worker, and that redundancy is the point. When
+        football went dark in September 2026 the API redeployed within three minutes of the
+        push while the worker had not restarted forty minutes later -- so a repair that lived
+        only in the worker would not have run when it was most needed. Whichever process comes
+        up first fixes it; the second finds nothing to do.
+
+        Free of Celery by construction (see app/models_ml/registry_repair.py): this process
+        runs two gunicorn workers on a 512MB instance and has already been OOM-killed once by
+        an import it did not need. The catch-up queueing stays on the worker side, which owns
+        the broker.
+
+        NEVER FATAL. An API that will not boot because a reconciliation failed is worse than
+        the drift it was checking for.
+        """
+        try:
+            from app.core.database import async_session_factory
+            from app.models_ml.registry_repair import reconcile
+
+            async with async_session_factory() as db:
+                await reconcile(db)
+        except Exception:  # pragma: no cover - startup must survive anything here
+            logger.exception("serving-model reconciliation failed at API startup")
 
     app.add_middleware(
         CORSMiddleware,
