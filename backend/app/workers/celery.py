@@ -37,6 +37,7 @@ celery_app = Celery(
         "app.workers.backfill_basketball_predictions",
         "app.workers.snapshot_picks",
         "app.workers.check_market_signal",
+        "app.workers.reconcile_models",
     ],
 )
 
@@ -276,6 +277,27 @@ def _publish_code_version_to(key: str, role: str, sender=None) -> None:
 @worker_ready.connect
 def _publish_worker_code_version(sender=None, **_kwargs) -> None:
     _publish_code_version_to(WORKER_VERSION_KEY, "worker", sender)
+
+
+@worker_ready.connect
+def _reconcile_serving_models(sender=None, **_kwargs) -> None:
+    """Check on every worker start that each sport's active model can actually be LOADED.
+
+    A deploy is exactly when the two halves can diverge -- the image brings new artefacts while
+    models_registry keeps whatever row it held -- so this runs at the moment the drift is
+    created rather than waiting for the next daily ingest to fail silently again. Football sat
+    dark for days in September 2026 because nothing checked.
+
+    DISPATCHED AS A TASK, not run inline: worker_ready fires on the main process and blocking it
+    on database work would delay the worker consuming anything at all.
+
+    Never allowed to stop the worker booting. A worker that will not start because a
+    reconciliation failed is worse than the drift it was checking for.
+    """
+    try:
+        celery_app.send_task("app.workers.reconcile_models.reconcile_models")
+    except Exception:  # pragma: no cover - a broker hiccup must not block startup
+        logger.exception("could not queue the serving-model reconciliation")
 
 
 @beat_init.connect
