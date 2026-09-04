@@ -45,7 +45,20 @@ async def frozen_picks_for(db: AsyncSession, fixture_ids: list[uuid.UUID]) -> di
     return {row.fixture_id: row for row in rows}
 
 
-async def freeze_started_fixtures(db: AsyncSession, limit: int = 500) -> int:
+# How many fixtures one sweep will freeze, and how many go into a single _bulk_best_picks call.
+#
+# CHUNK IS THE LOAD-BEARING ONE. That helper's corners reference scales with distinct TEAMS and
+# has OOM-killed a 512MB container twice at larger batches (see the note on measure_pick_flips in
+# CLAUDE.md). 40 is the size measured safe there. PER_RUN then bounds a cold start: the first
+# sweeps after this shipped had ~3,300 fixtures to catch up on, and draining that in one cycle
+# would spend the whole five minutes -- and the whole memory budget -- on a backfill while live
+# scores waited behind it. At 200 per five-minute cycle the catch-up finishes in under two hours
+# and no single cycle is heavy.
+FREEZE_CHUNK = 40
+FREEZE_PER_RUN = 200
+
+
+async def freeze_started_fixtures(db: AsyncSession, limit: int = FREEZE_PER_RUN) -> int:
     """Freeze any fixture whose kickoff has passed and that has no frozen row yet.
 
     Runs on the five-minute live-scores beat, so the gap between a real kickoff and the freeze is
@@ -77,7 +90,10 @@ async def freeze_started_fixtures(db: AsyncSession, limit: int = 500) -> int:
     )
     if not started:
         return 0
-    return await _freeze(db, list(started), reason="kickoff")
+    frozen = 0
+    for start in range(0, len(started), FREEZE_CHUNK):
+        frozen += await _freeze(db, list(started[start : start + FREEZE_CHUNK]), reason="kickoff")
+    return frozen
 
 
 async def _freeze(db: AsyncSession, fixture_ids: list[uuid.UUID], *, reason: str) -> int:
