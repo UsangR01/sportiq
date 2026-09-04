@@ -1025,6 +1025,17 @@ async def _bulk_best_picks(
         if abs(most_recent.home_prob - current.home_prob) >= MIN_REPORTABLE_PROBABILITY_MOVE:
             previous_probability_by_fixture[fixture_id] = most_recent.home_prob
 
+    # THE CARD IS FROZEN AT KICKOFF AND IS READ FROM HERE ON, never recomputed. Loaded before
+    # the loop so a frozen fixture short-circuits BEFORE any guard, floor or market bar runs --
+    # those are exactly what rewrote 19% of published cards in five days, and a check placed
+    # after them would still let a later bar delete a pick a user had already acted on.
+    #
+    # all_market_picks is deliberately NOT frozen: it is a per-market breakdown for reviewing a
+    # result, not the promise the product made, and nothing renders it as a recommendation.
+    from app.predictions.pick_freeze import apply_frozen, frozen_picks_for
+
+    frozen_by_fixture = await frozen_picks_for(db, list(fixture_ids))
+
     best_picks: dict = {}
     all_picks: dict = {}
     for fixture_id, prediction in latest_prediction_by_fixture.items():
@@ -1107,6 +1118,15 @@ async def _bulk_best_picks(
         operator_suppressed = suppressed_markets_for(league_by_fixture.get(fixture_id))
         if operator_suppressed:
             candidates = [c for c in candidates if c.market not in operator_suppressed]
+
+        # Frozen wins outright. `continue` rather than falling through, so nothing below can
+        # reconsider a card that has already been published.
+        frozen = frozen_by_fixture.get(fixture_id)
+        if frozen is not None:
+            shown = apply_frozen(BestPick, frozen)
+            if shown is not None:
+                best_picks[fixture_id] = shown
+            continue
 
         settled = fixture_id in settled_fixtures
         best = _pick_best(

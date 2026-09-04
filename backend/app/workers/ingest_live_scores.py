@@ -601,6 +601,28 @@ async def _warn_if_stale_fixtures_remain() -> None:
         )
 
 
+async def _freeze_started_cards() -> None:
+    """Write down the card of every fixture that has kicked off, once.
+
+    LAST in the cycle, deliberately: the polling pass above may have just moved a fixture to
+    LIVE or corrected a placeholder kickoff, and freezing before that would record a card for a
+    match whose start time we were about to fix.
+
+    Five-minute cadence means the freeze lands within one cycle of a real kickoff. Never allowed
+    to break the live-score poll -- a missed freeze is retried next cycle, while a failed poll
+    stops scores for everyone.
+    """
+    from app.predictions.pick_freeze import freeze_started_fixtures
+
+    try:
+        async with async_session_factory() as db:
+            frozen = await freeze_started_fixtures(db)
+        if frozen:
+            logger.info("froze %d started cards", frozen)
+    except Exception:
+        logger.exception("freezing started cards failed - will retry next cycle")
+
+
 async def _ingest_live_scores() -> None:
     async with async_session_factory() as db:
         sports = (await db.execute(select(Sport).where(Sport.active.is_(True)))).scalars().all()
@@ -644,6 +666,7 @@ async def _ingest_live_scores() -> None:
     await _mark_abandoned_fixtures()
     await _roll_forward_stale_placeholders()
     await _backfill_missing_corner_counts()
+    await _freeze_started_cards()
 
 
 @celery_app.task(name="app.workers.ingest_live_scores.ingest_live_scores")

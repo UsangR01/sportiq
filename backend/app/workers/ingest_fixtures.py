@@ -440,12 +440,24 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
         # skipping them avoids wasted fetch_team_stats calls on games that already happened.
         # POSTPONED fixtures are excluded for the same reason: there's no game to build a
         # pre-game feature vector or prediction for until/unless it's rescheduled.
+        # A KICKED-OFF FIXTURE IS NOT UPCOMING, and until 2026-09-04 this query said it was.
+        # The status filter alone lets LIVE through, so a match in play had its features
+        # recomputed and -- once the 20-hour rule below fired -- its prediction replaced while it
+        # was being played. Measured consequence, already recorded in CLAUDE.md: 578 of 740
+        # settled fixtures render a prediction created AFTER their own kickoff.
+        #
+        # Reported as "any alterations on a card after the game starts must be forbidden". The
+        # frozen card (app/predictions/pick_freeze.py) stops the DISPLAY changing; this stops the
+        # underlying work being done at all, which is the honest fix -- a pre-match feature
+        # vector for a match already in progress is not a better number, it is a different and
+        # meaningless one.
         upcoming = (
             (
                 await db.execute(
                     select(Fixture).where(
                         Fixture.league_id == league.id,
                         Fixture.status.notin_([FixtureStatus.COMPLETED, FixtureStatus.POSTPONED]),
+                        Fixture.kickoff_utc > datetime.now(UTC),
                     )
                 )
             )

@@ -187,3 +187,73 @@ class PickSnapshot(Base):
     # How long before kickoff the pick was taken. Recorded because CLV is only meaningful with
     # a real gap between this price and the closing one — see snapshot_shown_picks.
     hours_before_kickoff: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class FrozenPick(Base):
+    """THE CARD AS IT STOOD AT KICKOFF. Read thereafter, never recomputed.
+
+    Reported 2026-09-04: "Why are cards number changing after games... Games should not change in
+    any form after or hours before start. How will a user feel to see a prediction and stake
+    based on what he sees... after the game, the card that initial pushed him to make a stake
+    disappears."
+
+    MEASURED, on cards pulled from production on 2026-08-30 at the app's own defaults -- so
+    provably on screen -- re-checked five days later:
+
+        396 displayed      320 (81%) unchanged
+                            28 ( 7%) showed a DIFFERENT BET
+                            48 (12%) GONE from the feed
+
+    best_pick was computed on every request and never stored, so there was no record of what a
+    user had been shown and therefore nothing to protect. Every input kept moving after the
+    whistle: predictions regenerate on a 20-hour cycle for anything not COMPLETED or POSTPONED
+    (which INCLUDES a live match -- 578 of 740 settled fixtures rendered a prediction created
+    after their own kickoff), and the guards are evaluated at read time, so barring corners on
+    2026-08-30 rewrote 17 already-published cards on its own.
+
+    ONE ROW PER FIXTURE, written once when kickoff passes.
+
+    A NULL market IS A RECORD, not a missing one: it means no pick was shown at kickoff, and it
+    is what stops a fixture GAINING a pick later. Adding a pick nobody saw is the same defect as
+    deleting one they did -- both were caught in the same week when relaxing a guard for settled
+    fixtures surfaced a 1X pick that had been correctly hidden all along.
+
+    NOT pick_snapshots, though the shape is close. That table captures 4-8h before kickoff
+    specifically so CLV has a real gap against the closing price; overloading it with a
+    kickoff-time capture would silently destroy that measurement.
+    """
+
+    __tablename__ = "frozen_picks"
+    __table_args__ = (
+        UniqueConstraint("fixture_id", name="uq_frozen_picks_fixture"),
+        Index("ix_frozen_picks_frozen_at", "frozen_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    fixture_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("fixtures.id", ondelete="CASCADE"), nullable=False
+    )
+
+    # NULL market == "no pick was on this card". See the class docstring.
+    market: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    selection: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    line: Mapped[float | None] = mapped_column(Float, nullable=True)
+    probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # NULL means the market genuinely had no price, which must stay distinguishable from zero.
+    odds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    feature_completeness: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # Which model made the call, and when it made it -- so a later promotion can never be
+    # mistaken for the model the user actually acted on.
+    model_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    prediction_created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    frozen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    # "kickoff" for the normal path; "backfill" for rows written when this table was introduced,
+    # which record TODAY's card rather than the one originally shown. Kept so a future reader
+    # can tell a genuine capture from a reconstruction rather than trusting them equally.
+    frozen_reason: Mapped[str] = mapped_column(String(16), nullable=False, default="kickoff")
