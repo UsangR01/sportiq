@@ -286,3 +286,125 @@ def test_ingest_no_longer_treats_a_started_fixture_as_upcoming():
     query = ast.unparse(assign)
     assert "kickoff_utc" in query, "a kicked-off fixture must be excluded by TIME, not by status"
     assert "COMPLETED" in query and "POSTPONED" in query
+
+
+# === The odds floor must survive the freeze, added 2026-09-09 =====================================
+
+
+@pytest.fixture
+async def live_short_priced_fixture():
+    """A LIVE fixture whose only real candidate is priced at 1.10 -- under the 1.20 default."""
+    async with async_session_factory() as db:
+        slug = f"floor-{uuid.uuid4().hex[:8]}"
+        sport = Sport(slug=slug, name="Floor Test", model_type="test", active=True)
+        db.add(sport)
+        await db.flush()
+        league = League(
+            sport_id=sport.id, slug=f"l-{slug}", name="L", country=None, tier=1, active=True
+        )
+        db.add(league)
+        await db.flush()
+        home = Team(sport_id=sport.id, league_id=league.id, name="H", external_id=f"h{slug}")
+        away = Team(sport_id=sport.id, league_id=league.id, name="A", external_id=f"a{slug}")
+        db.add_all([home, away])
+        await db.flush()
+        now = datetime.now(UTC)
+        fixture = Fixture(
+            sport_id=sport.id,
+            league_id=league.id,
+            external_id=f"fx-{slug}",
+            home_team_id=home.id,
+            away_team_id=away.id,
+            kickoff_utc=now - timedelta(minutes=30),
+            status=FixtureStatus.LIVE,
+            season="2026",
+        )
+        db.add(fixture)
+        await db.flush()
+        db.add(
+            Prediction(
+                fixture_id=fixture.id,
+                model_version="floor_test_v1",
+                home_prob=0.655,
+                draw_prob=0.161,
+                away_prob=0.184,
+                confidence_tier=ConfidenceTier.MEDIUM,
+                created_at=now - timedelta(hours=5),
+                kind=PredictionKind.PRE_MATCH,
+                feature_completeness=0.8,
+            )
+        )
+        db.add(
+            Odds(
+                fixture_id=fixture.id,
+                bookmaker="test-book",
+                market=OddsMarket.DOUBLE_CHANCE,
+                home_odds=1.10,
+                away_odds=4.50,
+                updated_at=now,
+            )
+        )
+        await db.commit()
+        ids = (sport.id, fixture.id)
+
+    yield ids
+
+    async with async_session_factory() as db:
+        for model in (FrozenPick, Odds, Prediction):
+            await db.execute(delete(model).where(model.fixture_id == ids[1]))
+        await db.execute(delete(Fixture).where(Fixture.sport_id == ids[0]))
+        await db.execute(delete(Team).where(Team.sport_id == ids[0]))
+        await db.execute(delete(League).where(League.sport_id == ids[0]))
+        await db.execute(delete(Sport).where(Sport.id == ids[0]))
+        await db.commit()
+
+
+async def _feed(sport_slug_id, **params):
+    from httpx import ASGITransport, AsyncClient
+
+    from app.main import create_app
+
+    async with AsyncClient(
+        transport=ASGITransport(app=create_app()), base_url="http://test"
+    ) as client:
+        response = await client.get("/fixtures", params=params)
+    return response.json()
+
+
+async def test_a_frozen_pick_below_the_floor_is_withheld(live_short_priced_fixture):
+    """THE REGRESSION. Reported as "games with odds below this threshold are presented on the
+    cards", and reproduced exactly: a LIVE fixture served a frozen 1.10 double chance at
+    min_odds=1.2.
+
+    TWO GUARDS THAT WERE EACH SAFE ALONE. The live exemption skipped the response-level floor
+    because _pick_best had already applied it to the candidates; the kickoff freeze then made
+    the read path return a stored row before _pick_best runs. Neither was wrong by itself.
+    """
+    sport_id, fixture_id = live_short_priced_fixture
+    from app.predictions.pick_freeze import freeze_started_fixtures
+
+    async with async_session_factory() as db:
+        await freeze_started_fixtures(db)
+
+    rows = await _feed(sport_id, min_probability=0.6, min_odds=1.2)
+    row = next((f for f in rows if f["id"] == str(fixture_id)), None)
+
+    assert row is not None, "a live match must never vanish from a live-scores screen"
+    assert row["best_pick"] is None, "a 1.10 pick must not be shown at a 1.20 floor"
+
+
+async def test_the_same_frozen_pick_is_shown_once_the_slider_allows_it(live_short_priced_fixture):
+    """The other half: this withholds, it does not delete. Drop the floor and the SAME frozen
+    pick comes back -- unchanged, which is the whole point of freezing it."""
+    sport_id, fixture_id = live_short_priced_fixture
+    from app.predictions.pick_freeze import freeze_started_fixtures
+
+    async with async_session_factory() as db:
+        await freeze_started_fixtures(db)
+
+    rows = await _feed(sport_id, min_probability=0.6, min_odds=1.01)
+    row = next(f for f in rows if f["id"] == str(fixture_id))
+
+    assert row["best_pick"] is not None
+    assert row["best_pick"]["odds"] == pytest.approx(1.10)
+    assert row["best_pick"]["market"] == "double_chance"

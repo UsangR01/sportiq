@@ -1289,24 +1289,40 @@ async def list_fixtures(
     # its pick was too short-priced for the odds slider — a worse bug than the one being fixed.
     # A live match is being watched, not staked, so it is listed either way and simply carries
     # no pick badge when nothing clears the bar.
+    def _clears(pick) -> bool:
+        if pick is None:
+            return False
+        if min_probability is not None and pick.probability < min_probability:
+            return False
+        # An unpriced pick is deliberately never rejected -- see the note above on tennis.
+        return not (min_odds is not None and pick.odds is not None and pick.odds < min_odds)
+
     filtered = []
     for summary in summaries:
         if summary.status in ("postponed", "live"):
-            filtered.append(summary)
+            # LISTED EITHER WAY, BUT THE PICK STILL HAS TO CLEAR THE BAR, and until 2026-09-09
+            # only the first half was true. Reported as "games with odds below this threshold
+            # are presented on the cards", and reproduced: a LIVE fixture served a frozen 1.10
+            # double chance at min_odds=1.2.
+            #
+            # TWO GUARDS THAT WERE EACH SAFE ALONE. This exemption (2026-09-02) skipped the
+            # floors on the reasoning that _pick_best had already applied them to the
+            # candidates -- true at the time. The kickoff freeze (2026-09-04) then made the
+            # read path return a stored row and `continue` BEFORE _pick_best runs, so for a
+            # started fixture nothing applied them at all. Neither change was wrong on its own;
+            # the combination removed the only enforcement.
+            #
+            # Withholding the PICK rather than the FIXTURE is what keeps both properties: a
+            # live-scores screen must never lose the match being played, and the odds slider
+            # must never be shown a price it excluded.
+            filtered.append(
+                summary
+                if _clears(summary.best_pick)
+                else summary.model_copy(update={"best_pick": None})
+            )
             continue
         pick = summary.best_pick
-        if pick is None:
-            continue
-        if min_probability is not None and pick.probability < min_probability:
-            continue
-        # Still applied, but it can now only bite on a SETTLED fixture. _pick_best filters
-        # candidates by min_odds for everything else, so an upcoming card that reaches here
-        # has already chosen a pick clearing the floor -- and a fixture where no candidate
-        # could clear it has best_pick None and was dropped above.
-        #
-        # Settled fixtures deliberately keep the old behaviour: the card shows the pick it
-        # showed, and a slider may hide it but must never SWAP it for a different one.
-        if min_odds is not None and pick.odds is not None and pick.odds < min_odds:
+        if not _clears(pick):
             continue
         filtered.append(summary)
     return filtered
