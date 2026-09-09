@@ -729,6 +729,73 @@ def _expected_value(candidate: _MarketCandidate) -> float:
 NO_DEMONSTRATED_SIGNAL_MARKETS = frozenset({"corners_total"})
 
 
+def _surviving_candidates(
+    candidates: list, *, sport_slug: str | None = None, is_settled: bool = False
+) -> list:
+    """OUR guards, applied once. Everything here is a judgement the PRODUCT makes about whether
+    a pick is worth showing at all; nothing here is the user's to dial.
+
+    SPLIT OUT ON 2026-09-09 SO IT CAN BE FROZEN. The kickoff freeze stored a single winner
+    computed with no thresholds, and the user's sliders then rejected it -- with no swap-in,
+    because the floors filter CANDIDATES rather than the winner. Reported as the day's card
+    dropping 12 to 5, with Barcelona v Feyenoord (1X at 92%, priced 1.02) among the losses;
+    measured, 7 of the 8 lost cards had a qualifying alternative sitting right behind.
+
+    The fix is to freeze THIS list rather than its winner: our guards are settled at kickoff and
+    can never rewrite a published card, while the user's sliders keep choosing among what
+    survived them. See app/predictions/pick_freeze.py.
+    """
+    return [
+        c
+        for c in candidates
+        if c.probability is not None
+        # A pick at or below its market's base rate is the league average with a percentage
+        # sign on it, not a prediction about THIS fixture.
+        and (
+            (edge := _edge_over_base_rate(c, sport_slug)) is None or edge >= MIN_EDGE_OVER_BASE_RATE
+        )
+        # A vector that was mostly missing at inference time cannot say anything about THIS
+        # fixture, however confident the number looks. See MIN_FEATURE_COMPLETENESS.
+        #
+        # A settled fixture is judged against the floor that applied WHEN IT WAS LIVE rather
+        # than exempted outright -- see SETTLED_FEATURE_COMPLETENESS_FLOOR for why the outright
+        # exemption overshot and surfaced picks nobody was ever shown.
+        and (
+            c.feature_completeness is None
+            or c.feature_completeness >= _completeness_floor_for(c, is_settled)
+        )
+    ]
+
+
+def _rank_survivors(candidates: list, *, min_probability: float | None, min_odds: float | None):
+    """THE USER'S sliders, then the choice. Assumes OUR guards already ran.
+
+    Shared by the live path and the frozen one so the two cannot rank differently -- the exact
+    class of drift that had the Live tab and the feed showing different picks for one fixture.
+    """
+    candidates = [
+        c
+        for c in candidates
+        if (min_probability is None or c.probability >= min_probability)
+        # A candidate with NO price is deliberately kept. An odds floor is unanswerable for a
+        # sport with no odds coverage (tennis), and the earlier "no odds fails the floor" rule
+        # made every upcoming tennis fixture vanish the moment the slider moved off its minimum.
+        and (min_odds is None or c.odds is None or c.odds >= min_odds)
+    ]
+    priced = [c for c in candidates if c.odds is not None]
+    unpriced = [c for c in candidates if c.odds is None]
+    trustworthy = [
+        c for c in priced if c.probability - _implied_probability(c.odds) <= _max_edge_for(c.market)
+    ]
+    if trustworthy:
+        return max(trustworthy, key=lambda c: c.probability)
+    # Every priced candidate disagreed implausibly with the market. Rather than fall back to the
+    # very picks the guard just rejected, fall back only to unpriced ones.
+    if unpriced:
+        return max(unpriced, key=lambda c: c.probability)
+    return None
+
+
 def _pick_best(
     candidates: list[_MarketCandidate],
     min_probability: float | None = None,
@@ -824,26 +891,11 @@ def _pick_best(
     # Informativeness is enforced SEPARATELY, as a fixed quality bar rather than something the
     # user dials. The two answer different questions - "how likely do you want it" versus "does
     # this pick say anything at all" - and conflating them made both incomprehensible.
+    candidates = _surviving_candidates(candidates, sport_slug=sport_slug, is_settled=is_settled)
     candidates = [
         c
         for c in candidates
-        if c.probability is not None
-        and (min_probability is None or c.probability >= min_probability)
-        # A pick at or below its market's base rate is the league average with a percentage
-        # sign on it, not a prediction about THIS fixture.
-        and (
-            (edge := _edge_over_base_rate(c, sport_slug)) is None or edge >= MIN_EDGE_OVER_BASE_RATE
-        )
-        # A vector that was mostly missing at inference time cannot say anything about THIS
-        # fixture, however confident the number looks. See MIN_FEATURE_COMPLETENESS.
-        #
-        # A settled fixture is judged against the floor that applied WHEN IT WAS LIVE rather
-        # than exempted outright -- see SETTLED_FEATURE_COMPLETENESS_FLOOR for why the outright
-        # exemption overshot and surfaced picks nobody was ever shown.
-        and (
-            c.feature_completeness is None
-            or c.feature_completeness >= _completeness_floor_for(c, is_settled)
-        )
+        if (min_probability is None or c.probability >= min_probability)
         # THE ODDS FLOOR FILTERS CANDIDATES, NOT THE WINNER, and that asymmetry was a real bug.
         #
         # min_probability has always been applied here, before the pick is chosen, on the
@@ -859,26 +911,10 @@ def _pick_best(
         # made every upcoming tennis fixture vanish the moment the slider moved off its minimum.
         and (min_odds is None or c.odds is None or c.odds >= min_odds)
     ]
-    priced = [c for c in candidates if c.probability is not None and c.odds is not None]
-    unpriced = [c for c in candidates if c.probability is not None and c.odds is None]
-
-    trustworthy = [
-        c for c in priced if c.probability - _implied_probability(c.odds) <= _max_edge_for(c.market)
-    ]
-    if trustworthy:
-        return _candidate_to_best_pick(
-            max(trustworthy, key=lambda c: c.probability), with_drivers=True
-        )
-    # Every priced candidate disagreed implausibly with the market. Rather than fall back to
-    # the very picks the guard just rejected, fall back only to unpriced ones — and if there
-    # are none, return None so the caller drops the fixture entirely. "We have no pick we
-    # trust here" is a more honest answer than a confident-looking pick we've just measured
-    # as untrustworthy.
-    if unpriced:
-        return _candidate_to_best_pick(
-            max(unpriced, key=lambda c: c.probability), with_drivers=True
-        )
-    return None
+    # "We have no pick we trust here" is a more honest answer than a confident-looking pick we
+    # have just measured as untrustworthy, so None here means the caller drops the fixture.
+    chosen = _rank_survivors(candidates, min_probability=None, min_odds=None)
+    return None if chosen is None else _candidate_to_best_pick(chosen, with_drivers=True)
 
 
 def _prediction_precedence(prediction: Prediction) -> tuple:
@@ -909,7 +945,8 @@ async def _bulk_best_picks(
     line: float | None = None,
     min_probability: float | None = None,
     min_odds: float | None = None,
-) -> tuple[dict, dict]:
+    with_survivors: bool = False,
+) -> tuple:
     """Computes each fixture's single best pick, drawn from ACROSS every market (h2h, double
     chance, Over/Under goals, Over/Under corners) by default — per the user's explicit ask
     that the feed surface "the best odds with the highest probability of winning" regardless
@@ -1038,6 +1075,9 @@ async def _bulk_best_picks(
 
     best_picks: dict = {}
     all_picks: dict = {}
+    # Only built when the freeze asks for it -- see FrozenPick.candidates. Every other caller
+    # pays nothing for it.
+    survivors: dict = {}
     for fixture_id, prediction in latest_prediction_by_fixture.items():
         odds_by_market = {
             db_market: odds_by_fixture_market.get((fixture_id, db_market), [])
@@ -1121,14 +1161,26 @@ async def _bulk_best_picks(
 
         # Frozen wins outright. `continue` rather than falling through, so nothing below can
         # reconsider a card that has already been published.
+        settled = fixture_id in settled_fixtures
+        if with_survivors:
+            survivors[fixture_id] = _surviving_candidates(
+                candidates, sport_slug=sport_by_fixture.get(fixture_id), is_settled=settled
+            )
+
         frozen = frozen_by_fixture.get(fixture_id)
         if frozen is not None:
-            shown = apply_frozen(BestPick, frozen)
+            # THE SLIDERS ARE PASSED IN, not applied to the winner afterwards. min_odds is
+            # withheld for a settled fixture for the same reason it always was -- see below.
+            shown = apply_frozen(
+                BestPick,
+                frozen,
+                min_probability=min_probability,
+                min_odds=None if settled else min_odds,
+            )
             if shown is not None:
                 best_picks[fixture_id] = shown
             continue
 
-        settled = fixture_id in settled_fixtures
         best = _pick_best(
             candidates,
             min_probability=min_probability,
@@ -1145,6 +1197,8 @@ async def _bulk_best_picks(
         if best is not None:
             best_picks[fixture_id] = best
 
+    if with_survivors:
+        return best_picks, all_picks, survivors
     return best_picks, all_picks
 
 

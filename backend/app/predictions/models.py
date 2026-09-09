@@ -250,6 +250,25 @@ class FrozenPick(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # EVERY CANDIDATE THAT SURVIVED OUR GUARDS, not just the winner -- and this is the column
+    # that makes the freeze compatible with the user's own sliders.
+    #
+    # Storing only a winner was wrong and shipped broken for a day. That winner was computed
+    # with NO thresholds, so a near-certain favourite froze as its shortest price (Barcelona v
+    # Feyenoord: 1X at 92%, priced 1.02) and the 1.20 slider then rejected it -- with no swap-in,
+    # because the floors filter CANDIDATES rather than the winner. The day's card fell 12 to 5
+    # and 7 of the 8 losses had a qualifying alternative sitting right behind.
+    #
+    # The split that resolves it: OUR guards (market bars, base-rate edge, completeness) are
+    # frozen here, so no later bar or retrain can rewrite a published card; the USER's sliders
+    # run at read time against this list, so they still swap in an alternative instead of
+    # deleting the card.
+    #
+    # A list of {market, selection, line, probability, odds, feature_completeness}. NULL on rows
+    # written before this column existed -- those fall back to the stored winner, so an old row
+    # keeps working rather than going blank.
+    candidates: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+
     frozen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

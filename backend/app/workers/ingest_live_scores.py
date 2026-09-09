@@ -612,13 +612,18 @@ async def _freeze_started_cards() -> None:
     to break the live-score poll -- a missed freeze is retried next cycle, while a failed poll
     stops scores for everyone.
     """
-    from app.predictions.pick_freeze import freeze_started_fixtures
+    from app.predictions.pick_freeze import backfill_frozen_candidates, freeze_started_fixtures
 
     try:
         async with async_session_factory() as db:
             frozen = await freeze_started_fixtures(db)
-        if frozen:
-            logger.info("froze %d started cards", frozen)
+            # Rows written by the winner-only version have no candidate set, so their slider can
+            # only delete a card rather than swap in an alternative -- the reported bug. Repaired
+            # here rather than by a script because production repairs keep depending on a Render
+            # shell that keeps dropping.
+            repaired = await backfill_frozen_candidates(db)
+        if frozen or repaired:
+            logger.info("froze %d started cards, repaired %d", frozen, repaired)
     except Exception:
         logger.exception("freezing started cards failed - will retry next cycle")
 

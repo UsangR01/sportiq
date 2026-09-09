@@ -390,7 +390,13 @@ async def test_a_frozen_pick_below_the_floor_is_withheld(live_short_priced_fixtu
     row = next((f for f in rows if f["id"] == str(fixture_id)), None)
 
     assert row is not None, "a live match must never vanish from a live-scores screen"
-    assert row["best_pick"] is None, "a 1.10 pick must not be shown at a 1.20 floor"
+    shown = row["best_pick"]
+    # The 1.10 double chance must not be what surfaces. Whether ANOTHER candidate takes its
+    # place is the swap-in tested below; what this pins is that the excluded price is not shown.
+    assert shown is None or shown["odds"] is None or shown["odds"] >= 1.2
+    assert not (
+        shown and shown["market"] == "double_chance" and shown["odds"] == pytest.approx(1.10)
+    )
 
 
 async def test_the_same_frozen_pick_is_shown_once_the_slider_allows_it(live_short_priced_fixture):
@@ -408,3 +414,98 @@ async def test_the_same_frozen_pick_is_shown_once_the_slider_allows_it(live_shor
     assert row["best_pick"] is not None
     assert row["best_pick"]["odds"] == pytest.approx(1.10)
     assert row["best_pick"]["market"] == "double_chance"
+
+
+async def test_a_short_priced_favourite_yields_to_a_qualifying_alternative(
+    live_short_priced_fixture,
+):
+    """THE SECOND REGRESSION, and the reason candidates are frozen rather than a winner.
+
+    Reported as the day's card falling from 12 calls to 5 with "Barcelona game disappeared,
+    amongst others". Barcelona v Feyenoord froze as double chance 1X at 92% -- priced 1.02,
+    because it is near-certain -- and the 1.20 slider then deleted the card outright. Measured
+    on that day: 7 of the 8 lost cards had a qualifying alternative sitting right behind.
+
+    The floors filter CANDIDATES, not the winner. Freezing only a winner threw that away, which
+    is the same defect fixed once already on 2026-08-23 for the live path.
+    """
+    sport_id, fixture_id = live_short_priced_fixture
+    from app.predictions.pick_freeze import freeze_started_fixtures
+
+    # A second, longer-priced market this fixture also supports.
+    async with async_session_factory() as db:
+        db.add(
+            Odds(
+                fixture_id=fixture_id,
+                bookmaker="test-book",
+                market=OddsMarket.H2H,
+                home_odds=1.55,
+                draw_odds=4.00,
+                away_odds=6.00,
+                updated_at=datetime.now(UTC),
+            )
+        )
+        await db.commit()
+        await freeze_started_fixtures(db)
+
+    rows = await _feed(sport_id, min_probability=0.6, min_odds=1.2)
+    row = next(f for f in rows if f["id"] == str(fixture_id))
+
+    assert row["best_pick"] is not None, "the card must not vanish when an alternative exists"
+    assert row["best_pick"]["odds"] == pytest.approx(1.55)
+    assert row["best_pick"]["market"] == "h2h"
+
+
+async def test_lowering_the_slider_brings_back_the_short_priced_pick(live_short_priced_fixture):
+    """The same frozen candidate set, read at a lower floor, returns the shorter price -- which
+    is what "the sliders choose among candidates" means. Nothing was recomputed to achieve it."""
+    sport_id, fixture_id = live_short_priced_fixture
+    from app.predictions.pick_freeze import freeze_started_fixtures
+
+    async with async_session_factory() as db:
+        db.add(
+            Odds(
+                fixture_id=fixture_id,
+                bookmaker="test-book",
+                market=OddsMarket.H2H,
+                home_odds=1.55,
+                draw_odds=4.00,
+                away_odds=6.00,
+                updated_at=datetime.now(UTC),
+            )
+        )
+        await db.commit()
+        await freeze_started_fixtures(db)
+
+    rows = await _feed(sport_id, min_probability=0.6, min_odds=1.01)
+    row = next(f for f in rows if f["id"] == str(fixture_id))
+
+    # 1X at 0.816 outranks h2h/home at 0.655 once its price is allowed.
+    assert row["best_pick"]["market"] == "double_chance"
+    assert row["best_pick"]["odds"] == pytest.approx(1.10)
+
+
+async def test_our_guards_stay_frozen_while_the_sliders_stay_live(live_short_priced_fixture):
+    """THE WHOLE POINT OF THE SPLIT. Barring a market afterwards must still not change the card
+    -- the integrity fix -- even though the sliders now choose among the frozen candidates."""
+    sport_id, fixture_id = live_short_priced_fixture
+    from app.predictions.pick_freeze import freeze_started_fixtures
+
+    async with async_session_factory() as db:
+        await freeze_started_fixtures(db)
+
+    before = await _feed(sport_id, min_probability=0.6, min_odds=1.01)
+    shown = next(f for f in before if f["id"] == str(fixture_id))["best_pick"]
+
+    import app.fixtures.router as router
+
+    original = router.NO_DEMONSTRATED_SIGNAL_MARKETS
+    try:
+        router.NO_DEMONSTRATED_SIGNAL_MARKETS = frozenset({shown["market"]})
+        after = await _feed(sport_id, min_probability=0.6, min_odds=1.01)
+    finally:
+        router.NO_DEMONSTRATED_SIGNAL_MARKETS = original
+
+    still = next(f for f in after if f["id"] == str(fixture_id))["best_pick"]
+    assert still is not None, "a published card must survive its market being barred"
+    assert (still["market"], still["selection"]) == (shown["market"], shown["selection"])

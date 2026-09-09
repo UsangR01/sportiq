@@ -96,6 +96,65 @@ async def freeze_started_fixtures(db: AsyncSession, limit: int = FREEZE_PER_RUN)
     return frozen
 
 
+async def backfill_frozen_candidates(db: AsyncSession, limit: int = FREEZE_PER_RUN) -> int:
+    """Give a candidate set to rows frozen before that column existed.
+
+    Roughly 3,300 rows were written by the winner-only version, and each one is a card whose
+    slider can only delete rather than swap. They cannot be left: that IS the reported bug.
+
+    ON THE BEAT RATHER THAN IN A SCRIPT, because repairing production has repeatedly depended on
+    a Render shell that keeps dropping its connection -- the registry outage a few days ago sat
+    unfixed for forty minutes for exactly that reason. A sweep that heals itself needs nobody to
+    be available.
+
+    STATED PLAINLY: this re-derives the candidate set with TODAY's guards, because the set was
+    never recorded. Those rows are days old at most, but it is a reconstruction and the row's
+    frozen_at is left untouched so the original capture time survives.
+    """
+    stale = (
+        (
+            await db.execute(
+                select(FrozenPick.fixture_id)
+                .where(FrozenPick.candidates.is_(None))
+                .order_by(FrozenPick.frozen_at.desc())
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not stale:
+        return 0
+
+    from app.fixtures.router import _bulk_best_picks
+
+    repaired = 0
+    for start in range(0, len(stale), FREEZE_CHUNK):
+        chunk = list(stale[start : start + FREEZE_CHUNK])
+        _best, _all, surviving = await _bulk_best_picks(db, chunk, with_survivors=True)
+        rows = (
+            (await db.execute(select(FrozenPick).where(FrozenPick.fixture_id.in_(chunk))))
+            .scalars()
+            .all()
+        )
+        for row in rows:
+            row.candidates = [
+                {
+                    "market": c.market,
+                    "selection": c.selection,
+                    "line": c.line,
+                    "probability": c.probability,
+                    "odds": c.odds,
+                    "feature_completeness": c.feature_completeness,
+                }
+                for c in surviving.get(row.fixture_id, [])
+            ]
+            repaired += 1
+        await db.commit()
+    logger.info("gave a candidate set to %d frozen cards", repaired)
+    return repaired
+
+
 async def _freeze(db: AsyncSession, fixture_ids: list[uuid.UUID], *, reason: str) -> int:
     """Compute each fixture's card exactly as it renders now, and write it down once.
 
@@ -104,10 +163,13 @@ async def _freeze(db: AsyncSession, fixture_ids: list[uuid.UUID], *, reason: str
     """
     from app.fixtures.router import _bulk_best_picks
 
-    # NO CALLER THRESHOLDS. The pick is frozen; the user's sliders filter it at read time. Baking
-    # one user's slider position into a stored record would make the card personal to whoever
-    # happened to trigger the freeze.
-    best, _all = await _bulk_best_picks(db, fixture_ids)
+    # NO CALLER THRESHOLDS. The sliders are the user's and run at read time; baking one user's
+    # slider position into a stored record would make the card personal to whoever happened to
+    # trigger the freeze.
+    #
+    # `surviving` is the whole point -- see FrozenPick.candidates. The winner is stored too, but
+    # only so a row written before that column existed still renders.
+    best, _all, surviving = await _bulk_best_picks(db, fixture_ids, with_survivors=True)
 
     written = 0
     for fixture_id in fixture_ids:
@@ -123,6 +185,17 @@ async def _freeze(db: AsyncSession, fixture_ids: list[uuid.UUID], *, reason: str
                 feature_completeness=pick.feature_completeness if pick else None,
                 model_version=None,
                 prediction_created_at=pick.as_of if pick else None,
+                candidates=[
+                    {
+                        "market": c.market,
+                        "selection": c.selection,
+                        "line": c.line,
+                        "probability": c.probability,
+                        "odds": c.odds,
+                        "feature_completeness": c.feature_completeness,
+                    }
+                    for c in surviving.get(fixture_id, [])
+                ],
                 frozen_reason=reason,
             )
         )
@@ -132,12 +205,60 @@ async def _freeze(db: AsyncSession, fixture_ids: list[uuid.UUID], *, reason: str
     return written
 
 
-def apply_frozen(pick_class, frozen: FrozenPick):
-    """Rebuild a BestPick from a frozen row, or None when the card showed no pick.
+def apply_frozen(
+    pick_class,
+    frozen: FrozenPick,
+    *,
+    min_probability: float | None = None,
+    min_odds: float | None = None,
+):
+    """The card this fixture showed, chosen from its FROZEN candidates against the caller's own
+    sliders. None when nothing the user allows survived.
+
+    THE SLIDERS PICK AMONG CANDIDATES, THEY DO NOT VETO A WINNER, and getting that backwards is
+    what broke the feed for a day: a frozen 1.02 favourite was simply deleted at a 1.20 floor
+    instead of yielding to the goals line sitting behind it.
 
     `pick_class` is passed in rather than imported so this module stays free of the schemas
     package -- the same cycle avoidance as above.
     """
+    if frozen.candidates:
+        from app.fixtures.router import _MarketCandidate, _rank_survivors
+
+        chosen = _rank_survivors(
+            [
+                _MarketCandidate(
+                    selection=c["selection"],
+                    probability=c["probability"],
+                    odds=c["odds"],
+                    market=c["market"],
+                    line=c["line"],
+                    feature_completeness=c.get("feature_completeness"),
+                    as_of=frozen.prediction_created_at,
+                )
+                for c in frozen.candidates
+            ],
+            min_probability=min_probability,
+            min_odds=min_odds,
+        )
+        if chosen is None:
+            return None
+        return pick_class(
+            market=chosen.market,
+            selection=chosen.selection,
+            line=chosen.line,
+            probability=chosen.probability,
+            odds=chosen.odds,
+            feature_completeness=chosen.feature_completeness,
+            as_of=frozen.prediction_created_at,
+            previous_probability=None,
+            live_status=None,
+            drivers=None,
+            drivers_are_market_blind=False,
+        )
+
+    # A row written before `candidates` existed. Fall back to the stored winner rather than
+    # going blank, and let the caller's own filter judge it as it always did.
     if frozen.market is None:
         return None
     return pick_class(
