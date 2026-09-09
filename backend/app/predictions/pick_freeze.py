@@ -222,7 +222,9 @@ def apply_frozen(
     `pick_class` is passed in rather than imported so this module stays free of the schemas
     package -- the same cycle avoidance as above.
     """
-    if frozen.candidates:
+    # `is not None`, NOT truthiness -- an empty list means "nothing survived our guards",
+    # which is a record, while NULL means "never written down". See the caller.
+    if frozen.candidates is not None:
         from app.fixtures.router import _MarketCandidate, _rank_survivors
 
         chosen = _rank_survivors(

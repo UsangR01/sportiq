@@ -1171,12 +1171,39 @@ async def _bulk_best_picks(
         if frozen is not None:
             # THE SLIDERS ARE PASSED IN, not applied to the winner afterwards. min_odds is
             # withheld for a settled fixture for the same reason it always was -- see below.
-            shown = apply_frozen(
-                BestPick,
-                frozen,
-                min_probability=min_probability,
-                min_odds=None if settled else min_odds,
-            )
+            # `is not None`, NOT truthiness. An EMPTY list is a real record -- "nothing
+            # survived our guards at kickoff" -- and collapsing it into NULL lets a card GAIN a
+            # pick it never showed the moment a bar is lifted, which is the same defect as
+            # losing one it did. Caught by test_a_card_that_showed_no_pick_cannot_gain_one.
+            if frozen.candidates is not None:
+                shown = apply_frozen(
+                    BestPick,
+                    frozen,
+                    min_probability=min_probability,
+                    min_odds=None if settled else min_odds,
+                )
+            else:
+                # A ROW FROM THE WINNER-ONLY VERSION, which recorded no candidate set. There is
+                # genuinely nothing stored to choose among, so the honest fallback is the
+                # pre-freeze behaviour: rank today's guarded candidates against the user's own
+                # sliders. Serving the stored winner instead is what deleted 7 of 8 cards on
+                # 2026-09-09, because a slider can only reject a lone winner, never swap it.
+                #
+                # TRANSITIONAL AND SELF-LIMITING: these rows regain their guarantee the moment
+                # backfill_frozen_candidates reaches them, and no NEW row is ever written
+                # without a candidate set. It runs on the worker; this keeps the feed correct
+                # meanwhile, because the API redeploys reliably and the worker has twice now
+                # lagged it by the better part of an hour.
+                chosen = _rank_survivors(
+                    _surviving_candidates(
+                        candidates,
+                        sport_slug=sport_by_fixture.get(fixture_id),
+                        is_settled=settled,
+                    ),
+                    min_probability=min_probability,
+                    min_odds=None if settled else min_odds,
+                )
+                shown = None if chosen is None else _candidate_to_best_pick(chosen)
             if shown is not None:
                 best_picks[fixture_id] = shown
             continue
