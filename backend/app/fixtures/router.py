@@ -1175,12 +1175,20 @@ async def _bulk_best_picks(
             # survived our guards at kickoff" -- and collapsing it into NULL lets a card GAIN a
             # pick it never showed the moment a bar is lifted, which is the same defect as
             # losing one it did. Caught by test_a_card_that_showed_no_pick_cannot_gain_one.
+            # min_odds IS applied to a settled fixture here, unlike the live path below, and
+            # the reason it can now be is the freeze itself. The old rule withheld it because
+            # ranking ran against TODAY's candidates, so a slider would have changed which pick
+            # the record showed -- inventing a pick nobody was shown. The candidate set is fixed
+            # at kickoff now, so choosing among it is choosing from the menu that was really
+            # there. Withholding the floor instead only let the response filter DELETE the card:
+            # Barcelona v Feyenoord froze at 1X 92% priced 1.02, and rather than yield to the
+            # goals line behind it the whole card disappeared.
             if frozen.candidates is not None:
                 shown = apply_frozen(
                     BestPick,
                     frozen,
                     min_probability=min_probability,
-                    min_odds=None if settled else min_odds,
+                    min_odds=min_odds,
                 )
             else:
                 # A ROW FROM THE WINNER-ONLY VERSION, which recorded no candidate set. There is
@@ -1201,7 +1209,7 @@ async def _bulk_best_picks(
                         is_settled=settled,
                     ),
                     min_probability=min_probability,
-                    min_odds=None if settled else min_odds,
+                    min_odds=min_odds,
                 )
                 shown = None if chosen is None else _candidate_to_best_pick(chosen)
             if shown is not None:

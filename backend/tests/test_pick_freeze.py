@@ -509,3 +509,41 @@ async def test_our_guards_stay_frozen_while_the_sliders_stay_live(live_short_pri
     still = next(f for f in after if f["id"] == str(fixture_id))["best_pick"]
     assert still is not None, "a published card must survive its market being barred"
     assert (still["market"], still["selection"]) == (shown["market"], shown["selection"])
+
+
+async def test_a_completed_fixture_also_yields_to_a_qualifying_alternative(
+    live_short_priced_fixture,
+):
+    """THE PRODUCTION CASE, and the one my first swap-in test missed by using a LIVE fixture.
+
+    Every card the user reported losing was COMPLETED -- Barcelona, Stuttgart, Rangers, PSG --
+    and a settled fixture deliberately had min_odds withheld from ranking, on the reasoning that
+    a slider must not change WHICH pick the record shows. That reasoning predates the freeze:
+    with the candidate set now fixed at kickoff, choosing among it is not inventing a pick
+    nobody was shown, and withholding the floor only lets the response filter delete the card.
+    """
+    sport_id, fixture_id = live_short_priced_fixture
+    from app.predictions.pick_freeze import freeze_started_fixtures
+
+    async with async_session_factory() as db:
+        fixture = (await db.execute(select(Fixture).where(Fixture.id == fixture_id))).scalar_one()
+        fixture.status = FixtureStatus.COMPLETED
+        db.add(
+            Odds(
+                fixture_id=fixture_id,
+                bookmaker="test-book",
+                market=OddsMarket.H2H,
+                home_odds=1.55,
+                draw_odds=4.00,
+                away_odds=6.00,
+                updated_at=datetime.now(UTC),
+            )
+        )
+        await db.commit()
+        await freeze_started_fixtures(db)
+
+    rows = await _feed(sport_id, min_probability=0.6, min_odds=1.2)
+    row = next((f for f in rows if f["id"] == str(fixture_id)), None)
+
+    assert row is not None, "a settled card must not vanish when an alternative clears the floor"
+    assert row["best_pick"]["odds"] == pytest.approx(1.55)
