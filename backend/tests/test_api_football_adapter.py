@@ -73,6 +73,16 @@ def test_league_ids_match_therundown_slugs_where_covered():
         # probed 2026-08-19: TheRundown carries the UCL (16) but not these two
         "uel",
         "uecl",
+        # The six added 2026-09-15. Probed the same way -- TheRundown's own /sports list
+        # (36 entries) carries NONE of them, so API-Football's /odds is their only source, which
+        # is the same arrangement Brasileirão has run on since it was added. Measured on a real
+        # upcoming fixture each: 8-9 bookmakers pricing 1X2, double chance, goals and corners.
+        "eredivisie",
+        "primeira_liga",
+        "belgian_pro",
+        "super_lig",
+        "bundesliga_2",
+        "serie_b",
     }
     assert set(LEAGUE_IDS.keys()) == {
         "epl",
@@ -97,6 +107,12 @@ def test_league_ids_match_therundown_slugs_where_covered():
         "ucl",
         "uel",
         "uecl",
+        "eredivisie",
+        "primeira_liga",
+        "belgian_pro",
+        "super_lig",
+        "bundesliga_2",
+        "serie_b",
     }
     for league_slug in LEAGUE_IDS:
         if league_slug in no_rundown_coverage:

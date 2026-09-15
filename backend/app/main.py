@@ -56,6 +56,26 @@ def create_app() -> FastAPI:
         except Exception:  # pragma: no cover - startup must survive anything here
             logger.exception("serving-model reconciliation failed at API startup")
 
+    @app.on_event("startup")
+    async def _sync_league_catalog() -> None:
+        """Give every catalogued league a row to attach fixtures to.
+
+        Ingest iterates League ROWS, so a league added to the catalog but never seeded is simply
+        never fetched -- silently. Seeding has always been a script run by hand in a production
+        shell, and that shell is the same one that left the serving registry broken for forty
+        minutes. Additive only; see app/sports/bootstrap.py.
+
+        NEVER FATAL, for the same reason as the reconciliation above.
+        """
+        try:
+            from app.core.database import async_session_factory
+            from app.sports.bootstrap import ensure_football_leagues
+
+            async with async_session_factory() as db:
+                await ensure_football_leagues(db)
+        except Exception:  # pragma: no cover - startup must survive anything here
+            logger.exception("league catalog sync failed at API startup")
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,

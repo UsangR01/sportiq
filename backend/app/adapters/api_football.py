@@ -71,6 +71,18 @@ LEAGUE_IDS: dict[str, int] = {
     "j1_league": 98,
     "czech_first": 345,
     "austria_bundesliga": 218,
+    # Added 2026-09-15. Every id confirmed live via /leagues?id=X by the NAME AND COUNTRY the API
+    # returned -- ids are never assumed here, and a wrong one is self-evident that way. All six
+    # use the ordinary Aug-May window labelled by the START year, so none joins
+    # CALENDAR_YEAR_SEASON_LEAGUES or END_YEAR_SEASON_LEAGUES; checked per league, because that
+    # assumption is what Brasileirão and the J1 League each broke. See app/sports/catalog.py for
+    # the coverage measurements that chose them.
+    "eredivisie": 88,
+    "primeira_liga": 94,
+    "belgian_pro": 144,
+    "super_lig": 203,
+    "bundesliga_2": 79,
+    "serie_b": 136,
 }
 
 # Leagues whose season runs on the calendar year (Jan-Dec) rather than the European Aug-May

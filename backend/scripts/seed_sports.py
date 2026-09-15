@@ -14,6 +14,7 @@ import asyncio
 from sqlalchemy import select
 
 from app.core.database import async_session_factory
+from app.sports.catalog import FOOTBALL_LEAGUES
 from app.sports.models import League, Sport
 
 
@@ -80,34 +81,6 @@ async def seed_nba() -> None:
 # resolve to nothing for that league. Brasileirão has no TheRundown odds coverage (confirmed
 # live — see CLAUDE.md) but that's a graceful no-op (ingest_odds.py), not a reason to exclude
 # it from fixture/stats/prediction ingestion, which don't depend on TheRundown at all.
-FOOTBALL_LEAGUES = [
-    ("epl", "Premier League", "England"),
-    ("ligue1", "Ligue 1", "France"),
-    ("bundesliga", "Bundesliga", "Germany"),
-    ("laliga", "La Liga", "Spain"),
-    ("seriea", "Serie A", "Italy"),
-    ("brasileirao", "Série A", "Brazil"),
-    ("scottish_prem", "Scottish Premiership", "Scotland"),
-    ("championship", "Championship", "England"),
-    ("ucl", "Champions League", "Europe"),
-    ("uel", "Europa League", "Europe"),
-    ("uecl", "Conference League", "Europe"),
-    ("mls", "Major League Soccer", "USA"),
-    ("csl", "Chinese Super League", "China"),
-    # The nine Tier-1 leagues pooled into the trained model (train_football.py's LEAGUES).
-    # Seeded so ingestion has a League row to attach fixtures to; TheRundown covers only the
-    # J1 League of these, so the rest get their odds from API-Football alone, which is the
-    # same graceful per-adapter fallback Brasileirão already relies on.
-    ("allsvenskan", "Allsvenskan", "Sweden"),
-    ("eliteserien", "Eliteserien", "Norway"),
-    ("veikkausliiga", "Veikkausliiga", "Finland"),
-    ("ekstraklasa", "Ekstraklasa", "Poland"),
-    ("denmark_superliga", "Superliga", "Denmark"),
-    ("liga_i", "Liga I", "Romania"),
-    ("j1_league", "J1 League", "Japan"),
-    ("czech_first", "Czech First League", "Czech-Republic"),
-    ("austria_bundesliga", "Bundesliga", "Austria"),
-]
 
 
 async def seed_football() -> None:

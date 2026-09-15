@@ -31,6 +31,7 @@ const COUNTRY_FLAG_IMAGES: Record<string, number> = {
   "New Zealand": require("../assets/flags/newzealand.png"),
   Switzerland: require("../assets/flags/switzerland.png"),
   Sweden: require("../assets/flags/sweden.png"),
+  Turkey: require("../assets/flags/turkey.png"),
   Belgium: require("../assets/flags/belgium.png"),
   Romania: require("../assets/flags/romania.png"),
   Argentina: require("../assets/flags/argentina.png"),

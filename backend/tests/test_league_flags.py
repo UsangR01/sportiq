@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SEED_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "seed_sports.py"
+CATALOG = Path(__file__).resolve().parents[1] / "app" / "sports" / "catalog.py"
 FLAG_MODULE = REPO_ROOT / "mobile" / "lib" / "countryFlags.tsx"
 
 
@@ -26,7 +26,9 @@ def _normalise(value: str) -> str:
 
 
 def _seeded_countries() -> set[str]:
-    body = SEED_SCRIPT.read_text(encoding="utf-8")
+    # Reads app/sports/catalog.py since 2026-09-15; the list moved out of seed_sports.py so the
+    # API could seed at startup too, and this test follows the list rather than the file.
+    body = CATALOG.read_text(encoding="utf-8")
     # ("slug", "Display Name", "Country") — the third element of each league tuple.
     return {
         match.group(3)
