@@ -232,6 +232,46 @@ TARGETS = [
     ("czech_first", "comp_9766", "22/23", 2022),
     # Austria: 24/25 and earlier sampled 0/2 in every season - a genuine upstream gap.
     ("austria_bundesliga", "comp_4893", "25/26", 2025),
+
+    # Six leagues added 2026-09-15. Competition ids read from TheStatsAPI's OWN /competitions
+    # list, never guessed -- this file already records three invented ids 404ing and a result
+    # being discarded because of it. Season labels likewise read from each competition's
+    # /seasons response: the provider renames them ("Primeira Liga 22/23" became "Liga Portugal
+    # 24/25", "2nd Bundesliga" became "2. Bundesliga"), and the loader matches on the "YY/YY"
+    # substring, which survives that.
+    #
+    # xG presence sampled before committing to the run: 10-12 of 12 finished matches per league
+    # carried a real expected_goals. Read from /matches/{id}/stats, which is where it lives --
+    # a first probe against the LIST endpoint reported 0 for every league including Eredivisie,
+    # the same false negative this file's own docstring warns about.
+    #
+    # 22/23..25/26 matches what every other European league here collects; the current 26/27
+    # season is deliberately excluded, as it is for all of them, because the training split
+    # ends at 2025.
+    ("eredivisie", "comp_3809", "22/23", 2022),
+    ("eredivisie", "comp_3809", "23/24", 2023),
+    ("eredivisie", "comp_3809", "24/25", 2024),
+    ("eredivisie", "comp_3809", "25/26", 2025),
+    ("primeira_liga", "comp_8385", "22/23", 2022),
+    ("primeira_liga", "comp_8385", "23/24", 2023),
+    ("primeira_liga", "comp_8385", "24/25", 2024),
+    ("primeira_liga", "comp_8385", "25/26", 2025),
+    ("belgian_pro", "comp_8531", "22/23", 2022),
+    ("belgian_pro", "comp_8531", "23/24", 2023),
+    ("belgian_pro", "comp_8531", "24/25", 2024),
+    ("belgian_pro", "comp_8531", "25/26", 2025),
+    ("super_lig", "comp_9235", "22/23", 2022),
+    ("super_lig", "comp_9235", "23/24", 2023),
+    ("super_lig", "comp_9235", "24/25", 2024),
+    ("super_lig", "comp_9235", "25/26", 2025),
+    ("bundesliga_2", "comp_0406", "22/23", 2022),
+    ("bundesliga_2", "comp_0406", "23/24", 2023),
+    ("bundesliga_2", "comp_0406", "24/25", 2024),
+    ("bundesliga_2", "comp_0406", "25/26", 2025),
+    ("serie_b", "comp_5450", "22/23", 2022),
+    ("serie_b", "comp_5450", "23/24", 2023),
+    ("serie_b", "comp_5450", "24/25", 2024),
+    ("serie_b", "comp_5450", "25/26", 2025),
 ]
 
 

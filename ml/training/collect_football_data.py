@@ -140,6 +140,28 @@ LEAGUE_CONFIGS: dict[str, dict] = {
         "rundown_sport_id": None,
         "seasons": SEASONS + [2026],
     },
+    # --- Six added 2026-09-15, and unlike the nine above these ARE in LEAGUE_IDS -------------
+    # The caution above still stands and is why it is worth restating rather than silently
+    # contradicting: adding a league to LEAGUE_IDS makes fetch_injuries poll it every 30
+    # minutes. These are in that map because they are SERVED -- seeded, ingesting fixtures and
+    # odds, and being predicted today -- which is exactly the state the nine were NOT in when
+    # that comment was written. Cost measured at roughly 1% of the daily quota.
+    #
+    # TheRundown carries none of them (checked against its own /sports list), so
+    # rundown_sport_id is None throughout and API-Football's /odds is the only source -- 8-9
+    # real bookmakers on a genuine upcoming fixture, checked per league rather than trusting
+    # the coverage.odds flag, which this file already records as lying about Allsvenskan.
+    #
+    # `seasons` carries 2026 for the same reason the nine do: their current season runs
+    # 2026-08 -> 2027-05 and API-Football labels it by the START year, so a log stopping at
+    # 2025 would leave every current fixture predicted from stale form -- stale-but-present,
+    # which feature_completeness cannot see because it measures presence, not freshness.
+    "eredivisie": {"league_id": 88, "rundown_sport_id": None, "seasons": SEASONS + [2026]},
+    "primeira_liga": {"league_id": 94, "rundown_sport_id": None, "seasons": SEASONS + [2026]},
+    "belgian_pro": {"league_id": 144, "rundown_sport_id": None, "seasons": SEASONS + [2026]},
+    "super_lig": {"league_id": 203, "rundown_sport_id": None, "seasons": SEASONS + [2026]},
+    "bundesliga_2": {"league_id": 79, "rundown_sport_id": None, "seasons": SEASONS + [2026]},
+    "serie_b": {"league_id": 136, "rundown_sport_id": None, "seasons": SEASONS + [2026]},
 }
 
 # Collection is stageable because the per-fixture endpoints genuinely can't all run in one
