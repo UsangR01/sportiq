@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     therundown_api_key: str = ""
     api_football_key: str = ""
     balldontlie_api_key: str = ""
+    # ATP/WTA request budget, in requests per minute. 54 sits ~10% under ALL-STAR's 60 -- the
+    # same margin the ranking collector has run at without a 429 (RANK_REQUEST_DELAY_SECONDS=1.1).
+    # Deliberately NOT GOAT's 600 even while GOAT is paid for: pacing at the lower tier's rate
+    # first means the downgrade changes nothing that has not already run under real load. 0
+    # disables pacing (the test suite). See app/adapters/rate_limit.py.
+    balldontlie_tennis_requests_per_minute: int = 54
     rotowire_api_key: str = ""
     highlightly_api_key: str = ""
     # Second corner-statistics source behind API-Football, and the ONLY one for

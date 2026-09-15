@@ -559,9 +559,33 @@ async def _get_with_retry(client: httpx.AsyncClient, path: str, params: dict) ->
     shared HTTP-helper module exists in this codebase today (api_football.py has no retry
     logic at all), so factoring now would be premature abstraction against actual precedent.
     """
+    from app.adapters.rate_limit import acquire_slot, is_denied, remember_denied
+    from app.core.config import get_settings
+
+    # The tour is read off the client rather than passed in, so every one of this module's call
+    # sites is covered without changing any of them -- and so a future call site cannot forget.
+    namespace = "wta" if "/wta/" in str(client.base_url) else "atp"
+    endpoint = path.strip("/").split("/", 1)[0]
+
+    # A request this subscription cannot make costs nothing and never reaches the network.
+    # Raised as a genuine HTTPStatusError, so every caller's existing handling applies unchanged.
+    if await is_denied(namespace, endpoint):
+        denied = httpx.Response(401, request=httpx.Request("GET", f"{client.base_url}{path}"))
+        denied.raise_for_status()
+
+    requests_per_minute = get_settings().balldontlie_tennis_requests_per_minute
     response = None
     for attempt in range(MAX_RETRIES):
+        # EVERY request to BallDontLie tennis passes through this one line -- confirmed by audit
+        # when pacing was added, which is why pacing here covers the whole adapter. Keep it that
+        # way: a call that bypasses _get_with_retry bypasses the budget.
+        await acquire_slot(namespace, requests_per_minute)
         response = await client.get(path, params=params)
+        if response.status_code in (401, 403):
+            # NOT a transient failure to retry: the tier does not include this endpoint. Only
+            # these two codes are remembered -- a 429 or a 5xx says nothing about entitlement.
+            await remember_denied(namespace, endpoint)
+            response.raise_for_status()
         if response.status_code == 429 and attempt < MAX_RETRIES - 1:
             retry_after = response.headers.get("Retry-After")
             delay = float(retry_after) if retry_after else min(2**attempt, 30)

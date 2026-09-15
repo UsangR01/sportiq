@@ -61,6 +61,11 @@ if urlparse(TEST_DATABASE_URL).path == urlparse(_CONFIGURED_URL).path:
     )
 
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL
+# The BallDontLie tennis limiter spaces requests ~1.1s apart in production. The suite drives the
+# adapter through httpx.MockTransport, where pacing only adds wall-clock time, so it is off here
+# -- set BEFORE any app import for the same lru_cache reason as DATABASE_URL above. The limiter's
+# own tests set a rate explicitly.
+os.environ.setdefault("BALLDONTLIE_TENNIS_REQUESTS_PER_MINUTE", "0")
 
 # Only now is it safe to import anything that reads settings.
 from app.core.database import engine  # noqa: E402
