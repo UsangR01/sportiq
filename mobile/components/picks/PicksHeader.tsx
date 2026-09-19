@@ -76,11 +76,17 @@ export function PicksHeader({
   );
 }
 
-/** The one control in this row: three stacked bars of descending width.
+/** The one control in this row: a sliders glyph — three tracks, each with a handle.
  *
- * A FILTER GLYPH, NOT A HAMBURGER, and the descending widths are the whole point — this button
- * opens filters, and three equal bars is the universal sign for "navigation menu". Promising
- * navigation and delivering a filter sheet is a worse failure than an unfamiliar glyph.
+ * A FILTER GLYPH, NOT A HAMBURGER. The spec asks for "three stacked bars of descending width
+ * (15/9/13)" and calls it a filter glyph, but that was built and REPORTED AS A HAMBURGER on a
+ * real device — correctly, because three stacked horizontal lines mean "navigation menu"
+ * regardless of their widths, and 15/9/13 is not even monotonic, so the variation reads as
+ * sloppy rather than as meaning. The handles are what make this unmistakable: a track with a
+ * knob on it is the universal mark for adjusting a value, which is exactly what the sheet does.
+ *
+ * Offset handles, not aligned ones — three knobs in a column reads as a bulleted list. Each sits
+ * at a different position along its own track, so the glyph says "settings at different values".
  *
  * THE DOT IS THE REASON THIS IS WORTH DOING. A card can vanish from the feed because a slider
  * sits where the user left it days ago, and with the controls behind a sheet there was nothing
@@ -88,6 +94,12 @@ export function PicksHeader({
  * makes a non-default filter visible without opening anything. It rings itself in `bg` so it
  * stays legible where it overlaps the button's own fill.
  */
+const GLYPH_WIDTH = 16;
+const KNOB = 7;
+// Fractions along each track, deliberately unequal and non-monotonic so the three knobs never
+// line up into a vertical row.
+const KNOB_POSITIONS = [0.62, 0.15, 0.4];
+
 function FilterButton({ onPress, active }: { onPress: () => void; active: boolean }) {
   const { colors } = useTheme();
   return (
@@ -104,12 +116,30 @@ function FilterButton({ onPress, active }: { onPress: () => void; active: boolea
         backgroundColor: colors.surfaceAlt,
       }}
     >
-      <View style={{ gap: 3.5 }}>
-        {[15, 9, 13].map((width, i) => (
+      <View style={{ gap: 3 }}>
+        {KNOB_POSITIONS.map((at, i) => (
           <View
             key={i}
-            style={{ width, height: 1.8, borderRadius: 1, backgroundColor: colors.text }}
-          />
+            style={{ width: GLYPH_WIDTH, height: KNOB, justifyContent: "center" }}
+          >
+            <View style={{ height: 1.8, borderRadius: 1, backgroundColor: colors.text }} />
+            <View
+              style={{
+                position: "absolute",
+                left: at * (GLYPH_WIDTH - KNOB),
+                width: KNOB,
+                height: KNOB,
+                borderRadius: KNOB / 2,
+                // OUTLINED, not filled. A filled dot ringed in the button's own colour leaves a
+                // 3px core at this size and reads as a blob on a line; an open circle whose
+                // stroke matches the track's own thickness reads unmistakably as a handle, and
+                // its fill hides the track passing behind it.
+                backgroundColor: colors.surfaceAlt,
+                borderWidth: 1.8,
+                borderColor: colors.text,
+              }}
+            />
+          </View>
         ))}
       </View>
       {active && (
