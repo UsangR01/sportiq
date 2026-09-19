@@ -3,6 +3,7 @@ import { router } from "expo-router";
 import { useState } from "react";
 import { ActivityIndicator, Pressable, RefreshControl, ScrollView, Text, View } from "react-native";
 
+import { AdSlot, MIN_SAVED_FOR_AD, useAdsEnabled } from "@/lib/ads";
 import type { WatchlistItem } from "@/lib/api/types";
 import { getPreferences } from "@/lib/api/users";
 import { listWatchlist, removeFromWatchlist } from "@/lib/api/watchlist";
@@ -61,6 +62,7 @@ export default function SavedScreen() {
   });
 
   const items = watchlistQuery.data ?? [];
+  const adsEnabled = useAdsEnabled();
   // Upcoming first: a saved list answers "what am I waiting on". Finished ones are KEPT rather
   // than hidden — hiding settled cards would quietly delete the losses, which is the same bias
   // that makes a retroactively filtered track record look better than it was.
@@ -172,6 +174,15 @@ export default function SavedScreen() {
                 />
               ))}
             </Section>
+          )}
+
+          {/* Only once the list is worth interrupting. Below three saved picks the unit
+              collapses rather than padding a near-empty screen — and it sits AFTER both
+              sections, so it can never separate a pick from its own heading. */}
+          {adsEnabled && items.length >= MIN_SAVED_FOR_AD && (
+            <View style={{ marginTop: GAP.card }}>
+              <AdSlot id="saved_native_1" />
+            </View>
           )}
         </ScrollView>
       )}

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { RefreshControl, ScrollView, Text, View } from "react-native";
 
 import { GuestBanner } from "@/components/GuestBanner";
+import { AdSlot, MIN_FEED_FOR_MPU, placeFeedAds, useAdsEnabled } from "@/lib/ads";
 import { DateStepper, startOfDay } from "@/components/picks/DateStepper";
 import { FilterSheet } from "@/components/picks/FilterSheet";
 import { LeagueCard, LeagueGroupHeader } from "@/components/picks/LeagueGroup";
@@ -112,6 +113,9 @@ export default function PicksScreen() {
   const isGuest = !accessToken;
 
   const store = usePicksStore();
+  // WHETHER, not what. False today for everyone — no provider is registered — so every slot
+  // below collapses and the feed renders exactly as it does now.
+  const adsEnabled = useAdsEnabled();
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -317,7 +321,8 @@ export default function PicksScreen() {
             </Text>
           </View>
         ) : (
-          groups.map((group) => (
+          placeFeedAds(groups, (group) => group.matches.length, adsEnabled).map(
+            ({ group, adAfter }) => (
             <View key={group.key}>
               <LeagueGroupHeader
                 title={group.title}
@@ -351,8 +356,26 @@ export default function PicksScreen() {
                   />
                 ))}
               </LeagueCard>
+              {/* Feed furniture rather than an interruption: the unit sits inside the group's
+                  own bottom spacing, after a whole league rather than between two matches.
+                  Renders nothing until a provider exists — see lib/ads. */}
+              {adAfter && (
+                <View style={{ marginTop: GAP.card }}>
+                  <AdSlot id={adAfter} />
+                </View>
+              )}
             </View>
-          ))
+            )
+          )
+        )}
+
+        {/* End-of-feed MPU, and it COLLAPSES on a short day rather than padding it. This app's
+            own odds floor can legitimately empty a card, and an advert is the last thing that
+            should fill a screen which had no picks to show. */}
+        {adsEnabled && visibleCount >= MIN_FEED_FOR_MPU && (
+          <View style={{ marginTop: GAP.leagueGroup }}>
+            <AdSlot id="picks_mpu_1" />
+          </View>
         )}
       </ScrollView>
 
