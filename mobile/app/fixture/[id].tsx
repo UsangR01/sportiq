@@ -4,6 +4,7 @@ import { Pressable, ScrollView, Text, View } from "react-native";
 
 import { LiveBadge } from "@/components/fixtures/LiveBadge";
 import { getFixture } from "@/lib/api/fixtures";
+import { FORM_RUNS, ONE_LINE, RADIUS, TYPE, useTheme } from "@/lib/theme";
 import type { ComparisonStat, ExtraMarketsResponse, HeadToHeadResponse } from "@/lib/api/types";
 import { addToWatchlist, listWatchlist, removeFromWatchlist } from "@/lib/api/watchlist";
 import { useAuthStore } from "@/store/authStore";
@@ -369,17 +370,90 @@ function FormRow({ team, form }: { team: string; form: string | null }) {
 }
 
 /** Letter AND colour, never colour alone -- the same accessibility rule the win/loss verdict
- * badges follow, and the reason they carry a tick or a cross rather than just going green. */
+ * badges follow, and the reason they carry a tick or a cross rather than just going green.
+ *
+ * The letter was carrying more of that load than intended: the previous Tailwind fills
+ * (`bg-green-600`/`bg-red-500`/`bg-gray-400`) put white text at ~3.3/3.3/2.2 against white, so
+ * the colour half was failing AA on its own. FORM_RUNS is tuned for exactly this -- see its
+ * definition in lib/theme/tokens.ts.
+ */
 function FormChip({ result }: { result: string }) {
-  const style =
-    result === "W"
-      ? "bg-green-600"
-      : result === "L"
-        ? "bg-red-500"
-        : "bg-gray-400";
+  const fill =
+    result === "W" ? FORM_RUNS.W : result === "L" ? FORM_RUNS.L : FORM_RUNS.D;
   return (
-    <View className={`h-6 w-6 items-center justify-center rounded-full ${style}`}>
+    <View
+      style={{ backgroundColor: fill }}
+      className="h-6 w-6 items-center justify-center rounded-full"
+    >
       <Text className="text-xs font-bold text-white">{result}</Text>
+    </View>
+  );
+}
+
+/** The three-column wins/draws/wins totals card.
+ *
+ * Deliberately the SAME shape as the Picks summary strip — eyebrow over value, 14px eyebrow box,
+ * 5px gap, 20px value, 10px vertical padding — so the two read as one family rather than as two
+ * teams' work. It was previously the inverse (value on top, a sentence-case caption beneath) at
+ * a different size, which is the sort of near-miss that makes an app feel assembled.
+ *
+ * Inline token styles rather than this file's surrounding Tailwind classes, because the strip it
+ * has to match is built from tokens and two colour systems cannot be kept in step by eye.
+ */
+function TotalsCard({ columns }: { columns: { label: string; value: number }[] }) {
+  const { colors } = useTheme();
+  return (
+    <View
+      style={{
+        flexDirection: "row",
+        backgroundColor: colors.surface,
+        borderWidth: 1,
+        borderColor: colors.border,
+        borderRadius: RADIUS.control,
+        paddingVertical: 10,
+        paddingHorizontal: 4,
+        marginBottom: 12,
+      }}
+    >
+      {columns.map((column, index) => (
+        <View
+          key={column.label}
+          style={{
+            flex: 1,
+            alignItems: "center",
+            paddingHorizontal: 6,
+            borderLeftWidth: index === 0 ? 0 : 1,
+            borderLeftColor: index === 0 ? "transparent" : colors.border,
+          }}
+        >
+          {/* `alignSelf: "stretch"` is load-bearing, not tidiness. Inside a column that centres
+              its children, both this box and the Text size to their CONTENT, so a label wider
+              than the column overflows symmetrically — "KAWASAKI FRONTALE WINS" rendered past
+              the card's left border entirely, and numberOfLines never engaged because the Text
+              had no width to overflow. Stretching gives the ellipsis something to bite on. */}
+          <View
+            style={{
+              height: 14,
+              alignSelf: "stretch",
+              justifyContent: "center",
+              marginBottom: 5,
+            }}
+          >
+            <Text
+              {...ONE_LINE}
+              style={[
+                TYPE.eyebrowSmall,
+                { color: colors.textFaint, lineHeight: 11.4, textAlign: "center" },
+              ]}
+            >
+              {column.label}
+            </Text>
+          </View>
+          <Text style={[TYPE.summaryValue, { lineHeight: 20, color: colors.text }]}>
+            {column.value}
+          </Text>
+        </View>
+      ))}
     </View>
   );
 }
@@ -397,30 +471,13 @@ function HeadToHead({
     <View className="mb-6">
       <Text className="mb-2 text-sm font-semibold uppercase text-gray-400">Head to Head</Text>
 
-      <View className="mb-3 flex-row rounded-lg bg-gray-50 p-3 dark:bg-gray-900">
-        <View className="flex-1 items-center">
-          <Text className="text-lg font-bold text-gray-900 dark:text-gray-100">
-            {headToHead.home_wins}
-          </Text>
-          <Text className="text-center text-xs text-gray-500 dark:text-gray-400">
-            {homeTeam} wins
-          </Text>
-        </View>
-        <View className="flex-1 items-center">
-          <Text className="text-lg font-bold text-gray-900 dark:text-gray-100">
-            {headToHead.draws}
-          </Text>
-          <Text className="text-xs text-gray-500 dark:text-gray-400">Draws</Text>
-        </View>
-        <View className="flex-1 items-center">
-          <Text className="text-lg font-bold text-gray-900 dark:text-gray-100">
-            {headToHead.away_wins}
-          </Text>
-          <Text className="text-center text-xs text-gray-500 dark:text-gray-400">
-            {awayTeam} wins
-          </Text>
-        </View>
-      </View>
+      <TotalsCard
+        columns={[
+          { label: `${homeTeam} wins`, value: headToHead.home_wins },
+          { label: "Draws", value: headToHead.draws },
+          { label: `${awayTeam} wins`, value: headToHead.away_wins },
+        ]}
+      />
 
       <Text className="mb-2 text-xs text-gray-400">
         Averages over last {headToHead.meetings_count} meeting

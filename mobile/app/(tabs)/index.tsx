@@ -25,7 +25,6 @@ import {
   usePicksStore,
   type Segment,
 } from "@/store/picksStore";
-import { useThemeStore } from "@/store/themeStore";
 
 const FIXTURES_PAGE_LIMIT = 200;
 const SEGMENTS: readonly Segment[] = ["All", "Upcoming", "Finished"];
@@ -107,11 +106,10 @@ function groupFixtures(fixtures: FixtureSummary[]): LeagueGroup[] {
 }
 
 export default function PicksScreen() {
-  const { colors, isDark } = useTheme();
+  const { colors } = useTheme();
   const queryClient = useQueryClient();
   const accessToken = useAuthStore((state) => state.accessToken);
   const isGuest = !accessToken;
-  const setThemePreference = useThemeStore((state) => state.setPreference);
 
   const store = usePicksStore();
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -273,9 +271,6 @@ export default function PicksScreen() {
     <View style={{ flex: 1, backgroundColor: colors.bg }}>
       <PicksHeader
         isPremium={false}
-        isDark={isDark}
-        onToggleTheme={() => setThemePreference(isDark ? "light" : "dark")}
-        onOpenHub={() => router.push("/how-it-works")}
         onOpenFilters={() => setFiltersOpen(true)}
         filtersActive={hasActiveFilters(store)}
       >

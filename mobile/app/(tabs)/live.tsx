@@ -195,9 +195,20 @@ function LiveCard({ fixture, oddsFormat }: { fixture: FixtureSummary; oddsFormat
 
       {pick && (
         <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+          {/* Labelled like every other surface, but INLINE rather than the feed card's stacked
+              rows: a live card is one tight line beside a status tag, and stacking here would
+              grow every card in a list whose whole job is to be scanned. "model" and "odds" are
+              the shortest wording that still stops a bare number reading as a promise. */}
           <Text {...ONE_LINE} style={[TYPE.pick, { flex: 1, fontSize: 12.5, color: colors.text }]}>
-            {pickHeadline(pick)} · {Math.round(pick.probability * 100)}%
-            {pick.odds != null ? ` · ${formatOdds(pick.odds, oddsFormat)}` : ""}
+            {pickHeadline(pick)}
+            <Text style={{ color: colors.textFaint }}> model </Text>
+            {Math.round(pick.probability * 100)}%
+            {pick.odds != null ? (
+              <>
+                <Text style={{ color: colors.textFaint }}> odds </Text>
+                {formatOdds(pick.odds, oddsFormat)}
+              </>
+            ) : null}
           </Text>
           <StatusTag status={pick.live_status} />
         </View>

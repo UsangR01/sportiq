@@ -32,6 +32,10 @@ export interface ThemeTokens {
   fail: string;
   failSoft: string;
   warn: string;
+  /** Tinted warn ground. Completes the soft trio beside `successSoft`/`failSoft`; its intended
+   * consumer is the DOUBT availability chip, which is not built. Added with its siblings rather
+   * than alone later, so the three stay defined in one place at one opacity convention. */
+  warnSoft: string;
   /** Favourite star — deliberately the SAME in both themes; a starred league should read as
    * starred at a glance regardless of scheme. */
   star: string;
@@ -55,6 +59,7 @@ export const TOKENS: Record<Scheme, ThemeTokens> = {
     fail: "#e2402f",
     failSoft: "rgba(226,64,47,0.1)",
     warn: "#b8720a",
+    warnSoft: "rgba(184,114,10,0.1)",
     star: "#f5b715",
   },
   dark: {
@@ -74,9 +79,25 @@ export const TOKENS: Record<Scheme, ThemeTokens> = {
     fail: "#ff6b5b",
     failSoft: "rgba(255,107,91,0.14)",
     warn: "#e0a458",
+    warnSoft: "rgba(224,164,88,0.14)",
     star: "#f5b715",
   },
 };
+
+/** Fills for a filled W/D/L result chip, and DELIBERATELY NOT the `success`/`fail`/`textFaint`
+ * tokens those chips previously borrowed.
+ *
+ * A UI token is tuned to carry meaning next to body text; a chip fill has to carry WHITE 9.5px
+ * text sitting on top of it, which is a different and stricter job. The previous fills were
+ * Tailwind's `bg-green-600` / `bg-red-500` / `bg-gray-400`, and measured against white they come
+ * out at roughly 3.3 : 3.3 : 2.2 — all three below the 4.5 : 1 that small text needs, the grey
+ * badly so. These three clear it: 5.7 : 7.6 : 6.0.
+ *
+ * NOT theme-split, on purpose. The chip is a solid disc with its own white text, so it owes its
+ * contrast to the fill rather than to the surface behind it, and a result should read the same
+ * in either scheme — the same argument `star` already makes.
+ */
+export const FORM_RUNS = { W: "#157347", D: "#4d5563", L: "#bf2718" } as const;
 
 /** Link hover, light only — RN has no hover on touch, so this is for the web target. */
 export const LINK_HOVER = "#234ad6";

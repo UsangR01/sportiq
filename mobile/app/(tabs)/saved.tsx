@@ -8,7 +8,17 @@ import { getPreferences } from "@/lib/api/users";
 import { listWatchlist, removeFromWatchlist } from "@/lib/api/watchlist";
 import { formatOdds, toOddsFormat, type OddsFormat } from "@/lib/oddsFormat";
 import { pickHeadline } from "@/lib/pickFormat";
-import { GAP, ONE_LINE, RADIUS, RESULT_DISC, SCREEN, TYPE, useTheme, useScreenInsets } from "@/lib/theme";
+import {
+  GAP,
+  ONE_LINE,
+  RADIUS,
+  RESULT_DISC,
+  SCREEN,
+  TABULAR,
+  TYPE,
+  useTheme,
+  useScreenInsets,
+} from "@/lib/theme";
 import { useAuthStore } from "@/store/authStore";
 
 /** Saved picks (design spec §6.5).
@@ -260,11 +270,22 @@ function SavedCard({
               <Text style={[TYPE.eyebrowSmall, { color: colors.textFaint }]}>You saved</Text>
               <Text {...ONE_LINE} style={[TYPE.pick, { color: colors.text }]}>
                 {pickHeadline({ selection: item.saved_selection!, line: item.saved_line })}
-                {item.saved_probability != null
-                  ? ` · ${Math.round(item.saved_probability * 100)}%`
-                  : ""}
-                {item.saved_odds != null ? ` · ${formatOdds(item.saved_odds, oddsFormat)}` : ""}
               </Text>
+              {/* Abbreviated, because this column is narrower than the feed card's — but still
+                  labelled. The figures ran together as "1X · 89% · 1.70" before, which is three
+                  numbers and no statement of what any of them is. */}
+              {item.saved_probability != null && (
+                <SavedMeasure
+                  label="Model prob."
+                  value={`${Math.round(item.saved_probability * 100)}%`}
+                />
+              )}
+              {item.saved_odds != null && (
+                <SavedMeasure
+                  label="Market odds"
+                  value={formatOdds(item.saved_odds, oddsFormat)}
+                />
+              )}
               <Text style={[TYPE.eyebrowSmall, { color: colors.textFaint, letterSpacing: 0 }]}>
                 on {savedAt.toLocaleDateString(undefined, { day: "numeric", month: "short" })}
               </Text>
@@ -296,6 +317,21 @@ function SavedCard({
           </Text>
         </Pressable>
       </View>
+    </View>
+  );
+}
+
+/** `label  value` on one line, the saved row's narrower echo of the feed card's version. */
+function SavedMeasure({ label, value }: { label: string; value: string }) {
+  const { colors } = useTheme();
+  return (
+    <View style={{ flexDirection: "row", alignItems: "baseline", gap: 6 }}>
+      <Text {...ONE_LINE} style={[TYPE.measureLabel, { color: colors.textFaint }]}>
+        {label}
+      </Text>
+      <Text style={[TYPE.measureLabel, TABULAR, { fontWeight: "800", color: colors.text }]}>
+        {value}
+      </Text>
     </View>
   );
 }

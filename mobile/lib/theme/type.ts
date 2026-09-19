@@ -140,6 +140,18 @@ export const TYPE = {
     lineHeight: 14,
     fontWeight: "600",
   } as TextStyle,
+
+  /** The inline caption naming what a figure IS — "Model probability", "Market odds".
+   *
+   * Deliberately small and unemphasised: it has to be readable without competing with the number
+   * it labels, because a label that draws the eye first turns a compact row into two things to
+   * read. Not `caption` (11.5/600), which is sized to be read on its own. */
+  measureLabel: {
+    fontSize: 10,
+    lineHeight: 13,
+    fontWeight: "600",
+    letterSpacing: -0.1,
+  } as TextStyle,
 } as const;
 
 export type TypeRole = keyof typeof TYPE;

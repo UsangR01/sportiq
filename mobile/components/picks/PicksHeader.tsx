@@ -7,20 +7,23 @@ import { CONTROL, GAP, ONE_LINE, RADIUS, SCREEN, TYPE, useTheme, useScreenInsets
  * Rows 2–4 (date stepper, summary strip, segmented control) are composed by the screen and
  * passed as `children`, so this file owns only the identity row and the header's frame. That
  * keeps the row that never changes separate from the three that depend on the day's data.
+ *
+ * WORDMARK LEFT, ONE CONTROL RIGHT. Two things were removed rather than moved, and both are
+ * still reachable — checked before deleting, because an orphaned screen is a silent regression:
+ *
+ *   - the theme toggle → Profile already owns it (a three-state preference, which a two-state
+ *     header toggle could never express properly anyway)
+ *   - the hub button → Profile already links to How it works
+ *
+ * That leaves a single control, so it can sit flush right and carry the filter state.
  */
 export function PicksHeader({
   isPremium,
-  isDark,
-  onToggleTheme,
-  onOpenHub,
   onOpenFilters,
   filtersActive,
   children,
 }: {
   isPremium: boolean;
-  isDark: boolean;
-  onToggleTheme: () => void;
-  onOpenHub: () => void;
   onOpenFilters: () => void;
   /** Any filter off its default — drives the accent dot. */
   filtersActive: boolean;
@@ -40,16 +43,6 @@ export function PicksHeader({
       }}
     >
       <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-        <IconButton onPress={onOpenHub} label="Open menu">
-          {/* Two bars rather than three: at 15×1.8 a third crowds the 36px button, and two
-              reads as a menu just as clearly. */}
-          <View style={{ gap: 4 }}>
-            {[0, 1].map((i) => (
-              <View key={i} style={{ width: 15, height: 1.8, backgroundColor: colors.text }} />
-            ))}
-          </View>
-        </IconButton>
-
         <Text {...ONE_LINE} style={[TYPE.wordmark, { color: colors.text, flex: 1 }]}>
           SportPIQ
         </Text>
@@ -69,30 +62,13 @@ export function PicksHeader({
           </View>
         )}
 
-        <IconButton onPress={onToggleTheme} label="Toggle theme">
-          <Text style={{ fontSize: 15, color: colors.text }}>{isDark ? "☀" : "☾"}</Text>
-        </IconButton>
-
-        <Pressable
+        <FilterButton
           onPress={onOpenFilters}
-          accessibilityRole="button"
-          style={{
-            flexDirection: "row",
-            alignItems: "center",
-            gap: 6,
-            paddingHorizontal: 11,
-            height: CONTROL.iconButton,
-            borderRadius: RADIUS.button,
-            backgroundColor: colors.surfaceAlt,
-          }}
-        >
-          <Text style={[TYPE.caption, { color: colors.text, fontWeight: "700" }]}>Filters</Text>
-          {filtersActive && (
-            <View
-              style={{ width: 5, height: 5, borderRadius: 2.5, backgroundColor: colors.accent }}
-            />
-          )}
-        </Pressable>
+          active={filtersActive}
+          // Overflow is what makes the dot land on the CORNER rather than inside the button, so
+          // it must not be clipped. RN does not clip by default, but a stray overflow:"hidden"
+          // on a future wrapper would silently swallow it.
+        />
       </View>
 
       {children}
@@ -100,21 +76,25 @@ export function PicksHeader({
   );
 }
 
-function IconButton({
-  onPress,
-  label,
-  children,
-}: {
-  onPress: () => void;
-  label: string;
-  children: React.ReactNode;
-}) {
+/** The one control in this row: three stacked bars of descending width.
+ *
+ * A FILTER GLYPH, NOT A HAMBURGER, and the descending widths are the whole point — this button
+ * opens filters, and three equal bars is the universal sign for "navigation menu". Promising
+ * navigation and delivering a filter sheet is a worse failure than an unfamiliar glyph.
+ *
+ * THE DOT IS THE REASON THIS IS WORTH DOING. A card can vanish from the feed because a slider
+ * sits where the user left it days ago, and with the controls behind a sheet there was nothing
+ * on screen saying so — which is exactly the "how come this wasn't on the card?" report. The dot
+ * makes a non-default filter visible without opening anything. It rings itself in `bg` so it
+ * stays legible where it overlaps the button's own fill.
+ */
+function FilterButton({ onPress, active }: { onPress: () => void; active: boolean }) {
   const { colors } = useTheme();
   return (
     <Pressable
       onPress={onPress}
       accessibilityRole="button"
-      accessibilityLabel={label}
+      accessibilityLabel={active ? "Filters, some changed from default" : "Filters"}
       style={{
         width: CONTROL.iconButton,
         height: CONTROL.iconButton,
@@ -124,7 +104,29 @@ function IconButton({
         backgroundColor: colors.surfaceAlt,
       }}
     >
-      {children}
+      <View style={{ gap: 3.5 }}>
+        {[15, 9, 13].map((width, i) => (
+          <View
+            key={i}
+            style={{ width, height: 1.8, borderRadius: 1, backgroundColor: colors.text }}
+          />
+        ))}
+      </View>
+      {active && (
+        <View
+          style={{
+            position: "absolute",
+            top: -2,
+            right: -2,
+            width: 8,
+            height: 8,
+            borderRadius: 4,
+            borderWidth: 1.5,
+            borderColor: colors.bg,
+            backgroundColor: colors.accent,
+          }}
+        />
+      )}
     </Pressable>
   );
 }

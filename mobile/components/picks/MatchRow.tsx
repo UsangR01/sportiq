@@ -1,9 +1,17 @@
 import { router } from "expo-router";
-import { Pressable, Text, View } from "react-native";
+import { Pressable, Text, View, type TextStyle } from "react-native";
 
 import { formatOdds, type OddsFormat } from "@/lib/oddsFormat";
 import { evaluatePickCorrectness, pickHeadline } from "@/lib/pickFormat";
-import { ONE_LINE, RADIUS, RESULT_DISC, TRACK_HEIGHT, TYPE, useTheme } from "@/lib/theme";
+import {
+  ONE_LINE,
+  RADIUS,
+  RESULT_DISC,
+  TABULAR,
+  TRACK_HEIGHT,
+  TYPE,
+  useTheme,
+} from "@/lib/theme";
 import type { DriverRow, FixtureSummary } from "@/lib/api/types";
 
 /** Below this share of the model's inputs, the probability is shown muted with a "limited
@@ -197,24 +205,27 @@ export function MatchRow({
             </View>
           </View>
           <View style={{ alignItems: "flex-end" }}>
-            <Text
-              style={[
-                TYPE.pick,
-                {
-                  fontSize: 15,
-                  fontWeight: "800",
-                  // Muted rather than coloured when the vector was thin: the number is what the
-                  // model genuinely says, it simply had little to go on.
-                  color: lowInformation ? colors.textSub : pickColor,
-                },
-              ]}
-            >
-              {Math.round(pick.probability * 100)}%
-            </Text>
+            {/* LABELLED, NEVER BARE. A lone "89%" beside a pick reads as a promise about the
+                match; it is this model's estimate, and the two are not the same claim. The label
+                sits on the SAME LINE as the figure rather than above it, so saying so costs no
+                card height — the two rows here replace the two that were already here. */}
+            <MeasureRow
+              label="Model probability"
+              value={`${Math.round(pick.probability * 100)}%`}
+              valueStyle={{
+                fontSize: 15,
+                fontWeight: "800",
+                // Muted rather than coloured when the vector was thin: the number is what the
+                // model genuinely says, it simply had little to go on.
+                color: lowInformation ? colors.textSub : pickColor,
+              }}
+            />
             {pick.odds != null && (
-              <Text style={[TYPE.caption, { color: colors.textFaint }]}>
-                {formatOdds(pick.odds, oddsFormat)}
-              </Text>
+              <MeasureRow
+                label="Market odds"
+                value={formatOdds(pick.odds, oddsFormat)}
+                valueStyle={{ fontSize: 12, fontWeight: "700", color: colors.textSub }}
+              />
             )}
             {/* Only when it actually moved — a badge on every card would be wallpaper. */}
             {pick.previous_probability != null && (
@@ -239,6 +250,33 @@ export function MatchRow({
           canSave={canSave}
         />
       )}
+    </View>
+  );
+}
+
+/** One `label   value` line in a pick's right-hand column.
+ *
+ * The label is fixed-width and the value right-aligned, so "Model probability" and "Market odds"
+ * stack into a column whose figures line up regardless of how wide each label is — and the row
+ * as a whole keeps one width whatever the odds format, which stops the pick bar beside it from
+ * resizing as a user switches between decimal and fractional.
+ */
+function MeasureRow({
+  label,
+  value,
+  valueStyle,
+}: {
+  label: string;
+  value: string;
+  valueStyle: TextStyle;
+}) {
+  const { colors } = useTheme();
+  return (
+    <View style={{ flexDirection: "row", alignItems: "baseline", gap: 6 }}>
+      <Text {...ONE_LINE} style={[TYPE.measureLabel, { color: colors.textFaint }]}>
+        {label}
+      </Text>
+      <Text style={[TYPE.pick, TABULAR, { textAlign: "right" }, valueStyle]}>{value}</Text>
     </View>
   );
 }
