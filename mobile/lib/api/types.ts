@@ -205,15 +205,86 @@ export interface ComparisonStat {
   suffix: string;
 }
 
+/** One past meeting, for the Meetings tab.
+ *
+ * `result` is W/D/L from the CURRENT fixture's home side, while home_team/away_team keep the
+ * historical meeting's own orientation — so a row legitimately reads "Fortaleza v Juventude
+ * 2-3 · W" when Juventude is the current home side. The venue is shown as played; the verdict
+ * is scored from one fixed perspective, which is what makes a column of them readable.
+ */
+export interface MeetingRow {
+  fixture_external_id: string;
+  kickoff_utc: string;
+  /** Null when the provider omitted it — the row still renders, just without the label. */
+  competition: string | null;
+  home_team: string;
+  away_team: string;
+  home_score: number;
+  away_score: number;
+  result: "W" | "D" | "L";
+}
+
 export interface HeadToHeadResponse {
   meetings_count: number;
   home_wins: number;
   draws: number;
   away_wins: number;
   stats: ComparisonStat[];
+  /** Football only — empty for tennis and basketball, whose H2H providers return no
+   * competition name, so their Meetings tab stays hidden rather than showing blank labels. */
+  meetings: MeetingRow[];
+}
+
+/** One row of the provider's own league table — never computed from our own fixtures, which
+ * hold roughly six weeks of results and would disagree with every other source. */
+export interface StandingRowResponse {
+  rank: number;
+  team_external_id: string;
+  /** Our own id for this club, when we hold one — what makes the row tappable. Null for a team
+   * in the provider's table we have never ingested a fixture for. */
+  team_id: string | null;
+  team_name: string;
+  played: number;
+  won: number;
+  drawn: number;
+  lost: number;
+  goal_difference: number;
+  points: number;
+  form: string | null;
+  /** Set only for leagues with conferences or phases (MLS, CSL). */
+  group: string | null;
+}
+
+export interface StandingsResponse {
+  league_slug: string;
+  league_name: string;
+  rows: StandingRowResponse[];
+}
+
+/** One row of a team's schedule. Scores and result are null for anything unplayed — and for a
+ * finished match whose score the provider withheld. Never zero-filled. */
+export interface TeamFixtureRow {
+  fixture_external_id: string;
+  kickoff_utc: string;
+  competition: string;
+  opponent: string;
+  at_home: boolean;
+  team_score: number | null;
+  opponent_score: number | null;
+  result: "W" | "D" | "L" | null;
+}
+
+export interface TeamScheduleResponse {
+  team_external_id: string;
+  team_name: string;
+  rows: TeamFixtureRow[];
 }
 
 export interface FixtureDetail extends FixtureSummary {
+  /** On the detail payload only — the feed renders names and never navigates to a team, so
+   * these would be two unused ids on every row of a ~60-fixture day. */
+  home_team_id: string;
+  away_team_id: string;
   odds: OddsLineResponse[];
   prediction: PredictionResponse | null;
   home_team_form: TeamFeaturesResponse | null;

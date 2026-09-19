@@ -1,5 +1,10 @@
 import { apiFetch } from "./client";
-import type { FixtureDetail, FixtureSummary } from "./types";
+import type {
+  FixtureDetail,
+  FixtureSummary,
+  StandingsResponse,
+  TeamScheduleResponse,
+} from "./types";
 
 export interface ListFixturesParams {
   sport_slug?: string;
@@ -40,4 +45,21 @@ export function listFixtures(params: ListFixturesParams = {}): Promise<FixtureSu
 
 export function getFixture(id: string): Promise<FixtureDetail> {
   return apiFetch<FixtureDetail>(`/fixtures/${id}`);
+}
+
+/** The league table for this fixture's competition. Null for a non-football fixture, a league
+ * the provider has no table for, or a pre-season one — all ordinary, none an error.
+ *
+ * SEPARATE FROM getFixture ON PURPOSE. The fixture screen opens on Head to head, so fetching
+ * the table with it would spend a call on a tab most viewers never select. This is queried
+ * when the tab is chosen. */
+export function getFixtureStandings(id: string): Promise<StandingsResponse | null> {
+  return apiFetch<StandingsResponse | null>(`/fixtures/${id}/standings`);
+}
+
+/** A team's last results and next fixtures, across every competition — including the cup ties
+ * and European nights we never ingest, which is why this comes from the provider rather than
+ * from our own fixtures. */
+export function getTeamSchedule(teamId: string): Promise<TeamScheduleResponse | null> {
+  return apiFetch<TeamScheduleResponse | null>(`/teams/${teamId}/schedule`);
 }

@@ -230,6 +230,28 @@ class ComparisonStat(BaseModel):
     suffix: str = ""
 
 
+class MeetingRow(BaseModel):
+    """One past meeting, for the Meetings tab.
+
+    Defined above HeadToHeadResponse because this module has no `from __future__ import
+    annotations`, so an annotation naming a class defined later fails at import.
+
+    `result` is W/D/L from THE CURRENT fixture's home team's point of view, while `home_team`/
+    `away_team` keep the historical meeting's own orientation — so a row can legitimately read
+    "Fortaleza v Juventude 2-3 · W" when Juventude is the current fixture's home side. Showing
+    the real venue while scoring from one fixed perspective is what makes a run of rows readable.
+    """
+
+    fixture_external_id: str
+    kickoff_utc: datetime
+    competition: str | None = None
+    home_team: str
+    away_team: str
+    home_score: int
+    away_score: int
+    result: str
+
+
 class HeadToHeadResponse(BaseModel):
     """Real head-to-head history between this fixture's two teams — replaces the raw
     bookmaker-odds table on the fixture detail screen per direct user request ("Users don't
@@ -254,9 +276,79 @@ class HeadToHeadResponse(BaseModel):
     draws: int
     away_wins: int
     stats: list[ComparisonStat] = []
+    # FOOTBALL ONLY, and empty rather than absent elsewhere. The meetings come free from the
+    # same payload the averages are computed from, but only API-Football returns them in a shape
+    # that carries a competition name — the tennis and basketball H2H paths do not, so their
+    # Meetings tab stays hidden rather than showing a list with blank labels.
+    meetings: list[MeetingRow] = []
+
+
+class StandingRowResponse(BaseModel):
+    """One row of the provider's own league table.
+
+    NOT COMPUTED FROM OUR FIXTURES, deliberately — see the adapter's StandingRow. We hold about
+    six weeks of results, so a locally-derived table would disagree with every other source a
+    user could check it against.
+    """
+
+    rank: int
+    team_external_id: str
+    # OUR OWN id for this club, when we hold one — which is what makes the row tappable through
+    # to its schedule. Null for a club in the provider's table that we have never ingested a
+    # fixture for; that row simply is not a link, rather than a link that 404s.
+    team_id: uuid.UUID | None = None
+    team_name: str
+    played: int
+    won: int
+    drawn: int
+    lost: int
+    goal_difference: int
+    points: int
+    form: str | None = None
+    group: str | None = None
+
+
+class StandingsResponse(BaseModel):
+    league_slug: str
+    league_name: str
+    rows: list[StandingRowResponse] = []
+
+
+class TeamFixtureRow(BaseModel):
+    """One row of a team's schedule — a past result or an upcoming match.
+
+    Scores and `result` are null for anything not yet played, and also for a finished match
+    whose score the provider did not return. Never zero-filled.
+    """
+
+    fixture_external_id: str
+    kickoff_utc: datetime
+    competition: str
+    opponent: str
+    at_home: bool
+    team_score: int | None = None
+    opponent_score: int | None = None
+    result: str | None = None
+
+
+class TeamScheduleResponse(BaseModel):
+    """A team's recent results and next fixtures, newest first, ACROSS ALL COMPETITIONS.
+
+    The cup ties and European nights are the point: we ingest league matches only, so this comes
+    from the provider rather than from our own fixtures table.
+    """
+
+    team_external_id: str
+    team_name: str
+    rows: list[TeamFixtureRow] = []
 
 
 class FixtureDetail(FixtureSummary):
+    # ON THE DETAIL PAYLOAD, NOT THE SUMMARY. The feed renders names and never navigates to a
+    # team, so putting these on FixtureSummary would add two ids to every row of a ~60-fixture
+    # day for no caller. The detail screen is where a team name becomes tappable.
+    home_team_id: uuid.UUID
+    away_team_id: uuid.UUID
     odds: list[OddsLineResponse] = []
     prediction: PredictionResponse | None = None
     home_team_form: TeamFeaturesResponse | None = None

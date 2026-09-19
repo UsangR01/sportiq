@@ -965,6 +965,11 @@ async def fetch_h2h_stats(
     )
 
 
+# How many meetings the Meetings tab LISTS. Deliberately larger than the window the averages
+# and the win/draw/win record are taken over: a list of five reads as thin, while the averages
+# were specified at five and changing them is a different decision from adding a list.
+H2H_MEETINGS_LIST = 10
+
 H2H_DETAIL_MEETINGS = 5  # the fixture-detail H2H panel's own window — separate from
 # H2H_LOOKBACK_MEETINGS (the model-feature functions above, untouched) per direct user request
 # ("Average X in the last 5 meetings") — deliberately NOT shared with fetch_h2h_stats/
@@ -1035,6 +1040,30 @@ async def fetch_match_stats(fixture_external_id: str) -> dict[str, MatchStats]:
 
 
 @dataclass(frozen=True)
+class H2HMeeting:
+    """One past meeting, as the Meetings tab renders it.
+
+    `result` is W/D/L FROM THE CURRENT FIXTURE'S HOME TEAM'S POINT OF VIEW, not from whichever
+    side that club happened to occupy in the historical match — same reasoning as
+    _goals_from_home_side_perspective. A record that flips depending on past venue is not a
+    record. `home_team`/`away_team` and the score keep the meeting's OWN orientation, because
+    the row shows where it was actually played.
+    """
+
+    fixture_external_id: str
+    kickoff_utc: datetime
+    # Optional because a row is still worth showing without it — the date, the scoreline and the
+    # verdict are the substance, and the client simply omits the label. Team names are NOT
+    # optional: "X v Y" is unrenderable without them, so a row missing one is dropped instead.
+    competition: str | None
+    home_team: str
+    away_team: str
+    home_score: int
+    away_score: int
+    result: str  # "W" | "D" | "L", for the current fixture's home side
+
+
+@dataclass(frozen=True)
 class H2HDetail:
     """Richer than H2HStats (which only exists for the model's own feature vector) — this is
     for a real display panel (GET /fixtures/{id}'s Head-to-Head section): the last
@@ -1052,6 +1081,11 @@ class H2HDetail:
     home_wins: int
     draws: int
     away_wins: int
+    # The individual meetings behind the record. FREE — they come out of the same
+    # /fixtures/headtohead payload the averages are already computed from, so listing them costs
+    # no extra call. An earlier version of this panel listed scores INSTEAD of averages and was
+    # replaced on request; this adds them back alongside rather than in place of.
+    meetings: list[H2HMeeting]
     avg_goals_home: float | None
     avg_goals_away: float | None
     avg_corners_home: float | None
@@ -1066,6 +1100,59 @@ class H2HDetail:
 
 def _average(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
+
+
+def _parse_kickoff(raw: str | None) -> datetime | None:
+    """Provider timestamp → datetime, or None if it is absent or unparseable.
+
+    Returns None rather than raising: these feed DISPLAY panels fetched at request time, and one
+    malformed date in a ten-row list should drop that row, not fail the whole screen.
+    """
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _newest_first(meetings: list[dict]) -> list[dict]:
+    """SORTED HERE RATHER THAN TRUSTED. The provider happens to return newest-first today, but
+    the tab's whole claim is "most recent first" and a silently reordered payload would make that
+    a lie with no error anywhere. It also decides WHICH five the averages above are taken over,
+    so order is load-bearing twice. ISO-8601 sorts lexicographically, so this needs no parsing
+    and a malformed date cannot raise.
+    """
+    return sorted(meetings, key=lambda m: m["fixture"].get("date") or "", reverse=True)
+
+
+def _meeting_rows(meetings: list[dict], home_external_id: str) -> list[H2HMeeting]:
+    """The meeting list for the Meetings tab, newest first."""
+    rows: list[H2HMeeting] = []
+    for fx in _newest_first(meetings):
+        goals = _goals_from_home_side_perspective(fx, home_external_id)
+        kickoff = _parse_kickoff(fx["fixture"].get("date"))
+        home_name = (fx.get("teams", {}).get("home") or {}).get("name")
+        away_name = (fx.get("teams", {}).get("away") or {}).get("name")
+        # Every field read here is one this function needs and the averaging path above does
+        # not, so it must tolerate a payload shaped for that path. A row is skipped rather than
+        # half-rendered; the competition alone is allowed to be absent (see H2HMeeting).
+        if goals is None or kickoff is None or not home_name or not away_name:
+            continue
+        scored, allowed = goals
+        rows.append(
+            H2HMeeting(
+                fixture_external_id=str(fx["fixture"]["id"]),
+                kickoff_utc=kickoff,
+                competition=(fx.get("league") or {}).get("name"),
+                home_team=home_name,
+                away_team=away_name,
+                home_score=fx["goals"]["home"],
+                away_score=fx["goals"]["away"],
+                result="W" if scored > allowed else "D" if scored == allowed else "L",
+            )
+        )
+    return rows
 
 
 def _parse_h2h_detail(
@@ -1093,7 +1180,10 @@ def _parse_h2h_detail(
     possession_home: list[float] = []
     possession_away: list[float] = []
 
-    for fx in meetings:
+    # THE RECORD AND THE AVERAGES STAY ON FIVE while the LIST below runs to ten. The panel's own
+    # caption says "averages over the last 5 meetings", and widening the fetch so the Meetings
+    # tab has something to show must not silently redefine the numbers printed above it.
+    for fx in _newest_first(meetings)[:H2H_DETAIL_MEETINGS]:
         goals = _goals_from_home_side_perspective(fx, home_external_id)
         if goals is None:
             continue
@@ -1145,6 +1235,7 @@ def _parse_h2h_detail(
         home_wins=home_wins,
         draws=draws,
         away_wins=away_wins,
+        meetings=_meeting_rows(meetings, home_external_id),
         avg_goals_home=_average(goals_home),
         avg_goals_away=_average(goals_away),
         avg_corners_home=_average(corners_home),
@@ -1168,14 +1259,16 @@ async def fetch_h2h_detail(home_external_id: str, away_external_id: str) -> H2HD
     (see app/fixtures/router.py:get_fixture), not a per-ingested-fixture one, and each call
     degrades independently (an HTTPError for one meeting's stats doesn't lose the others, or
     the win/draw/loss record and goals averages, which need no extra call at all)."""
-    meetings = await _fetch_h2h_meetings(
-        home_external_id, away_external_id, last=H2H_DETAIL_MEETINGS
-    )
+    meetings = await _fetch_h2h_meetings(home_external_id, away_external_id, last=H2H_MEETINGS_LIST)
     if not meetings:
         return None
 
+    # STATS ONLY FOR THE FIVE THAT ARE AVERAGED. Widening the list to ten costs nothing extra on
+    # /fixtures/headtohead (one call either way), but one /fixtures/statistics call per meeting
+    # is the expensive part — fetching ten would double this screen's cost to show numbers the
+    # panel does not display.
     match_stats_by_fixture: dict[str, dict[str, MatchStats]] = {}
-    for fx in meetings:
+    for fx in _newest_first(meetings)[:H2H_DETAIL_MEETINGS]:
         fixture_id = str(fx["fixture"]["id"])
         try:
             match_stats_by_fixture[fixture_id] = await fetch_match_stats(fixture_id)
@@ -1183,6 +1276,175 @@ async def fetch_h2h_detail(home_external_id: str, away_external_id: str) -> H2HD
             match_stats_by_fixture[fixture_id] = {}
 
     return _parse_h2h_detail(meetings, home_external_id, match_stats_by_fixture)
+
+
+@dataclass(frozen=True)
+class StandingRow:
+    """One row of a league table, computed by the provider rather than by us.
+
+    DELIBERATELY NOT DERIVED FROM OUR OWN FIXTURES. We hold roughly six weeks of results — at
+    the time this was built, ZERO teams in any league had ten completed fixtures and EPL's median
+    was three — so a table computed locally would silently disagree with every other source a
+    user could check. This is one call per league per day against a 75,000/day budget.
+    """
+
+    rank: int
+    team_external_id: str
+    team_name: str
+    played: int
+    won: int
+    drawn: int
+    lost: int
+    goal_difference: int
+    points: int
+    form: str | None
+    # Leagues with conferences or phases (MLS, CSL) return several tables, not one. Named so a
+    # single-table league can leave it null rather than inventing a group.
+    group: str | None
+
+
+@dataclass(frozen=True)
+class TeamFixture:
+    """One row of a team's schedule — a past result or an upcoming match.
+
+    ACROSS ALL COMPETITIONS, which is the point and is why this is a provider call rather than a
+    query against our own fixtures table: we ingest league matches only, so a locally-built
+    schedule would omit exactly the cup ties and European nights that make a form run legible.
+    Measured on one real club: ten fixtures spanning five competitions.
+    """
+
+    fixture_external_id: str
+    kickoff_utc: datetime
+    competition: str
+    opponent: str
+    at_home: bool
+    # None for a fixture that has not been played. `result` is likewise None when unplayed, and
+    # also when a match finished without a usable score.
+    team_score: int | None
+    opponent_score: int | None
+    result: str | None  # "W" | "D" | "L"
+
+
+_FINISHED_STATUSES = ("FT", "AET", "PEN")
+
+
+def _parse_standings(payload: list[dict]) -> list[StandingRow]:
+    """Pure parsing, separated from the call so it is testable against a recorded response."""
+    rows: list[StandingRow] = []
+    for league_block in payload:
+        tables = league_block.get("league", {}).get("standings") or []
+        multi = len(tables) > 1
+        for table in tables:
+            for entry in table:
+                overall = entry.get("all") or {}
+                goals = overall.get("goals") or {}
+                rows.append(
+                    StandingRow(
+                        rank=entry["rank"],
+                        team_external_id=str(entry["team"]["id"]),
+                        team_name=entry["team"]["name"],
+                        played=overall.get("played") or 0,
+                        won=overall.get("win") or 0,
+                        drawn=overall.get("draw") or 0,
+                        lost=overall.get("lose") or 0,
+                        # goalsDiff is the provider's own figure; fall back to computing it only
+                        # when absent, rather than recomputing and risking a visible mismatch
+                        # with the table every other site shows.
+                        goal_difference=(
+                            entry["goalsDiff"]
+                            if entry.get("goalsDiff") is not None
+                            else (goals.get("for") or 0) - (goals.get("against") or 0)
+                        ),
+                        points=entry.get("points") or 0,
+                        form=entry.get("form"),
+                        group=entry.get("group") if multi else None,
+                    )
+                )
+    return rows
+
+
+async def fetch_standings(league_slug: str) -> list[StandingRow]:
+    """The current league table. Empty list when the provider has none (a pre-season league).
+
+    Raises ValueError for a league this adapter has no id for — the same shape every other
+    function here uses, so the caller's existing per-league isolation applies unchanged.
+    """
+    league_id = LEAGUE_IDS.get(league_slug)
+    if league_id is None:
+        raise ValueError(f"No API-Football league id for {league_slug!r}")
+    season = _current_football_season(league_slug)
+    api_key = get_settings().api_football_key
+    async with httpx.AsyncClient(
+        base_url=BASE_URL, headers={"x-apisports-key": api_key}, timeout=15.0
+    ) as client:
+        response = await client.get("/standings", params={"league": league_id, "season": season})
+        response.raise_for_status()
+    return _parse_standings(_api_response(response).get("response", []))
+
+
+def _parse_team_schedule(payload: list[dict], team_external_id: str) -> list[TeamFixture]:
+    rows: list[TeamFixture] = []
+    for fx in payload:
+        kickoff = _parse_kickoff(fx["fixture"].get("date"))
+        if kickoff is None:
+            continue
+        at_home = str(fx["teams"]["home"]["id"]) == team_external_id
+        opponent = fx["teams"]["away" if at_home else "home"]["name"]
+        finished = fx["fixture"]["status"]["short"] in _FINISHED_STATUSES
+        home_goals, away_goals = fx["goals"]["home"], fx["goals"]["away"]
+        scored = allowed = None
+        result = None
+        if finished and home_goals is not None and away_goals is not None:
+            scored, allowed = (home_goals, away_goals) if at_home else (away_goals, home_goals)
+            result = "W" if scored > allowed else "D" if scored == allowed else "L"
+        rows.append(
+            TeamFixture(
+                fixture_external_id=str(fx["fixture"]["id"]),
+                kickoff_utc=kickoff,
+                competition=fx["league"]["name"],
+                opponent=opponent,
+                at_home=at_home,
+                team_score=scored,
+                opponent_score=allowed,
+                result=result,
+            )
+        )
+    rows.sort(key=lambda row: row.kickoff_utc, reverse=True)
+    return rows
+
+
+TEAM_SCHEDULE_LAST = 10
+TEAM_SCHEDULE_NEXT = 2
+
+
+async def fetch_team_schedule(team_external_id: str) -> list[TeamFixture]:
+    """A team's recent results and next fixtures, newest first.
+
+    TWO CALLS, because `last` and `next` cannot be combined on this endpoint — confirmed live.
+    Paid per team-sheet opened, not per fixture ingested, which is the same bargain
+    fetch_h2h_detail already makes for a screen someone deliberately navigates to.
+    """
+    api_key = get_settings().api_football_key
+    rows: list[TeamFixture] = []
+    async with httpx.AsyncClient(
+        base_url=BASE_URL, headers={"x-apisports-key": api_key}, timeout=15.0
+    ) as client:
+        for window, count in (("last", TEAM_SCHEDULE_LAST), ("next", TEAM_SCHEDULE_NEXT)):
+            try:
+                response = await client.get(
+                    "/fixtures", params={"team": team_external_id, window: count}
+                )
+                response.raise_for_status()
+            except httpx.HTTPError:
+                # One window failing must not lose the other — a team sheet showing only past
+                # results is far better than an error screen.
+                logger.warning("team schedule %s window failed for %s", window, team_external_id)
+                continue
+            rows.extend(
+                _parse_team_schedule(_api_response(response).get("response", []), team_external_id)
+            )
+    rows.sort(key=lambda row: row.kickoff_utc, reverse=True)
+    return rows
 
 
 async def fetch_lineup_presence(fixture_external_id: str) -> dict[str, set[str]]:

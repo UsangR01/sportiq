@@ -69,14 +69,21 @@ async def get_cached_h2h(redis, home_external_id: str, away_external_id: str, cl
         return True, cls(**json.loads(raw))
     except (ValueError, TypeError):
         # A payload written by an older shape of H2HDetail: treat as a miss and let the live
-        # call overwrite it, rather than 500ing on someone's screen.
+        # call overwrite it, rather than 500ing on someone's screen. This is also the migration
+        # path whenever a field is ADDED — every key written before `meetings` existed lands
+        # here, is discarded, and is refetched once. No flush needed.
         logger.warning("Discarding unreadable H2H cache entry")
         return False, None
 
 
 async def set_cached_h2h(redis, home_external_id: str, away_external_id: str, detail) -> None:
     """Store a fetched panel, including a genuine 'these teams have never met' result."""
-    payload = "null" if detail is None else json.dumps(dataclasses.asdict(detail))
+    # `default=str` because the payload now nests H2HMeeting rows carrying a datetime, which
+    # json.dumps cannot serialise on its own. Note this line sits OUTSIDE the try below, so
+    # without it a TypeError would propagate out of a cache WRITE and 500 the fixture screen —
+    # the opposite of this module's stated contract that the cache is never a dependency.
+    # Datetimes become ISO-8601 strings, which is what the reader below expects.
+    payload = "null" if detail is None else json.dumps(dataclasses.asdict(detail), default=str)
     try:
         await redis.set(
             h2h_cache_key(home_external_id, away_external_id),

@@ -1,11 +1,18 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useLocalSearchParams } from "expo-router";
+import { Link, router, useLocalSearchParams } from "expo-router";
+import { useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 
 import { LiveBadge } from "@/components/fixtures/LiveBadge";
-import { getFixture } from "@/lib/api/fixtures";
+import { getFixture, getFixtureStandings } from "@/lib/api/fixtures";
 import { FORM_RUNS, ONE_LINE, RADIUS, TYPE, useTheme } from "@/lib/theme";
-import type { ComparisonStat, ExtraMarketsResponse, HeadToHeadResponse } from "@/lib/api/types";
+import type {
+  ComparisonStat,
+  ExtraMarketsResponse,
+  FixtureDetail,
+  HeadToHeadResponse,
+  MeetingRow,
+} from "@/lib/api/types";
 import { addToWatchlist, listWatchlist, removeFromWatchlist } from "@/lib/api/watchlist";
 import { useAuthStore } from "@/store/authStore";
 
@@ -49,8 +56,21 @@ export default function FixtureDetailScreen() {
         )}
       </View>
 
+      {/* Each side is its own tappable target rather than the whole title being one link — a
+          user going to Rangers' schedule should not have to know the title is split. Football
+          only: the schedule endpoint has no other sport's provider behind it. */}
       <Text className="mb-1 text-2xl font-bold text-gray-900 dark:text-gray-100">
-        {fixture.home_team} vs {fixture.away_team}
+        <TeamLink
+          name={fixture.home_team}
+          teamId={fixture.home_team_id}
+          enabled={fixture.sport_slug === "football"}
+        />
+        <Text className="text-gray-400"> vs </Text>
+        <TeamLink
+          name={fixture.away_team}
+          teamId={fixture.away_team_id}
+          enabled={fixture.sport_slug === "football"}
+        />
       </Text>
       <Text className="mb-3 text-sm text-gray-500 dark:text-gray-400">
         {kickoff.toLocaleString()}
@@ -110,13 +130,7 @@ export default function FixtureDetailScreen() {
         awayForm={fixture.away_team_form?.recent_form ?? null}
       />
 
-      {fixture.head_to_head && (
-        <HeadToHead
-          headToHead={fixture.head_to_head}
-          homeTeam={fixture.home_team}
-          awayTeam={fixture.away_team}
-        />
-      )}
+      <FixtureTabs fixture={fixture} />
 
       {/* Highlight clips (TDD §5.3 Option A) and the animated match tracker (Option B,
           Phase 2) aren't wired up yet — Highlightly isn't integrated at the backend ingest
@@ -127,6 +141,238 @@ export default function FixtureDetailScreen() {
 
 function pct(value: number | null): string {
   return value == null ? "—" : `${Math.round(value * 100)}%`;
+}
+
+/** A team name that navigates to its schedule when we can, and is plain text when we cannot.
+ *
+ * Rendered as a nested <Text> rather than wrapped in a Pressable so it stays inside the title's
+ * own line box — a Pressable here would break "Home vs Away" onto separate lines.
+ */
+function TeamLink({
+  name,
+  teamId,
+  enabled,
+}: {
+  name: string;
+  teamId: string | null;
+  enabled: boolean;
+}) {
+  if (!enabled || !teamId) return <Text>{name}</Text>;
+  return (
+    <Text
+      accessibilityRole="link"
+      className="text-blue-600 dark:text-blue-400"
+      onPress={() => router.push({ pathname: "/team/[id]", params: { id: teamId } })}
+    >
+      {name}
+    </Text>
+  );
+}
+
+/** THREE TABS, NOT THE SPEC'S FOUR. Lineup is deliberately absent: a pre-match XI needs squad
+ * lists, per-player ratings and a working injury join, and the injury feed is measured at ~2.8%
+ * resolution with 92% of rows reporting every player available. API-Football does not publish
+ * confirmed lineups until roughly an hour before kickoff either — measured empty on three
+ * upcoming fixtures, one of them five hours out — so the tab would be blank for nearly the whole
+ * window anyone browses a card. It returns when the data does.
+ *
+ * Each tab is `flex: 1`, so three span the card exactly as four would.
+ *
+ * FETCHED PER TAB, NOT UP FRONT. The screen opens on Head to head, whose data already arrives
+ * with the fixture. Standings costs a live call, so it is spent only when someone asks for it.
+ */
+type TabKey = "h2h" | "meetings" | "standings";
+
+function FixtureTabs({ fixture }: { fixture: FixtureDetail }) {
+  const [tab, setTab] = useState<TabKey>("h2h");
+  const h2h = fixture.head_to_head;
+  const meetings = h2h?.meetings ?? [];
+
+  // A tab that can have no content is not offered at all, rather than selected and then empty.
+  const tabs: { key: TabKey; label: string }[] = [
+    ...(h2h ? ([{ key: "h2h", label: "Head to head" }] as const) : []),
+    ...(meetings.length ? ([{ key: "meetings", label: "Meetings" }] as const) : []),
+    ...(fixture.sport_slug === "football"
+      ? ([{ key: "standings", label: "Standings" }] as const)
+      : []),
+  ];
+  if (tabs.length === 0) return null;
+  const active = tabs.some((t) => t.key === tab) ? tab : tabs[0].key;
+
+  return (
+    <View className="mb-6">
+      <View className="mb-3 flex-row gap-1.5">
+        {tabs.map((t) => {
+          const selected = t.key === active;
+          return (
+            <Pressable
+              key={t.key}
+              onPress={() => setTab(t.key)}
+              accessibilityRole="tab"
+              accessibilityState={{ selected }}
+              className={`h-9 flex-1 items-center justify-center rounded-lg border ${
+                selected
+                  ? "border-blue-600 bg-blue-600"
+                  : "border-gray-200 bg-transparent dark:border-gray-700"
+              }`}
+            >
+              <Text
+                numberOfLines={1}
+                className={`text-xs font-semibold ${
+                  selected ? "text-white" : "text-gray-600 dark:text-gray-300"
+                }`}
+              >
+                {t.label}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+
+      {active === "h2h" && h2h && (
+        <HeadToHead
+          headToHead={h2h}
+          homeTeam={fixture.home_team}
+          awayTeam={fixture.away_team}
+        />
+      )}
+      {active === "meetings" && (
+        <Meetings meetings={meetings} homeTeam={fixture.home_team} />
+      )}
+      {active === "standings" && <Standings fixture={fixture} />}
+    </View>
+  );
+}
+
+/** Past meetings, newest first. The scoreline keeps the meeting's own venue while the chip is
+ * scored from the current home side — see MeetingRow in lib/api/types.ts for why. */
+function Meetings({ meetings, homeTeam }: { meetings: MeetingRow[]; homeTeam: string }) {
+  return (
+    <View>
+      <Text className="mb-2 text-xs text-gray-400">
+        Last {meetings.length} meeting{meetings.length === 1 ? "" : "s"}, newest first · W/D/L from{" "}
+        {homeTeam}&apos;s view
+      </Text>
+      <View className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-800">
+        {meetings.map((meeting, index) => (
+          <View
+            key={meeting.fixture_external_id}
+            className={`flex-row items-center px-3 py-2.5 ${
+              index === 0 ? "" : "border-t border-gray-100 dark:border-gray-800"
+            }`}
+          >
+            <View className="flex-1 pr-3">
+              <Text numberOfLines={1} className="text-sm text-gray-900 dark:text-gray-100">
+                {meeting.home_team} v {meeting.away_team}
+              </Text>
+              <Text numberOfLines={1} className="text-xs text-gray-400">
+                {formatMeetingDate(meeting.kickoff_utc)}
+                {meeting.competition ? ` · ${meeting.competition}` : ""}
+              </Text>
+            </View>
+            <Text className="mr-3 text-sm font-bold text-gray-900 dark:text-gray-100">
+              {meeting.home_score} – {meeting.away_score}
+            </Text>
+            <FormChip result={meeting.result} />
+          </View>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+function formatMeetingDate(iso: string): string {
+  const when = new Date(iso);
+  if (Number.isNaN(when.getTime())) return "";
+  return when.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "2-digit" });
+}
+
+/** The provider's own league table, with both sides of this fixture highlighted and every row
+ * tapping through to that club's schedule. */
+function Standings({ fixture }: { fixture: FixtureDetail }) {
+  const query = useQuery({
+    queryKey: ["standings", fixture.id],
+    queryFn: () => getFixtureStandings(fixture.id),
+  });
+
+  if (query.isLoading) {
+    return <Text className="py-4 text-center text-xs text-gray-400">Loading table…</Text>;
+  }
+  // No table is an ordinary state — a pre-season league, or one the provider has none for.
+  if (query.isError || !query.data || query.data.rows.length === 0) {
+    return (
+      <Text className="py-4 text-center text-xs text-gray-400">
+        No league table available for this competition.
+      </Text>
+    );
+  }
+
+  const subjects = new Set([fixture.home_team, fixture.away_team]);
+  return (
+    <View>
+      <Text className="mb-2 text-xs text-gray-400">{query.data.league_name} · current table</Text>
+      <View className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-800">
+        <View className="flex-row bg-gray-50 px-3 py-2 dark:bg-gray-900">
+          <Text className="w-6 text-[10px] font-semibold uppercase tracking-wide text-gray-400">
+            #
+          </Text>
+          <Text className="flex-1 text-[10px] font-semibold uppercase tracking-wide text-gray-400">
+            Team
+          </Text>
+          {["P", "GD", "PTS"].map((heading) => (
+            <Text
+              key={heading}
+              className="w-9 text-right text-[10px] font-semibold uppercase tracking-wide text-gray-400"
+            >
+              {heading}
+            </Text>
+          ))}
+        </View>
+        {query.data.rows.map((row, index) => {
+          const isSubject = subjects.has(row.team_name);
+          // Tappable only where the server could resolve the club to one of ours — a row for a
+          // team we have never ingested is plain text rather than a link that 404s.
+          const Row = row.team_id ? Pressable : View;
+          return (
+            <Row
+              key={`${row.group ?? ""}-${row.team_external_id}`}
+              {...(row.team_id
+                ? {
+                    accessibilityRole: "link" as const,
+                    onPress: () =>
+                      router.push({ pathname: "/team/[id]", params: { id: row.team_id! } }),
+                  }
+                : {})}
+              className={`flex-row items-center px-3 py-2 ${
+                index === 0 ? "" : "border-t border-gray-100 dark:border-gray-800"
+              } ${isSubject ? "bg-blue-50 dark:bg-blue-950" : ""}`}
+            >
+              <Text className="w-6 text-xs tabular-nums text-gray-400">{row.rank}</Text>
+              <Text
+                numberOfLines={1}
+                className={`flex-1 pr-2 text-sm ${
+                  isSubject
+                    ? "font-bold text-blue-700 dark:text-blue-300"
+                    : "text-gray-900 dark:text-gray-100"
+                }`}
+              >
+                {row.team_name}
+              </Text>
+              <Text className="w-9 text-right text-xs tabular-nums text-gray-500 dark:text-gray-400">
+                {row.played}
+              </Text>
+              <Text className="w-9 text-right text-xs tabular-nums text-gray-500 dark:text-gray-400">
+                {row.goal_difference > 0 ? `+${row.goal_difference}` : row.goal_difference}
+              </Text>
+              <Text className="w-9 text-right text-xs font-bold tabular-nums text-gray-900 dark:text-gray-100">
+                {row.points}
+              </Text>
+            </Row>
+          );
+        })}
+      </View>
+    </View>
+  );
 }
 
 function ExtraMarkets({ markets }: { markets: ExtraMarketsResponse }) {

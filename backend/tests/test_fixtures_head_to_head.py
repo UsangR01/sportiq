@@ -167,6 +167,10 @@ async def test_fetch_head_to_head_maps_real_detail_for_football(
         home_wins=1,
         draws=1,
         away_wins=0,
+        # Explicit rather than defaulted, and the dataclass deliberately gives it no default:
+        # that is what makes a cache entry written before this field existed fail to rebuild and
+        # get refetched, instead of quietly serving an empty Meetings tab for a week.
+        meetings=[],
         avg_goals_home=1.5,
         avg_goals_away=1.0,
         avg_corners_home=6.0,

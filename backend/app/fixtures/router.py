@@ -32,9 +32,14 @@ from app.fixtures.schemas import (
     FixtureSummary,
     HeadToHeadResponse,
     LiveStateResponse,
+    MeetingRow,
     OddsLineResponse,
     PredictionResponse,
+    StandingRowResponse,
+    StandingsResponse,
     TeamFeaturesResponse,
+    TeamFixtureRow,
+    TeamScheduleResponse,
     TotalsProbability,
 )
 from app.models_ml.corners_reference import blend_probability, bulk_corners_reference
@@ -1543,7 +1548,21 @@ async def _football_head_to_head(home_team: Team, away_team: Team) -> HeadToHead
             for label, home, away, suffix in rows
             if home is not None or away is not None
         ],
+        meetings=[_meeting_row(meeting) for meeting in detail.meetings],
     )
+
+
+def _meeting_row(meeting) -> MeetingRow:
+    """One meeting, from either a freshly-fetched H2HMeeting or a cached dict.
+
+    THE TWO SHAPES ARE REAL, not defensive coding. A cache hit rebuilds H2HDetail with
+    `cls(**json.loads(raw))`, which restores the top-level fields but leaves `meetings` as the
+    list of plain dicts json gave back — nested dataclasses do not reconstruct themselves. The
+    cached form also carries `kickoff_utc` as an ISO string rather than a datetime; pydantic
+    parses either, which is why this needs no date handling of its own.
+    """
+    fields = meeting if isinstance(meeting, dict) else dataclasses.asdict(meeting)
+    return MeetingRow(**fields)
 
 
 async def _fetch_match_stats(
@@ -1786,6 +1805,8 @@ async def get_fixture(fixture_id: uuid.UUID, db: AsyncSession = Depends(get_db))
                 else None
             ),
         ).model_dump(),
+        home_team_id=fixture.home_team_id,
+        away_team_id=fixture.away_team_id,
         odds=[OddsLineResponse.model_validate(o, from_attributes=True) for o in odds_rows],
         # Same suppression as list_fixtures's best_pick/all_market_picks: a POSTPONED fixture
         # keeps whatever Prediction row was written before the postponement was known, but
@@ -1829,6 +1850,109 @@ async def get_fixture_live(fixture_id: uuid.UUID, db: AsyncSession = Depends(get
     if live_state is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Fixture is not live")
     return LiveStateResponse.model_validate(live_state, from_attributes=True)
+
+
+@router.get("/fixtures/{fixture_id}/standings", response_model=StandingsResponse | None)
+async def get_fixture_standings(fixture_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """The league table for this fixture's competition.
+
+    HUNG OFF THE FIXTURE rather than the league, because that is how it is reached — from a
+    fixture screen — and it saves the client resolving a league slug it does not otherwise hold.
+
+    CACHED FOR A DAY. A table only moves when matches finish, and the alternative is one live
+    call per fixture-detail open, which is the exact cost pattern the H2H cache exists to undo.
+    Football only: no other sport this app serves has a league table at all.
+    """
+    from app.adapters.api_football import fetch_standings
+    from app.core.redis import get_redis
+    from app.fixtures.standings_cache import get_cached_standings, set_cached_standings
+
+    fixture = (
+        await db.execute(select(Fixture).where(Fixture.id == fixture_id))
+    ).scalar_one_or_none()
+    if fixture is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Fixture not found")
+    league = (
+        await db.execute(select(League).where(League.id == fixture.league_id))
+    ).scalar_one_or_none()
+    sport = (
+        await db.execute(select(Sport).where(Sport.id == fixture.sport_id))
+    ).scalar_one_or_none()
+    if league is None or sport is None or sport.slug != "football":
+        return None
+
+    redis = get_redis()
+    hit, rows = await get_cached_standings(redis, league.slug)
+    if not hit:
+        try:
+            fetched = await fetch_standings(league.slug)
+        except ValueError:
+            # A league this adapter has no id for. Not an error — the same graceful gap every
+            # other per-league call here degrades to.
+            return None
+        except httpx.HTTPError:
+            # Same contract as the H2H panel: an enrichment must never fail the screen.
+            logger.warning("Standings fetch failed for %s; omitting the table", league.slug)
+            return None
+        rows = [dataclasses.asdict(row) for row in fetched]
+        await set_cached_standings(redis, league.slug, rows)
+    if not rows:
+        return None
+
+    # ONE QUERY, not one per row: map the provider's team ids onto ours so each row can link to
+    # that club's schedule. Teams are unique per (sport_id, external_id), so this is scoped to
+    # the fixture's own sport — without that, a provider id shared with another sport's team
+    # would resolve to the wrong club.
+    external_ids = [row["team_external_id"] for row in rows]
+    known = {
+        team.external_id: team.id
+        for team in (
+            await db.execute(
+                select(Team).where(
+                    Team.sport_id == fixture.sport_id, Team.external_id.in_(external_ids)
+                )
+            )
+        )
+        .scalars()
+        .all()
+    }
+    return StandingsResponse(
+        league_slug=league.slug,
+        league_name=league.name,
+        rows=[
+            StandingRowResponse(**row, team_id=known.get(row["team_external_id"])) for row in rows
+        ],
+    )
+
+
+@router.get("/teams/{team_id}/schedule", response_model=TeamScheduleResponse | None)
+async def get_team_schedule(team_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """A team's last results and next fixtures, across every competition.
+
+    NOT BUILT FROM OUR OWN FIXTURES TABLE, and that was measured rather than assumed: at the
+    time this shipped, ZERO teams in any league had ten completed fixtures stored and EPL's
+    median was three, because ingest had been accumulating for about six weeks. The provider
+    also returns cup ties and European nights that we never ingest at all — which are exactly
+    the rows that make a form run make sense.
+    """
+    from app.adapters.api_football import fetch_team_schedule
+
+    team = (await db.execute(select(Team).where(Team.id == team_id))).scalar_one_or_none()
+    if team is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
+    sport = (await db.execute(select(Sport).where(Sport.id == team.sport_id))).scalar_one_or_none()
+    if sport is None or sport.slug != "football" or not team.external_id:
+        return None
+    try:
+        rows = await fetch_team_schedule(team.external_id)
+    except httpx.HTTPError:
+        logger.warning("Team schedule fetch failed for %s", team.external_id)
+        return None
+    return TeamScheduleResponse(
+        team_external_id=team.external_id,
+        team_name=team.name,
+        rows=[TeamFixtureRow(**dataclasses.asdict(row)) for row in rows],
+    )
 
 
 @router.get("/fixtures/{fixture_id}/odds", response_model=list[OddsLineResponse])

@@ -100,6 +100,7 @@ function RootLayoutNav() {
           <Stack>
             <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
             <Stack.Screen name="fixture/[id]" options={{ title: "Fixture" }} />
+            <Stack.Screen name="team/[id]" options={{ title: "Team" }} />
             <Stack.Screen name="history/index" options={{ title: "History" }} />
             <Stack.Screen name="how-it-works/index" options={{ title: "How It Works" }} />
             <Stack.Screen

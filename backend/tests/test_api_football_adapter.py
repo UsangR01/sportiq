@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from app.adapters import api_football
 from app.adapters.api_football import (
     CALENDAR_YEAR_SEASON_LEAGUES,
     LEAGUE_IDS,
@@ -837,3 +838,149 @@ async def test_fetch_odds_walks_every_page(monkeypatch):
     assert requested_pages == [1, 2], "must request exactly the pages paging.total advertises"
     # ODDS_ROW maps to 3 payloads (see test_map_odds_response_to_payloads_real_book) per page.
     assert len(payloads) == 6
+
+
+# --- Meetings tab, standings and team schedule -------------------------------------------
+
+
+def _meeting_with_league(home_id, away_id, home_goals, away_goals, when, league="Serie A"):
+    fixture = _meeting(home_id, "Home FC", away_id, "Away FC", home_goals, away_goals, when)
+    fixture["league"] = {"id": 135, "name": league}
+    return fixture
+
+
+def test_meeting_rows_score_from_the_current_home_side_regardless_of_past_venue():
+    """The whole point of the W/D/L chip: a club's record must not flip because a past meeting
+    happened to be played at the other ground."""
+    meetings = [
+        # Team 33 away, and lost 2-1 -> "L" for 33.
+        _meeting_with_league(50, 33, 2, 1, "2026-05-01T00:00:00+00:00"),
+        # Team 33 at home, won 3-0 -> "W" for 33.
+        _meeting_with_league(33, 50, 3, 0, "2026-01-01T00:00:00+00:00"),
+    ]
+    rows = api_football._meeting_rows(meetings, "33")
+    assert [row.result for row in rows] == ["L", "W"]
+    # The row itself keeps the meeting's OWN orientation, so the score reads as it was played.
+    assert (rows[0].home_team, rows[0].home_score, rows[0].away_score) == ("Home FC", 2, 1)
+
+
+def test_meeting_rows_are_newest_first_even_if_the_provider_reorders():
+    older = _meeting_with_league(33, 50, 1, 0, "2024-03-01T00:00:00+00:00")
+    newer = _meeting_with_league(33, 50, 2, 0, "2026-03-01T00:00:00+00:00")
+    rows = api_football._meeting_rows([older, newer], "33")
+    assert [row.kickoff_utc.year for row in rows] == [2026, 2024]
+
+
+def test_meeting_rows_skip_a_row_they_cannot_render_but_tolerate_a_missing_competition():
+    """Competition is a label; team names are the row. One is optional, the other is not."""
+    no_league = _meeting_with_league(33, 50, 1, 0, "2026-03-01T00:00:00+00:00")
+    del no_league["league"]
+    nameless = _meeting_with_league(33, 50, 2, 0, "2026-02-01T00:00:00+00:00")
+    nameless["teams"]["home"]["name"] = None
+
+    rows = api_football._meeting_rows([no_league, nameless], "33")
+
+    assert len(rows) == 1, "the unnameable row is dropped, not half-rendered"
+    assert rows[0].competition is None
+
+
+def test_averages_stay_on_five_meetings_while_the_list_runs_longer():
+    """Widening the fetch for the Meetings tab must not silently redefine the numbers printed
+    above it — the panel's own caption says 'averages over the last 5 meetings'."""
+    meetings = [
+        _meeting_with_league(33, 50, 1, 0, f"2026-{month:02d}-01T00:00:00+00:00")
+        for month in range(1, 9)  # 8 meetings, all home wins for 33
+    ]
+    detail = api_football._parse_h2h_detail(meetings, "33", {})
+    assert detail.meetings_count == 5, "record counts the averaged window"
+    assert len(detail.meetings) == 8, "the list is not truncated to it"
+
+
+def test_parse_standings_reads_the_providers_own_totals():
+    payload = [
+        {
+            "league": {
+                "standings": [
+                    [
+                        {
+                            "rank": 1,
+                            "team": {"id": 42, "name": "Arsenal"},
+                            "points": 12,
+                            "goalsDiff": 7,
+                            "form": "WWWW",
+                            "all": {"played": 4, "win": 4, "draw": 0, "lose": 0},
+                        }
+                    ]
+                ]
+            }
+        }
+    ]
+    rows = api_football._parse_standings(payload)
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row.rank, row.team_name, row.played, row.points, row.goal_difference) == (
+        1,
+        "Arsenal",
+        4,
+        12,
+        7,
+    )
+    assert row.group is None, "a single-table league must not invent a group name"
+
+
+def test_parse_standings_keeps_groups_apart_for_a_conference_league():
+    def entry(rank, name, group):
+        return {
+            "rank": rank,
+            "team": {"id": rank, "name": name},
+            "points": 10,
+            "goalsDiff": 1,
+            "all": {"played": 5, "win": 3, "draw": 1, "lose": 1},
+            "group": group,
+        }
+
+    payload = [
+        {
+            "league": {
+                "standings": [
+                    [entry(1, "East A", "Eastern Conference")],
+                    [entry(1, "West A", "Western Conference")],
+                ]
+            }
+        }
+    ]
+    rows = api_football._parse_standings(payload)
+    assert [row.group for row in rows] == ["Eastern Conference", "Western Conference"]
+
+
+def _schedule_fixture(fixture_id, home_id, away_id, home_goals, away_goals, when, short="FT"):
+    return {
+        "fixture": {"id": fixture_id, "date": when, "status": {"short": short}},
+        "league": {"id": 39, "name": "Premier League"},
+        "teams": {
+            "home": {"id": home_id, "name": "Home FC"},
+            "away": {"id": away_id, "name": "Away FC"},
+        },
+        "goals": {"home": home_goals, "away": away_goals},
+    }
+
+
+def test_team_schedule_orients_result_to_the_subject_team():
+    rows = api_football._parse_team_schedule(
+        [
+            _schedule_fixture(1, 40, 50, 0, 2, "2026-09-01T00:00:00+00:00"),  # 40 home, lost
+            _schedule_fixture(2, 50, 40, 0, 2, "2026-08-01T00:00:00+00:00"),  # 40 away, won
+        ],
+        "40",
+    )
+    assert [(r.result, r.at_home, r.team_score) for r in rows] == [("L", True, 0), ("W", False, 2)]
+    assert [r.opponent for r in rows] == ["Away FC", "Home FC"]
+
+
+def test_team_schedule_leaves_an_unplayed_fixture_unscored():
+    rows = api_football._parse_team_schedule(
+        [_schedule_fixture(3, 40, 50, None, None, "2026-10-01T00:00:00+00:00", short="NS")],
+        "40",
+    )
+    assert rows[0].result is None
+    assert rows[0].team_score is None, "never zero-fill a match that has not happened"
