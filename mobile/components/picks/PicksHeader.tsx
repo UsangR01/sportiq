@@ -76,17 +76,17 @@ export function PicksHeader({
   );
 }
 
-/** The one control in this row: a sliders glyph — three tracks, each with a handle.
+/** The one control in this row: a sliders glyph — two tracks, each with a handle.
  *
  * A FILTER GLYPH, NOT A HAMBURGER. The spec asks for "three stacked bars of descending width
  * (15/9/13)" and calls it a filter glyph, but that was built and REPORTED AS A HAMBURGER on a
- * real device — correctly, because three stacked horizontal lines mean "navigation menu"
- * regardless of their widths, and 15/9/13 is not even monotonic, so the variation reads as
- * sloppy rather than as meaning. The handles are what make this unmistakable: a track with a
- * knob on it is the universal mark for adjusting a value, which is exactly what the sheet does.
+ * real device — correctly, because stacked horizontal lines mean "navigation menu" regardless of
+ * their widths, and 15/9/13 is not even monotonic, so the variation reads as sloppy rather than
+ * as meaning. The handles are what make this unmistakable: a track with a knob on it is the
+ * universal mark for adjusting a value, which is exactly what the sheet does.
  *
- * Offset handles, not aligned ones — three knobs in a column reads as a bulleted list. Each sits
- * at a different position along its own track, so the glyph says "settings at different values".
+ * Offset handles, not aligned ones — knobs in a column read as a bulleted list. Each sits at a
+ * different position along its own track, so the glyph says "settings at different values".
  *
  * THE DOT IS THE REASON THIS IS WORTH DOING. A card can vanish from the feed because a slider
  * sits where the user left it days ago, and with the controls behind a sheet there was nothing
@@ -94,11 +94,22 @@ export function PicksHeader({
  * makes a non-default filter visible without opening anything. It rings itself in `bg` so it
  * stays legible where it overlaps the button's own fill.
  */
-const GLYPH_WIDTH = 16;
+// TWO TRACKS, NOT THREE, and the reason is size rather than taste. Three 7px handles with 3px
+// gaps stack to 27px inside a 36px button, leaving about 4px of air and reading as dense at the
+// size it is actually judged. Two stack to 20px, which buys room to draw each track and handle
+// LARGER — and stroke weight, not element count, is what carries a glyph at 36px. The third
+// track also says nothing the second has not: one track-and-handle means "adjust a value", the
+// second establishes plural, the third is repetition.
+// The handle must stay well under half the track. At 8 on 17 (47%) it reads as a toggle switch
+// rather than a slider, because there is barely any track left for it to travel along — the
+// sense of "a value set somewhere on a range" comes from the track being visibly longer than
+// the thing sitting on it.
+const GLYPH_WIDTH = 19;
 const KNOB = 7;
-// Fractions along each track, deliberately unequal and non-monotonic so the three knobs never
-// line up into a vertical row.
-const KNOB_POSITIONS = [0.62, 0.15, 0.4];
+const TRACK_GAP = 6;
+// Fractions along each track, deliberately unequal so the handles never line up into a column
+// and read as a bulleted list.
+const KNOB_POSITIONS = [0.66, 0.2];
 
 function FilterButton({ onPress, active }: { onPress: () => void; active: boolean }) {
   const { colors } = useTheme();
@@ -116,7 +127,7 @@ function FilterButton({ onPress, active }: { onPress: () => void; active: boolea
         backgroundColor: colors.surfaceAlt,
       }}
     >
-      <View style={{ gap: 3 }}>
+      <View style={{ gap: TRACK_GAP }}>
         {KNOB_POSITIONS.map((at, i) => (
           <View
             key={i}
