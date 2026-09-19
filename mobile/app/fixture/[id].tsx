@@ -714,9 +714,12 @@ function HeadToHead({
   awayTeam: string;
 }) {
   return (
+    // NO SECTION TITLE. The selected tab immediately above already reads "Head to head", and
+    // repeating it spent a line restating what the control had just said. Note the other two
+    // tabs carry a CAPTION rather than a title -- "Last 10 meetings, newest first", "Série A ·
+    // current table" -- which adds something the tab label does not; that is the distinction,
+    // and it is why those stay.
     <View className="mb-6">
-      <Text className="mb-2 text-sm font-semibold uppercase text-gray-400">Head to Head</Text>
-
       <TotalsCard
         columns={[
           { label: `${homeTeam} wins`, value: headToHead.home_wins },
