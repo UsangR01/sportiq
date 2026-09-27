@@ -92,6 +92,18 @@ async def bulk_corners_reference(db, fixtures: list) -> dict[uuid.UUID, float | 
     if not team_ids:
         return {f.id: None for f in fixtures}
 
+    # UPPER BOUND ON WHAT IS LOADED AT ALL, and it is provably free.
+    #
+    # averages() only ever reads entries strictly BEFORE a fixture's own kickoff, and no
+    # fixture in this batch kicks off later than `newest`. So every row at or after `newest` is
+    # loaded, held in the per-team lists, and never looked at. Without this bound the query
+    # fetches a team's ENTIRE completed history to use at most CORNERS_REFERENCE_WINDOW of it.
+    #
+    # That is invisible on the feed, whose fixtures are current, and dominant on /history, whose
+    # batches sit far in the past -- which is where this helper OOM-killed the container.
+    kickoffs = [f.kickoff_utc for f in fixtures if f.kickoff_utc is not None]
+    newest = max(kickoffs) if kickoffs else None
+
     rows = (
         await db.execute(
             select(
@@ -106,6 +118,7 @@ async def bulk_corners_reference(db, fixtures: list) -> dict[uuid.UUID, float | 
                 Fixture.status == FixtureStatus.COMPLETED,
                 FixtureLiveState.home_corners.is_not(None),
                 FixtureLiveState.away_corners.is_not(None),
+                *(() if newest is None else (Fixture.kickoff_utc < newest,)),
                 or_(
                     Fixture.home_team_id.in_(team_ids),
                     Fixture.away_team_id.in_(team_ids),
