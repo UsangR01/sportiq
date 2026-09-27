@@ -130,8 +130,18 @@ def _representative_prediction_ids():
     return select(ranked.c.pid).where(ranked.c.rn == 1)
 
 
-# Keeps each bulk query's IN () clause a sane size when the whole settled history is scored.
-_CARD_PICK_CHUNK = 400
+# MATCHED TO pick_freeze.FREEZE_CHUNK, and the reason is memory rather than SQL.
+#
+# This was 400, chosen to keep the IN () clause a sane size. But _bulk_best_picks reaches
+# bulk_corners_reference, whose cost scales with the DISTINCT TEAMS in the batch rather than
+# with the fixture count -- and the freeze sweep already settled on 40 after that same helper
+# OOM-killed a 512MB container twice at larger batches.
+#
+# The feed survives 400 because one day spans a handful of leagues with teams repeating.
+# /history/summary scores the entire settled record, so a batch of the same size spans an order
+# of magnitude more teams. Measured on production 2026-09-27: the endpoint did ~13 seconds of
+# work and then the container died, taking every other request with it for ~25 seconds.
+_CARD_PICK_CHUNK = 40
 
 
 async def _card_picks_for(db: AsyncSession, fixture_ids: list) -> dict:

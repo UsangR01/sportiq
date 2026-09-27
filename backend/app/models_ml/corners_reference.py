@@ -126,7 +126,24 @@ async def bulk_corners_reference(db, fixtures: list) -> dict[uuid.UUID, float | 
     def averages(team_id, before) -> tuple[float, float] | None:
         entries = history.get(team_id) or []
         if before is not None:
-            entries = [e for e in entries if e[0] < before]
+            # BISECT, NOT A LIST COMPREHENSION. `entries` is already newest-first (the query
+            # orders by kickoff desc), so the cut point can be found in log time and the result
+            # sliced -- where the filter it replaces allocated a fresh list of a team's ENTIRE
+            # history once per fixture. On the feed that is invisible; scoring the whole settled
+            # record it is hundreds of teams re-filtered hundreds of times, which is how this
+            # helper came to OOM-kill the container on /history/summary.
+            #
+            # bisect needs ascending order, so the list is searched through a reversed view of
+            # its keys: the first index whose kickoff is < `before` in a descending list is the
+            # count of entries that are >= it.
+            lo, hi = 0, len(entries)
+            while lo < hi:
+                mid = (lo + hi) // 2
+                if entries[mid][0] < before:
+                    hi = mid
+                else:
+                    lo = mid + 1
+            entries = entries[lo : lo + CORNERS_REFERENCE_WINDOW]
         entries = entries[:CORNERS_REFERENCE_WINDOW]
         if len(entries) < MIN_REFERENCE_MATCHES:
             return None

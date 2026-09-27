@@ -239,3 +239,50 @@ def test_corners_candidates_are_blended_but_goals_and_h2h_are_not():
     # Untouched markets must be identical.
     for key in ("h2hhomeNone", "h2hawayNone", "goals_totalunder2.5", "double_chance1XNone"):
         assert blended[key] == plain[key]
+
+
+# --- the bisect that replaced a per-fixture list filter -------------------------------------
+
+
+def test_the_cut_point_matches_the_filter_it_replaced():
+    """PROOF OBLIGATION, not a nicety.
+
+    averages() used to build a fresh filtered list of a team's entire history once per fixture;
+    it now bisects the already-descending list instead. That is a pure speed change ONLY if the
+    cut point is identical for every input, and an off-by-one here would silently alter every
+    corners reference rather than fail loudly. So this re-derives both and compares.
+    """
+    import random
+    from datetime import UTC, datetime, timedelta
+
+    random.seed(20260927)
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+
+    for size in (0, 1, 2, 5, 40, 200):
+        for _ in range(12):
+            # Newest-first, exactly as the query returns it. Duplicate kickoffs are deliberate:
+            # two matches genuinely can start at the same instant, and that is where a
+            # boundary comparison is most likely to be wrong.
+            stamps = sorted(
+                (base + timedelta(hours=random.randrange(0, 4000)) for _ in range(size)),
+                reverse=True,
+            )
+            entries = [(t, random.randrange(0, 15), random.randrange(0, 15)) for t in stamps]
+
+            probes = [base + timedelta(hours=random.randrange(-50, 4050)) for _ in range(6)]
+            probes += list(stamps[:3])  # exact boundary hits
+
+            for before in probes:
+                expected = [e for e in entries if e[0] < before]
+
+                lo, hi = 0, len(entries)
+                while lo < hi:
+                    mid = (lo + hi) // 2
+                    if entries[mid][0] < before:
+                        hi = mid
+                    else:
+                        lo = mid + 1
+
+                assert entries[lo:] == expected, (
+                    f"cut point {lo} disagrees with the filter " f"(size={size}, before={before})"
+                )
