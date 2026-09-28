@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
-import { Pressable, ScrollView, Text, View } from "react-native";
+import { Image, Pressable, ScrollView, Text, View } from "react-native";
+import type { ImageSourcePropType } from "react-native";
 
 import { SCREEN, TYPE, useTheme } from "@/lib/theme";
 
@@ -34,7 +35,7 @@ export const SPORT_TABS: SportTab[] = [
   { slug: "tennis", label: "Tennis" },
 ];
 
-const GLYPH = 16;
+const GLYPH = 18;
 const FADE_WIDTH = 26;
 
 export function SportTabs({
@@ -147,76 +148,38 @@ export function SportTabs({
   );
 }
 
-/** Sport marks drawn from plain Views, for the same reason the tab-bar glyphs are: a platform
- * symbol set resolves to three different shapes across iOS, Android and web, so the row would
- * not look like the design on more than one platform at a time. */
+/** The sport marks.
+ *
+ * REAL BALLS, DRAWN AS ASSETS, replacing the CSS shapes that shipped first -- those stood a
+ * rotated square in for a football's pentagon, which read as makeshift at real size and was
+ * reported as such.
+ *
+ * PNG rather than SVG because react-native-svg is a NATIVE module: adding it forces a new EAS
+ * build and a reinstall for everyone holding the current APK, which is far too much for three
+ * icons. PNGs ride along in an ordinary over-the-air update.
+ *
+ * DRAWN RATHER THAN DOWNLOADED (see the generator in the scratchpad, recorded in the commit):
+ * this repo is public and these ship inside the app, so an icon of uncertain licence is a real
+ * liability for three glyphs.
+ *
+ * `tintColor` is what makes one asset enough. The files are white on transparent, so RN recolours
+ * them at render time -- which preserves exactly the property the CSS glyphs had via
+ * `currentColor`, and is why there is one file per sport rather than four.
+ */
+const SPORT_ICONS: Record<string, ImageSourcePropType> = {
+  football: require("../../assets/sports/football.png"),
+  nba: require("../../assets/sports/basketball.png"),
+  tennis: require("../../assets/sports/tennis.png"),
+};
+
 function SportGlyph({ slug, color }: { slug: string; color: string }) {
-  if (slug === "nba") return <BasketballGlyph color={color} />;
-  if (slug === "tennis") return <TennisGlyph color={color} />;
-  return <FootballGlyph color={color} />;
-}
-
-function Ring({ color, children }: { color: string; children?: React.ReactNode }) {
+  const source = SPORT_ICONS[slug] ?? SPORT_ICONS.football;
   return (
-    <View
-      style={{
-        width: GLYPH,
-        height: GLYPH,
-        borderRadius: GLYPH / 2,
-        borderWidth: 1.6,
-        borderColor: color,
-        alignItems: "center",
-        justifyContent: "center",
-        overflow: "hidden",
-      }}
-    >
-      {children}
-    </View>
-  );
-}
-
-/** A ball with a panel at its centre. A true pentagon needs clip-path, which RN does not have,
- * so this is a small rotated square -- at 16px the two are indistinguishable, and inventing a
- * dependency to draw six pixels would not be. */
-function FootballGlyph({ color }: { color: string }) {
-  return (
-    <Ring color={color}>
-      <View
-        style={{
-          width: 6,
-          height: 6,
-          backgroundColor: color,
-          transform: [{ rotate: "45deg" }],
-        }}
-      />
-    </Ring>
-  );
-}
-
-function BasketballGlyph({ color }: { color: string }) {
-  return (
-    <Ring color={color}>
-      <View style={{ position: "absolute", width: GLYPH, height: 1.4, backgroundColor: color }} />
-      <View style={{ position: "absolute", width: 1.4, height: GLYPH, backgroundColor: color }} />
-    </Ring>
-  );
-}
-
-/** The seam: two arcs clipped inside the ball. Drawn as oversized circles whose borders show
- * only where they cross the ring, which `overflow: hidden` on Ring takes care of. */
-function TennisGlyph({ color }: { color: string }) {
-  const arc = {
-    position: "absolute" as const,
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    borderWidth: 1.4,
-    borderColor: color,
-  };
-  return (
-    <Ring color={color}>
-      <View style={[arc, { left: -7 }]} />
-      <View style={[arc, { right: -7 }]} />
-    </Ring>
+    <Image
+      source={source}
+      style={{ width: GLYPH, height: GLYPH, tintColor: color }}
+      resizeMode="contain"
+      accessible={false}
+    />
   );
 }
