@@ -36,7 +36,6 @@ export const SPORT_TABS: SportTab[] = [
 ];
 
 const GLYPH = 18;
-const FADE_WIDTH = 26;
 
 export function SportTabs({
   selected,
@@ -49,26 +48,25 @@ export function SportTabs({
   const { colors } = useTheme();
   const scroller = useRef<ScrollView>(null);
   const offset = useRef(0);
-  const overflowing = useRef(false);
-  const contentWidth = useRef(0);
   const viewportWidth = useRef(0);
+  // Real measured geometry per tab. The first version guessed a fixed 76px, which was wrong the
+  // moment the tabs began flexing to fill the row -- and would have been wrong again for any
+  // label longer than "Basketball".
+  const bounds = useRef<Record<string, { x: number; width: number }>>({});
 
   const activeSlug = selected.length === 1 ? selected[0] : null;
 
-  // Keep the selected tab fully visible, past the side padding and the edge fade -- and keep
-  // the row where the user left it otherwise. setting scrollLeft directly rather than calling
-  // scrollTo with animation on every render, which fights a user mid-swipe.
+  // Keep the selected tab fully visible, and otherwise leave the row exactly where the user put
+  // it. A no-op while the tabs fit the width, which is the case with three sports -- it earns
+  // its place once there are enough to scroll.
   useEffect(() => {
     if (!activeSlug || !scroller.current) return;
-    const index = SPORT_TABS.findIndex((t) => t.slug === activeSlug);
-    if (index < 0) return;
-    const approximateTabWidth = 76;
-    const left = index * approximateTabWidth;
-    const right = left + approximateTabWidth + FADE_WIDTH;
+    const box = bounds.current[activeSlug];
+    if (!box || !viewportWidth.current) return;
     let next = offset.current;
-    if (left < offset.current) next = Math.max(0, left - SCREEN.padding);
-    else if (right > offset.current + viewportWidth.current) {
-      next = right - viewportWidth.current;
+    if (box.x < offset.current) next = Math.max(0, box.x - SCREEN.padding);
+    else if (box.x + box.width > offset.current + viewportWidth.current) {
+      next = box.x + box.width - viewportWidth.current + SCREEN.padding;
     }
     if (next !== offset.current) {
       offset.current = next;
@@ -86,18 +84,22 @@ export function SportTabs({
         // column split the leftover space -- which is what once stretched the sport chips to
         // half the screen on an empty feed.
         style={{ flexGrow: 0, marginHorizontal: -SCREEN.padding }}
-        contentContainerStyle={{ paddingHorizontal: SCREEN.padding, gap: 4 }}
+        // flexGrow ON THE CONTENT CONTAINER is what makes the tabs span the row: it forces the
+        // content to be at least as wide as the viewport, so the `flex: 1` on each tab below has
+        // real space to share. Without it the row is only as wide as its labels and three tabs
+        // huddle against the left edge.
+        //
+        // AND IT STILL SCROLLS WHEN IT HAS TO. Each tab keeps a minWidth, so once enough sports
+        // are added that their minimums exceed the screen, the content outgrows the viewport and
+        // this becomes a scrolling row again -- compress first, scroll only when compression
+        // runs out.
+        contentContainerStyle={{ paddingHorizontal: SCREEN.padding, gap: 4, flexGrow: 1 }}
         onScroll={(e) => {
           offset.current = e.nativeEvent.contentOffset.x;
         }}
         scrollEventThrottle={16}
         onLayout={(e) => {
           viewportWidth.current = e.nativeEvent.layout.width;
-          overflowing.current = contentWidth.current > viewportWidth.current;
-        }}
-        onContentSizeChange={(w) => {
-          contentWidth.current = w;
-          overflowing.current = w > viewportWidth.current;
         }}
       >
         {SPORT_TABS.map((tab) => {
@@ -108,7 +110,19 @@ export function SportTabs({
               onPress={() => onSelect(tab.slug)}
               accessibilityRole="tab"
               accessibilityState={{ selected: isActive }}
-              style={{ minWidth: 68, paddingTop: 4, paddingHorizontal: 10, alignItems: "center" }}
+              onLayout={(e) => {
+                const { x, width } = e.nativeEvent.layout;
+                bounds.current[tab.slug] = { x, width };
+              }}
+              // flex:1 shares the row equally; minWidth is the floor that turns compression into
+              // scrolling once there are too many sports to fit.
+              style={{
+                flex: 1,
+                minWidth: 68,
+                paddingTop: 4,
+                paddingHorizontal: 6,
+                alignItems: "center",
+              }}
             >
               <SportGlyph slug={tab.slug} active={isActive} />
               <Text
