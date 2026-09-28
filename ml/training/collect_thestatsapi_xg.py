@@ -272,6 +272,40 @@ TARGETS = [
     ("serie_b", "comp_5450", "23/24", 2023),
     ("serie_b", "comp_5450", "24/25", 2024),
     ("serie_b", "comp_5450", "25/26", 2025),
+    # Five added 2026-09-28. Season LABELS are the provider's own strings, read from
+    # /competitions/{id}/seasons rather than guessed -- the matcher tests `label in name` or
+    # `label == year`, so a wrong label finds no season and reports as "this league has no xG".
+    #
+    # Brazil, Argentina and Colombia label by calendar year; LaLiga 2 and League Two use the
+    # European slash form. Argentina carries TWO entries for 2025 ("Primera LPF 2025" and
+    # "Liga Profesional 2025"), both holding the same 255 finished matches, so the bare year is
+    # unambiguous in effect.
+    #
+    # COLOMBIA IS PARTIAL, AND THAT IS NOT A COLLECTION FAILURE TO CHASE LATER: TheStatsAPI's
+    # competition is "Primera A, Apertura" -- the first of the two tournaments Colombia plays
+    # each year -- carrying ~225 finished matches where API-Football's league 239 covers the
+    # full calendar (~312). So roughly a third of Colombian fixtures will carry no xG. Those
+    # rows score as missing, which XGBoost handles.
+    ("brasileirao_b", "comp_1085", "2022", 2022),
+    ("brasileirao_b", "comp_1085", "2023", 2023),
+    ("brasileirao_b", "comp_1085", "2024", 2024),
+    ("brasileirao_b", "comp_1085", "2025", 2025),
+    ("laliga2", "comp_0976", "22/23", 2022),
+    ("laliga2", "comp_0976", "23/24", 2023),
+    ("laliga2", "comp_0976", "24/25", 2024),
+    ("laliga2", "comp_0976", "25/26", 2025),
+    ("argentina_primera", "comp_4540", "2022", 2022),
+    ("argentina_primera", "comp_4540", "2023", 2023),
+    ("argentina_primera", "comp_4540", "2024", 2024),
+    ("argentina_primera", "comp_4540", "2025", 2025),
+    ("colombia_primera", "comp_720692", "2022", 2022),
+    ("colombia_primera", "comp_720692", "2023", 2023),
+    ("colombia_primera", "comp_720692", "2024", 2024),
+    ("colombia_primera", "comp_720692", "2025", 2025),
+    ("england_l2", "comp_4023", "22/23", 2022),
+    ("england_l2", "comp_4023", "23/24", 2023),
+    ("england_l2", "comp_4023", "24/25", 2024),
+    ("england_l2", "comp_4023", "25/26", 2025),
 ]
 
 

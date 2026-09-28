@@ -35,6 +35,9 @@ const COUNTRY_FLAG_IMAGES: Record<string, number> = {
   Belgium: require("../assets/flags/belgium.png"),
   Romania: require("../assets/flags/romania.png"),
   Argentina: require("../assets/flags/argentina.png"),
+  // Added 2026-09-28 with Colombia Primera A. A country with no flag renders the globe with no
+  // error, no warning and no log line, so tests/test_league_flags.py crosses into this file.
+  Colombia: require("../assets/flags/colombia.png"),
   Qatar: require("../assets/flags/qatar.png"),
   UAE: require("../assets/flags/uae.png"),
   Portugal: require("../assets/flags/portugal.png"),

@@ -162,6 +162,44 @@ LEAGUE_CONFIGS: dict[str, dict] = {
     "super_lig": {"league_id": 203, "rundown_sport_id": None, "seasons": SEASONS + [2026]},
     "bundesliga_2": {"league_id": 79, "rundown_sport_id": None, "seasons": SEASONS + [2026]},
     "serie_b": {"league_id": 136, "rundown_sport_id": None, "seasons": SEASONS + [2026]},
+    # --- Five added 2026-09-28, COLLECTION-ONLY until a retrain earns them a place -----------
+    #
+    # League ids are LITERALS and these slugs are deliberately absent from LEAGUE_IDS and from
+    # app/sports/catalog.py, exactly as the Tier-1 nine above were. Adding them there would both
+    # start fetch_injuries polling them every 30 minutes and, far more importantly, start
+    # SERVING picks from a model that has never seen them.
+    #
+    # That is not hypothetical: 2. Bundesliga was added on 2026-09-15 and served immediately, and
+    # on 2026-09-19 all four of its cards priced P(over 2.5) at a mean 0.665 against the league's
+    # own six-season rate of 0.593 -- ~7pp high on every card, because league_baseline_from_db
+    # returns None below 30 settled fixtures and we held 6. Doing that five times over was the
+    # decision taken here, and it was declined.
+    #
+    # WIRING THEM UP AFTER THE RETRAIN needs three things, all measured on 2026-09-28 so they do
+    # not have to be re-derived:
+    #   LEAGUE_IDS          brasileirao_b 72, laliga2 141, argentina_primera 128,
+    #                       colombia_primera 239, england_l2 42
+    #   season convention   CALENDAR-YEAR for brasileirao_b (2026-03-21 -> 2026-11-14),
+    #                       argentina_primera (2026-01-22 -> 2026-11-08) and colombia_primera
+    #                       (2026-01-16 -> 2026-11-12); laliga2 (2026-08-14 -> 2027-06-06) and
+    #                       england_l2 (2026-08-15 -> 2027-05-08) are ordinary Aug-May and must
+    #                       stay OUT of CALENDAR_YEAR_SEASON_LEAGUES.
+    #   catalog countries   Brazil, Spain, Argentina, Colombia, England -- Colombia's flag was
+    #                       added to mobile in this change, the other four already existed.
+    #
+    # Chosen by screening all 787 league-type competitions rather than a shortlist: each has a
+    # CORNERS market (absent from K League 1 and Eerste Divisie, which is what disqualified
+    # them), 10+ seasons of match statistics, 8-9 bookmakers, and real xG verified against an
+    # Eredivisie control. Uruguay Primera passed everything except xG (0/6 on both current
+    # seasons) and was dropped.
+    #
+    # TheRundown carries none of them (its /sports list was checked), so rundown_sport_id is
+    # None and their odds come from API-Football alone -- the arrangement Brasileirão runs on.
+    "brasileirao_b": {"league_id": 72, "rundown_sport_id": None, "seasons": SEASONS + [2026]},
+    "laliga2": {"league_id": 141, "rundown_sport_id": None, "seasons": SEASONS + [2026]},
+    "argentina_primera": {"league_id": 128, "rundown_sport_id": None, "seasons": SEASONS + [2026]},
+    "colombia_primera": {"league_id": 239, "rundown_sport_id": None, "seasons": SEASONS + [2026]},
+    "england_l2": {"league_id": 42, "rundown_sport_id": None, "seasons": SEASONS + [2026]},
 }
 
 # Collection is stageable because the per-fixture endpoints genuinely can't all run in one
