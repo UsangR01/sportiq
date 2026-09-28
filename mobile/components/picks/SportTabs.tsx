@@ -110,12 +110,7 @@ export function SportTabs({
               accessibilityState={{ selected: isActive }}
               style={{ minWidth: 68, paddingTop: 4, paddingHorizontal: 10, alignItems: "center" }}
             >
-              <SportGlyph
-                slug={tab.slug}
-                // textSub, NOT textFaint, when unselected: at 12px textFaint fails 4.5:1, and
-                // the glyph takes the same colour as its label so the pair reads as one thing.
-                color={isActive ? colors.text : colors.textSub}
-              />
+              <SportGlyph slug={tab.slug} active={isActive} />
               <Text
                 numberOfLines={1}
                 style={[
@@ -150,21 +145,22 @@ export function SportTabs({
 
 /** The sport marks.
  *
- * REAL BALLS, DRAWN AS ASSETS, replacing the CSS shapes that shipped first -- those stood a
- * rotated square in for a football's pentagon, which read as makeshift at real size and was
- * reported as such.
+ * REAL BALLS IN THEIR REAL COLOURS -- white-and-black football, Spalding orange, optic green --
+ * replacing first the CSS shapes (a rotated square standing in for a pentagon) and then a
+ * tinted monochrome set. At 18px colour identifies a sport faster than outline does.
  *
- * PNG rather than SVG because react-native-svg is a NATIVE module: adding it forces a new EAS
- * build and a reinstall for everyone holding the current APK, which is far too much for three
- * icons. PNGs ride along in an ordinary over-the-air update.
+ * PNG, NOT SVG, and the reason is delivery: react-native-svg is a NATIVE module, so adding it
+ * forces a new EAS build and a reinstall for everyone holding the current APK. Three icons do
+ * not justify that; PNGs ride along in an ordinary over-the-air update.
  *
- * DRAWN RATHER THAN DOWNLOADED (see the generator in the scratchpad, recorded in the commit):
- * this repo is public and these ship inside the app, so an icon of uncertain licence is a real
- * liability for three glyphs.
+ * DRAWN, NOT DOWNLOADED (tools/make_sport_icons.py): the repo is public and these ship inside
+ * the app, so an icon of uncertain licence is a real liability for three glyphs.
  *
- * `tintColor` is what makes one asset enough. The files are white on transparent, so RN recolours
- * them at render time -- which preserves exactly the property the CSS glyphs had via
- * `currentColor`, and is why there is one file per sport rather than four.
+ * NO tintColor, AND THAT IS THE COST OF COLOUR. A white silhouette could be recoloured at render
+ * time, so one file served selected, unselected, light and dark. A football is white and black
+ * whatever the theme, so selection is carried by the label weight and the accent underline --
+ * which already carried it -- plus a dimmed opacity here. Every ball has a dark rim so that the
+ * white one survives the light theme's near-white ground.
  */
 const SPORT_ICONS: Record<string, ImageSourcePropType> = {
   football: require("../../assets/sports/football.png"),
@@ -172,12 +168,11 @@ const SPORT_ICONS: Record<string, ImageSourcePropType> = {
   tennis: require("../../assets/sports/tennis.png"),
 };
 
-function SportGlyph({ slug, color }: { slug: string; color: string }) {
-  const source = SPORT_ICONS[slug] ?? SPORT_ICONS.football;
+function SportGlyph({ slug, active }: { slug: string; active: boolean }) {
   return (
     <Image
-      source={source}
-      style={{ width: GLYPH, height: GLYPH, tintColor: color }}
+      source={SPORT_ICONS[slug] ?? SPORT_ICONS.football}
+      style={{ width: GLYPH, height: GLYPH, opacity: active ? 1 : 0.55 }}
       resizeMode="contain"
       accessible={false}
     />
