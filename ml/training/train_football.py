@@ -308,6 +308,11 @@ XGB_COMMON = {
 # would make every headline metric a small-sample number while looking like a like-for-like
 # comparison. Revisit once 2026 is substantially complete -- and when advancing, move all three
 # windows together (train 2022-2024 / val 2025 / test 2026) rather than only the test season.
+# The 33-league retrain adding England League Two, Argentina, Colombia, LaLiga 2 and Brazil
+# Série B has PRE-REGISTERED CRITERIA in docs/retrain-33-league-criteria.md, committed before
+# the run so git timestamps them. Read them before judging its output -- in particular, headline
+# accuracy and corners MAE are NOT comparable across a changed league pool, and the criteria use
+# the baseline GAP and the per-league cut for the 28 leagues present in both arms instead.
 TRAIN_SEASONS = [2021, 2022, 2023]
 VAL_SEASON = 2024
 TEST_SEASON = 2025
