@@ -48,11 +48,11 @@ export function SummaryStrip({
           flexDirection: "row",
           backgroundColor: colors.surface,
           borderRadius: RADIUS.control,
-          // 10 rather than 13, with the two fixed inner heights below cut to match. The header is
-          // four stacked rows above a scrolling feed, and every pixel it keeps is a pixel of the
-          // first card the user never sees.
-          paddingVertical: 10,
-          paddingHorizontal: 4,
+          // 7, down from 13 via 10. The header is now FIVE stacked rows above a scrolling feed
+          // (the sport tabs joined it), and every pixel it keeps is a pixel of the first card
+          // the user never sees.
+          paddingVertical: 7,
+          paddingHorizontal: 2,
           ...elevation.card,
         }}
       >
@@ -112,20 +112,19 @@ function Column({
   const body = (
     <View style={{ alignItems: "center", paddingHorizontal: 6 }}>
       {/* Fixed height so all three eyebrows sit on one baseline even when one wraps to two
-          words — otherwise the values below them land at different heights. 14 rather than 24,
-          which is the reduced-height treatment: eyebrowSmall is already 9.5/800 at 0.76 letter
-          spacing, i.e. exactly the 9.5/800/0.08em the spec asks for. */}
-      <View style={{ height: 14, justifyContent: "center", marginBottom: 5 }}>
-        <Text {...ONE_LINE} style={[TYPE.eyebrowSmall, { color: colors.textFaint, lineHeight: 11.4 }]}>
+          words — otherwise the values below them land at different heights. 12 now, matching
+          summaryEyebrow's own 9/700 line box. */}
+      <View style={{ height: 12, justifyContent: "center", marginBottom: 3 }}>
+        <Text {...ONE_LINE} style={[TYPE.summaryEyebrow, { color: colors.textFaint }]}>
           {label}
         </Text>
       </View>
       {/* Fixed height on the value row too: a flag and a numeral have different natural heights,
           and without this the three columns' baselines drift apart the moment a country is
-          selected. The flag shrank 22 → 20 with this row, so it still fits inside it. */}
+          selected. The flag tracks the row down to 16 so it still fits inside it. */}
       <View
         style={{
-          height: 20,
+          height: 16,
           flexDirection: "row",
           alignItems: "center",
           justifyContent: "center",
@@ -136,15 +135,14 @@ function Column({
           // A country shows its flag; "no filter" shows the globe CountryFlag already falls
           // back to. Keeping both as images means the column never changes shape when the
           // filter is set or cleared, which a word-then-flag swap would do.
-          <CountryFlag country={flag ?? null} size={20} />
+          <CountryFlag country={flag ?? null} size={16} />
         ) : (
           <Text
             {...ONE_LINE}
             style={[
               TYPE.summaryValue,
-              // line-height 1: the role carries 25 for use in running text, but here the row is
-              // a fixed 20 and a taller line box would push the numeral off its own baseline.
-              { lineHeight: 20 },
+              // The row is a fixed 16; the role's own 15.4 line box already fits inside it, so
+              // no override is needed any more.
               // Accent signals "this one does something"; a selected country also reads as a
               // filter that is currently ON.
               { color: active ? colors.accent : colors.text },
@@ -221,7 +219,8 @@ function CountryPicker({
         <View
           style={{
             position: "absolute",
-            top: 210,
+            // Follows the card up as it shrank: 210 -> 52 relative to the header it hangs under.
+            top: 52,
             right: SCREEN.padding,
             minWidth: 210,
             maxHeight: 360,

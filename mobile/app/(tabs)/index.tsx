@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { router } from "expo-router";
 import { useEffect, useMemo, useState } from "react";
-import { RefreshControl, ScrollView, Text, View } from "react-native";
+import { Pressable, RefreshControl, ScrollView, Text, View } from "react-native";
 
 import { GuestBanner } from "@/components/GuestBanner";
 import { AdSlot, MIN_FEED_FOR_MPU, placeFeedAds, useAdsEnabled } from "@/lib/ads";
@@ -11,6 +11,7 @@ import { LeagueCard, LeagueGroupHeader } from "@/components/picks/LeagueGroup";
 import { MatchRow } from "@/components/picks/MatchRow";
 import { PicksHeader } from "@/components/picks/PicksHeader";
 import { SegmentedControl } from "@/components/picks/SegmentedControl";
+import { SportTabs, SPORT_TABS } from "@/components/picks/SportTabs";
 import { SummaryStrip, type CountryOption } from "@/components/picks/SummaryStrip";
 import { listFixtures } from "@/lib/api/fixtures";
 import type { BestPick, FixtureSummary } from "@/lib/api/types";
@@ -18,7 +19,7 @@ import { getPreferences } from "@/lib/api/users";
 import { addToWatchlist, listWatchlist, removeFromWatchlist } from "@/lib/api/watchlist";
 import { countryForTournamentLocation } from "@/lib/countryFlags";
 import { toOddsFormat } from "@/lib/oddsFormat";
-import { GAP, SCREEN, TYPE, useTheme } from "@/lib/theme";
+import { GAP, RADIUS, SCREEN, TYPE, useTheme } from "@/lib/theme";
 import { useAuthStore } from "@/store/authStore";
 import {
   hasActiveFilters,
@@ -28,7 +29,7 @@ import {
 } from "@/store/picksStore";
 
 const FIXTURES_PAGE_LIMIT = 200;
-const SEGMENTS: readonly Segment[] = ["All", "Upcoming", "Finished"];
+const SEGMENTS: readonly Segment[] = ["All", "Live", "Upcoming", "Finished"];
 
 function dayBounds(date: Date): { from: string; to: string } {
   const from = startOfDay(date);
@@ -181,7 +182,7 @@ export default function PicksScreen() {
   /** The filter pipeline, in the order §9.2 documents. Order matters: the country list is built
    * from the result of the FAVOURITES step but BEFORE the country filter, so switching country
    * is never a dead end. */
-  const { groups, countries, visibleCount } = useMemo(() => {
+  const { groups, countries, visibleCount, liveCount } = useMemo(() => {
     const everything = fixturesQuery.data ?? [];
 
     // 1. SPORT / TOUR, applied here rather than server-side because the selection is a SET and
@@ -212,6 +213,7 @@ export default function PicksScreen() {
       // Postponed IS kept: it was on today's card as an upcoming fixture, and someone
       // browsing "what's coming up" needs to see it was called off rather than have it
       // silently vanish.
+      if (store.segment === "Live") return fixture.status === "live";
       return fixture.status === "scheduled" || fixture.status === "postponed";
     });
 
@@ -247,6 +249,10 @@ export default function PicksScreen() {
       groups: filtered,
       countries: countryOptions,
       visibleCount: filtered.reduce((sum, group) => sum + group.matches.length, 0),
+      // FROM THE WHOLE DAY, before sport/segment/country narrowing. "Live (2)" answers "is
+      // anything happening right now"; computing it after the filters would make it report
+      // what survived them, which is a different and much less useful question.
+      liveCount: everything.filter((f) => f.status === "live").length,
     };
   }, [
     fixturesQuery.data,
@@ -265,11 +271,31 @@ export default function PicksScreen() {
     setRefreshing(false);
   }
 
-  const emptyReason = store.onlyFavourites
-    ? "You're only showing starred leagues. None of them have a pick today."
-    : store.country
-      ? `No picks in ${store.country} today.`
-      : "No pick clears your probability and odds thresholds for this day.";
+  // Which sport is on screen, when exactly one is -- used to name the empty state after the
+  // thing the user actually chose.
+  const soleSport =
+    store.sports.length === 1
+      ? SPORT_TABS.find((t) => t.slug === store.sports[0])
+      : undefined;
+  // Does that sport have ANY fixtures today, before this screen's own narrowing? This is the
+  // difference between "your thresholds hid everything" and "there is no tennis today", and
+  // sending someone to the odds slider when the truth is the latter wastes their time.
+  const sportHasFixtures = (fixturesQuery.data ?? []).some(
+    (f) => !soleSport || f.sport_slug === soleSport.slug
+  );
+
+  const emptyTitle =
+    soleSport && !sportHasFixtures
+      ? `No ${soleSport.label.toLowerCase()} today`
+      : "No picks match your filters";
+  const emptyReason =
+    soleSport && !sportHasFixtures
+      ? `We have no ${soleSport.label.toLowerCase()} fixtures on this date. Try another day or another sport.`
+      : store.onlyFavourites
+        ? "You're only showing starred leagues. None of them have a pick today."
+        : store.country
+          ? `No picks in ${store.country} today.`
+          : "No pick clears your probability and odds thresholds for this day.";
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.bg }}>
@@ -278,6 +304,7 @@ export default function PicksScreen() {
         onOpenFilters={() => setFiltersOpen(true)}
         filtersActive={hasActiveFilters(store)}
       >
+        <SportTabs selected={store.sports} onSelect={store.selectSport} />
         <DateStepper selected={store.selectedDate} onSelect={store.setSelectedDate} />
         <SummaryStrip
           callCount={visibleCount}
@@ -286,7 +313,14 @@ export default function PicksScreen() {
           countries={countries}
           onSelectCountry={store.setCountry}
         />
-        <SegmentedControl options={SEGMENTS} value={store.segment} onChange={store.setSegment} />
+        <SegmentedControl
+          options={SEGMENTS}
+          value={store.segment}
+          onChange={store.setSegment}
+          // Only when something IS live. A "Live (0)" label is noise, and the whole point of
+          // this count is that it means something is happening right now.
+          badges={liveCount > 0 ? { Live: String(liveCount) } : undefined}
+        />
       </PicksHeader>
 
       <ScrollView
@@ -314,11 +348,26 @@ export default function PicksScreen() {
         ) : groups.length === 0 ? (
           <View style={{ alignItems: "center", marginTop: 40, paddingHorizontal: 12 }}>
             <Text style={[TYPE.pick, { fontSize: 15, color: colors.text, marginBottom: 6 }]}>
-              No picks match your filters
+              {emptyTitle}
             </Text>
             <Text style={[TYPE.body, { color: colors.textSub, textAlign: "center" }]}>
               {emptyReason}
             </Text>
+            {soleSport && !sportHasFixtures && (
+              <Pressable
+                onPress={store.clearSports}
+                accessibilityRole="button"
+                style={{
+                  marginTop: 16,
+                  paddingHorizontal: 20,
+                  paddingVertical: 10,
+                  borderRadius: RADIUS.button,
+                  backgroundColor: colors.accent,
+                }}
+              >
+                <Text style={[TYPE.pick, { color: "#ffffff" }]}>Show all sports</Text>
+              </Pressable>
+            )}
           </View>
         ) : (
           placeFeedAds(groups, (group) => group.matches.length, adsEnabled).map(
@@ -332,7 +381,14 @@ export default function PicksScreen() {
                 timeUnconfirmed={group.timeUnconfirmed}
                 starred={store.favourites.includes(group.title)}
                 onToggleStar={() => store.toggleFavourite(group.title)}
+                count={group.matches.length}
+                liveCount={group.matches.filter((f) => f.status === "live").length}
+                collapsed={store.collapsed.includes(group.title)}
+                onToggleCollapsed={() => store.toggleCollapsed(group.title)}
               />
+              {/* The HEADER stays when collapsed, and so does any ad slot after the group --
+                  collapsing hides a league's matches, it does not remove the league. */}
+              {!store.collapsed.includes(group.title) && (
               <LeagueCard>
                 {group.matches.map((fixture, index) => (
                   <MatchRow
@@ -356,6 +412,7 @@ export default function PicksScreen() {
                   />
                 ))}
               </LeagueCard>
+              )}
               {/* Feed furniture rather than an interruption: the unit sits inside the group's
                   own bottom spacing, after a whole league rather than between two matches.
                   Renders nothing until a provider exists — see lib/ads. */}

@@ -2,7 +2,7 @@ import { Pressable, Text, View } from "react-native";
 
 import { RADIUS, TYPE, useTheme } from "@/lib/theme";
 
-/** All / Upcoming / Finished (design spec §3.1 row 4).
+/** All / Live / Upcoming / Finished (design spec §3.1 row 4).
  *
  * The active segment LIFTS to `surface` with the card shadow while the track stays
  * `surfaceAlt`, so the selection reads as raised rather than merely tinted — the same
@@ -13,10 +13,14 @@ export function SegmentedControl<T extends string>({
   options,
   value,
   onChange,
+  badges,
 }: {
   options: readonly T[];
   value: T;
   onChange: (value: T) => void;
+  /** Optional per-option count, e.g. { Live: "2" }. An option with no entry shows none --
+   * which is how "Live (0)" is avoided without this component knowing what Live means. */
+  badges?: Partial<Record<T, string>>;
 }) {
   const { colors, elevation } = useTheme();
 
@@ -55,6 +59,12 @@ export function SegmentedControl<T extends string>({
               ]}
             >
               {option}
+              {badges?.[option] ? (
+                // The count carries `fail` whether or not the segment is selected: it is the one
+                // number on this screen that means "something is happening right now", and
+                // dimming it when unselected would hide exactly the case it exists to announce.
+                <Text style={{ color: colors.fail }}> ({badges[option]})</Text>
+              ) : null}
             </Text>
           </Pressable>
         );

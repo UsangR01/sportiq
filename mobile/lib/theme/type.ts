@@ -38,18 +38,22 @@ export const TYPE = {
   /** "SportPIQ" — every screen shows the wordmark instead of a per-screen title. */
   wordmark: {
     fontFamily: SYSTEM_STACK,
-    fontSize: 26,
-    lineHeight: 32,
+    // 20, not 26. It is still the most prominent thing in the header, but at 26 it outranked
+    // the content underneath it -- on a screen whose whole job is the picks, the brand should
+    // not be the largest type on it.
+    fontSize: 20,
+    lineHeight: 25,
     fontWeight: "800",
-    letterSpacing: -0.65,
+    letterSpacing: -0.5,
   } as TextStyle,
 
-  /** Slightly tighter wordmark used on Top calls. */
+  /** Kept as an alias so the Top calls screen needs no edit: it was 24 against everything
+   * else's 26, and one size everywhere is the point of the change. */
   wordmarkCompact: {
-    fontSize: 24,
-    lineHeight: 30,
+    fontSize: 20,
+    lineHeight: 25,
     fontWeight: "800",
-    letterSpacing: -0.72,
+    letterSpacing: -0.5,
   } as TextStyle,
 
   /** All-caps section label, e.g. CALLS TODAY. */
@@ -70,13 +74,35 @@ export const TYPE = {
     textTransform: "uppercase",
   } as TextStyle,
 
-  /** Summary-strip value. */
+  /** Summary-strip value.
+   *
+   * 14, down from 20. The strip reports CONTEXT -- how many calls, how many leagues -- and at 20
+   * it was set larger than the probabilities and prices on the cards below, which are the thing
+   * the screen exists to show. Shrinking it is the same judgement as the wordmark's. */
   summaryValue: {
-    fontSize: 20,
-    lineHeight: 25,
-    fontWeight: "800",
-    letterSpacing: -0.7,
+    fontSize: 14,
+    lineHeight: 15.4,
+    fontWeight: "700",
+    letterSpacing: -0.28,
     ...TABULAR,
+  } as TextStyle,
+
+  /** The strip's own eyebrow: smaller and lighter than eyebrowSmall, which at 9.5/800 competed
+   * with the value beneath it once that value came down to 14. */
+  summaryEyebrow: {
+    fontSize: 9,
+    lineHeight: 10.8,
+    fontWeight: "700",
+    letterSpacing: 0.63,
+    textTransform: "uppercase",
+  } as TextStyle,
+
+  /** Sport-tab label. 12/800 when selected, 12/600 when not -- the weight carries selection,
+   * with the underline. Deliberately NOT tabLabel (11/600), which belongs to the bottom nav. */
+  sportTab: {
+    fontSize: 12,
+    lineHeight: 15,
+    letterSpacing: -0.1,
   } as TextStyle,
 
   /** The big model percentage on Top calls. */

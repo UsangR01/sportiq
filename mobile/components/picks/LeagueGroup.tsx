@@ -20,6 +20,10 @@ export function LeagueGroupHeader({
   timeUnconfirmed,
   starred,
   onToggleStar,
+  count,
+  liveCount,
+  collapsed,
+  onToggleCollapsed,
 }: {
   title: string;
   country: string | null;
@@ -30,6 +34,11 @@ export function LeagueGroupHeader({
   timeUnconfirmed: boolean;
   starred: boolean;
   onToggleStar: () => void;
+  /** Fixtures in this group, and how many of them are in play. */
+  count: number;
+  liveCount: number;
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
 }) {
   const { colors } = useTheme();
 
@@ -37,7 +46,13 @@ export function LeagueGroupHeader({
     <View style={{ flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 8 }}>
       <CountryFlag country={country} leagueSlug={leagueSlug} size={22} />
 
-      <View style={{ flex: 1 }}>
+      <Pressable
+        onPress={onToggleCollapsed}
+        accessibilityRole="button"
+        accessibilityState={{ expanded: !collapsed }}
+        accessibilityLabel={`${collapsed ? "Expand" : "Collapse"} ${title}`}
+        style={{ flex: 1 }}
+      >
         {/* Says outright that these have no confirmed time, so the day they appear under is a
             fallback rather than a scheduled slot — better than implying a precision the
             provider never gave us. */}
@@ -52,6 +67,24 @@ export function LeagueGroupHeader({
             {[country, surface].filter(Boolean).join(" · ")}
           </Text>
         )}
+      </Pressable>
+
+      {/* The count, and the LIVE fraction when anything here is in play. Showing "1/3" in `fail`
+          rather than a plain 3 is what makes a collapsed league still say something is
+          happening inside it -- otherwise collapsing hides the one state worth surfacing. */}
+      <View
+        style={{
+          height: 22,
+          paddingHorizontal: 7,
+          borderRadius: 11,
+          backgroundColor: colors.surfaceAlt,
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        <Text style={[TYPE.eyebrowSmall, { letterSpacing: 0, color: liveCount > 0 ? colors.fail : colors.textSub }]}>
+          {liveCount > 0 ? `${liveCount}/${count}` : count}
+        </Text>
       </View>
 
       <Pressable
@@ -69,6 +102,40 @@ export function LeagueGroupHeader({
         <Text style={{ fontSize: 17, color: starred ? colors.star : colors.textFaint }}>
           {starred ? "★" : "☆"}
         </Text>
+      </Pressable>
+
+      <Pressable
+        onPress={onToggleCollapsed}
+        accessibilityRole="button"
+        accessibilityState={{ expanded: !collapsed }}
+        accessibilityLabel={`${collapsed ? "Expand" : "Collapse"} ${title}`}
+        style={{
+          width: 30,
+          height: 30,
+          borderRadius: 15,
+          borderWidth: 1,
+          borderColor: colors.border,
+          backgroundColor: colors.surface,
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        {/* A rotated corner rather than a glyph, matching every other chevron in the app. The
+            vertical nudge differs by direction because rotating a square about its centre moves
+            its visual mass -- without it the caret sits low when open and high when closed. */}
+        <View
+          style={{
+            width: 8,
+            height: 8,
+            borderRightWidth: 1.6,
+            borderBottomWidth: 1.6,
+            borderColor: colors.textSub,
+            transform: [
+              { rotate: collapsed ? "45deg" : "225deg" },
+              { translateY: collapsed ? -1 : 2 },
+            ],
+          }}
+        />
       </Pressable>
     </View>
   );

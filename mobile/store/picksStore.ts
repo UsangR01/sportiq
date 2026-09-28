@@ -18,7 +18,11 @@ import { getItem, setItem } from "@/lib/storage";
 
 const FAVOURITES_KEY = "sportiq_favourite_leagues";
 
-export type Segment = "All" | "Upcoming" | "Finished";
+// LIVE sits between All and Upcoming deliberately. It is not a third kind of "not finished":
+// a match in progress was reported as indistinguishable from one that had not kicked off, which
+// is why Upcoming means NOT STARTED here and live matches need their own segment rather than
+// being folded back in.
+export type Segment = "All" | "Live" | "Upcoming" | "Finished";
 
 /** Defaults, per §9.1. 0.6 matches the server-side floor the feed has always applied.
  *
@@ -63,6 +67,10 @@ interface PicksState {
   toggleSport: (slug: string) => void;
   toggleSubSport: (slug: string) => void;
   clearSports: () => void;
+  selectSport: (slug: string) => void;
+  /** League titles the user has collapsed. Every league starts open. */
+  collapsed: string[];
+  toggleCollapsed: (title: string) => void;
   setSegment: (segment: Segment) => void;
   setMinProbability: (value: number) => void;
   setMinOdds: (value: number) => void;
@@ -115,6 +123,10 @@ const FILTER_DEFAULTS = {
 export const usePicksStore = create<PicksState>((set, get) => ({
   selectedDate: new Date(),
   ...FILTER_DEFAULTS,
+  // NOT in FILTER_DEFAULTS: collapsing a league is a view preference, not a filter. Putting it
+  // there would make "Reset filters" silently re-expand everything, and would light the filter
+  // dot for something plainly visible on screen.
+  collapsed: [] as string[],
   favourites: [],
   expanded: null,
   favouritesHydrated: false,
@@ -146,6 +158,32 @@ export const usePicksStore = create<PicksState>((set, get) => ({
   },
 
   clearSports: () => set({ sports: [], subSports: [] }),
+
+  /** The sport-tab tap. Writes the SAME `sports` array the filter sheet uses, so the two can
+   * never disagree -- there is one value, not two views of one.
+   *
+   * Tapping the active tab returns to the DEFAULT rather than to "all sports": football is the
+   * product's centre of gravity (18 leagues of trained model against one shared basketball model
+   * and a single tennis tour), and an all-sports feed buries a day's football under whatever
+   * else happens to be playing. The sheet still reaches all-sports in one tap.
+   *
+   * Selecting a sport drops any tour selection that no longer belongs to it -- otherwise
+   * choosing Tennis while ATP-and-WNBA were selected would silently keep filtering by WNBA. */
+  selectSport: (slug: string) => {
+    const current = get().sports;
+    const isOnlyThis = current.length === 1 && current[0] === slug;
+    const sports = isOnlyThis ? [DEFAULT_SPORT] : [slug];
+    const allowed = new Set(sports.flatMap((s) => SUB_SPORTS[s] ?? []));
+    set({ sports, subSports: get().subSports.filter((sub) => allowed.has(sub)) });
+  },
+  toggleCollapsed: (title) => {
+    const current = get().collapsed;
+    set({
+      collapsed: current.includes(title)
+        ? current.filter((t) => t !== title)
+        : [...current, title],
+    });
+  },
   setSegment: (segment) => set({ segment }),
   setMinProbability: (minProbability) => set({ minProbability }),
   setMinOdds: (minOdds) => set({ minOdds }),
@@ -188,7 +226,10 @@ export const usePicksStore = create<PicksState>((set, get) => ({
  * filtering, and dotting the button for it would train users to ignore the dot. */
 export function hasActiveFilters(state: PicksState): boolean {
   return (
-    !sameSet(state.sports, FILTER_DEFAULTS.sports) ||
+    // `sports` is DELIBERATELY ABSENT. The selected sport is visible on the tab row directly
+    // under the header, so flagging it again as "a filter is active" would make the dot mean
+    // "you are using the app" -- and a dot that is always on tells nobody anything. The tours
+    // underneath it are not visible anywhere, so those still count.
     state.subSports.length > 0 ||
     state.segment !== FILTER_DEFAULTS.segment ||
     state.minProbability !== FILTER_DEFAULTS.minProbability ||
