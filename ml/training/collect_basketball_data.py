@@ -54,6 +54,7 @@ latest. Read it with max(), never by position -- the same mistake already docume
 TheStatsAPI.
 """
 
+import argparse
 import json
 import sys
 import time
@@ -76,7 +77,11 @@ OUT_DIR = Path(__file__).resolve().parents[1] / "data"
 # Exactly what the Free plan serves. Confirmed by probing both neighbours: 2021-2022 and
 # 2025-2026 each return the plan error, 2022-2023 and 2024-2025 each return a full season.
 DOMESTIC_SEASONS = ["2022-2023", "2023-2024", "2024-2025"]
+# The Euroleague and the WNBA both label a season with a bare year rather than a span -- the
+# Euroleague because the provider does, the WNBA because it genuinely runs inside one calendar
+# year (May-September), the same convention split balldontlie.py's _current_season handles.
 EUROLEAGUE_SEASONS = [2022, 2023, 2024]
+WNBA_SEASONS = [2022, 2023, 2024]
 
 # ids confirmed live via /leagues on 2026-10-04, every one with odds, standings and team/player
 # statistics coverage true on its current season.
@@ -91,6 +96,16 @@ LEAGUE_CONFIGS: dict[str, dict] = {
     # also play their domestic leagues, so pooling the two gives a club one continuous form and
     # Elo history instead of two disjoint ones.
     "euroleague": {"id": 120, "country": "Europe", "seasons": EUROLEAGUE_SEASONS},
+    # THE WNBA, from this provider rather than BallDontLie, and the reason is the measurement
+    # rather than convenience. The WNBA has been served by NBA weights since August on a bet
+    # CLAUDE.md records as explicitly unmeasured ("Nothing here has been measured against WNBA
+    # outcomes"). Pulling it through the SAME collector as the European leagues means the same
+    # instrument scores both, so the two results are directly comparable instead of being two
+    # numbers produced by two code paths.
+    #
+    # It does NOT replace BallDontLie for serving -- that stays the live WNBA source, keeps its
+    # `wnba:` external-id prefix, and is unaffected by this. API-Basketball calls it "NBA W".
+    "wnba": {"id": 13, "country": "USA", "seasons": WNBA_SEASONS},
 }
 
 FINAL_STATUSES = {"FT", "AOT"}
@@ -181,6 +196,24 @@ def collect_league(client: httpx.Client, slug: str, config: dict) -> pd.DataFram
 
 
 def main() -> None:
+    # --leagues exists because the budget is 100 requests/day: adding one competition should
+    # cost its own 3 calls, not a re-fetch of all 24. Per-league parquets are written
+    # independently, so a partial run tops up the set rather than replacing it.
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--leagues",
+        help=f"comma-separated subset of {','.join(LEAGUE_CONFIGS)} (default: all)",
+    )
+    args = parser.parse_args()
+    if args.leagues:
+        wanted = [slug.strip() for slug in args.leagues.split(",") if slug.strip()]
+        unknown = [slug for slug in wanted if slug not in LEAGUE_CONFIGS]
+        if unknown:
+            raise SystemExit(f"unknown league(s): {', '.join(unknown)}")
+        selected = {slug: LEAGUE_CONFIGS[slug] for slug in wanted}
+    else:
+        selected = LEAGUE_CONFIGS
+
     key = get_settings().api_football_key
     if not key:
         raise SystemExit(
@@ -192,7 +225,7 @@ def main() -> None:
     with httpx.Client(
         base_url=BASE_URL, headers={"x-apisports-key": key}, timeout=60.0
     ) as client:
-        for slug, config in LEAGUE_CONFIGS.items():
+        for slug, config in selected.items():
             frame = collect_league(client, slug, config)
             if frame.empty:
                 print(f"  {slug}: nothing collected")
@@ -203,8 +236,17 @@ def main() -> None:
             frames.append(frame)
 
     if frames:
-        pooled = pd.concat(frames, ignore_index=True)
-        pooled.to_parquet(OUT_DIR / "basketball_game_log_pooled.parquet", index=False)
+        # Rebuilt from EVERY per-league parquet on disk, not just the ones this run fetched --
+        # otherwise `--leagues wnba` would silently replace the pooled frame with one league and
+        # the next measurement would score a population nobody chose.
+        pooled_path = OUT_DIR / "basketball_game_log_pooled.parquet"
+        parts = [
+            p
+            for p in sorted(OUT_DIR.glob("basketball_game_log_*.parquet"))
+            if p != pooled_path
+        ]
+        pooled = pd.concat([pd.read_parquet(p) for p in parts], ignore_index=True)
+        pooled.to_parquet(pooled_path, index=False)
         print(
             f"\npooled: {len(pooled)} team-game rows, {pooled['GAME_ID'].nunique()} games"
         )

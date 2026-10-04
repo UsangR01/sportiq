@@ -2637,6 +2637,83 @@ mapping only `FT` would leave those never settling). `greece.png` is missing fro
 flag set, and `Sport.name` is literally "NBA Basketball", which goes wrong once it holds
 Spanish and Greek leagues.
 
+## The WNBA bet is vindicated, and basketball's base rate was the wrong shape (2026-10-04)
+
+Two follow-ups to the European basketball measurement, both run with the same instrument.
+
+### The WNBA, measured at last -- and it transfers BETTER than Europe
+
+`measure_basketball_transfer.py --leagues wnba`, against the same active NBA artefact. The WNBA
+was pulled through API-Basketball ("NBA W", id 13) rather than BallDontLie **specifically so one
+instrument scores both populations** -- two numbers from two code paths would not be comparable.
+BallDontLie remains the live WNBA source and is untouched.
+
+    accuracy   0.6894   vs always-home 0.5455    +14.39pp   95% CI [0.631, 0.742]
+    Brier      0.2091   vs             0.2480    better
+    log loss   0.6102   vs             0.6892
+    ECE        0.0288
+
+**All three pre-registered criteria pass, and the result is essentially native quality**: the
+model scores +14.39pp over baseline on the WNBA against +13.22pp on its own NBA test split. The
+reliability table is clean too -- every bucket within 0.05, with none of the overconfident tail
+Europe showed at 0.9+. n=264 (2024 season, three seasons collected), over MIN_REPORTABLE_N, and
+the baseline sits outside the 95% interval.
+
+So the standing caveat -- "The weights are NBA's... calibration may well be off. Nothing here
+has been measured against WNBA outcomes" -- is now answered, and the answer is favourable. Europe
+is the weaker case of the two (+4.26pp), not the WNBA.
+
+**A finding that fed straight into the fix below: the WNBA's home-win rate is 0.5393, LOWER than
+the NBA's 0.5518** -- the opposite of the assumption that a shorter, lower-scoring game would
+carry more home advantage. European leagues do (0.571-0.649); the WNBA does not.
+
+### `_base_rate` was judging a TWO-WAY market against a THREE-WAY split
+
+Basketball had no override, so it fell back to football's table. That is not a precision problem,
+it is a shape problem: football's h2h home share is 0.4582 **because a quarter of its outcomes
+are draws**. Basketball has no draw, so home and away must sum to 1.
+
+    borrowed   home 0.4582 -> bar 0.5082     away 0.2879 -> bar 0.3379
+    measured   home 0.5506 -> bar 0.6006     away 0.4494 -> bar 0.4994
+
+**So a basketball home pick at 0.52 PASSED while sitting below the 0.5506 that backing every
+home team gets for free.** The gate was admitting picks that say less than nothing -- the
+identical fault `_TENNIS_BASE_RATES` was emptied for, reached by a different route. Real
+production cards were showing exactly that: 34 of 92 home picks across 136 real fixtures priced
+at 0.523.
+
+**Corrected rather than abandoned, unlike tennis, and the distinction is the reason:** tennis
+"home" is `_home_away_players`' id tiebreak, so there was nothing real to measure. Basketball's
+home IS a venue -- home-court advantage is a genuine causal effect and "back the home team" is a
+strategy someone could run -- so the same reasoning that keeps football's rates applies.
+
+    NBA    n=7,220  0.5518   six seasons, ml/data/nba_game_log*.parquet
+    WNBA   n=  777  0.5393   2022-2024, ml/data/basketball_game_log_wnba.parquet
+    pooled n=7,997  0.5506
+
+**ONE RATE FOR BOTH LEAGUES, defensible only because they agree** (1.25pp apart) and because
+`BASE_RATES_BY_SPORT` has no league dimension. It would NOT be defensible for the European
+leagues at 0.571-0.649; serving those needs a per-league lookup, not a second borrowed constant.
+Pinned by `test_basketball_base_rate.py`, which asserts the pair sums to 1 and that football's
+does not -- the structural property, rather than just the numbers.
+
+**MEASURED COST AT THE APP'S OWN DEFAULT: ZERO.** With `min_probability` at its default 0.6, all
+58 home picks across those 136 fixtures sit at **0.6421 or above**, so none falls below the new
+0.6006 bar, and every away pick clears 0.4994 by the same slider. Checked before changing
+anything, because the previous guard tightening (`MIN_FEATURE_COMPLETENESS` 0.25 -> 0.35)
+retroactively deleted 21 published picks and drew a direct complaint.
+
+**The honest cost, stated rather than buried: it is NOT zero for a user who lowers the slider.**
+There it removes 34 picks, 29 of them already settled. Every one sat at or below the no-skill
+rate, so removing them is the gate working -- but it does change already-published cards, which
+is the one thing that has been objected to before. Recorded in the module and here so the
+tradeoff is visible rather than discovered.
+
+**A claim of mine that did not survive its own check**, kept because the wrong version was the
+more reassuring one: I first reported that correcting the rate would LOOSEN the away bar. It
+tightens it (0.3379 -> 0.4994). The error was comparing against `double_chance` X2 (0.5418)
+instead of `h2h` away (0.2879) -- basketball has no double chance at all.
+
 ## Mobile implementation status
 
 `mobile/` is a real Expo Router app (SDK 57, TypeScript), scaffolded and live-tested end to end against the running backend on **both** Expo web and a real Android emulator (registration, login, logout, guest-session creation/migration, and every §5.2 screen route) — not just created and left unverified.

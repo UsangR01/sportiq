@@ -519,8 +519,52 @@ _TENNIS_BASE_RATES: dict[tuple[str, str, float | None], float] = {
     # against an artifact.
 }
 
+# Basketball's own measured rates, replacing football's. The borrowed numbers were not merely
+# imprecise, they were the WRONG SHAPE: football's h2h is a THREE-WAY market whose home share is
+# 0.4582 because a quarter of its outcomes are draws. Basketball has no draw, so home and away
+# must sum to 1, and borrowing a three-way split put both bars far below the no-skill line:
+#
+#     borrowed   home 0.4582 -> bar 0.5082     away 0.2879 -> bar 0.3379
+#     measured   home 0.5506 -> bar 0.6006     away 0.4494 -> bar 0.4994
+#
+# A home pick at 0.52 therefore PASSED while sitting below the 0.5506 rate that backing every
+# home team gets for free -- the gate admitting picks that say less than nothing, which is
+# exactly the fault _TENNIS_BASE_RATES above was emptied for. Unlike tennis this is corrected
+# rather than abandoned, because basketball's "home" IS a venue: home-court advantage is a real
+# causal effect and "back the home team" is a strategy someone could actually run, so the same
+# reasoning that keeps football's rates applies here.
+#
+# MEASURED, both from real completed games rather than assumed:
+#     NBA    n=7,220  0.5518   (ml/data/nba_game_log*.parquet, six seasons via nba_api)
+#     WNBA   n=  777  0.5393   (ml/data/basketball_game_log_wnba.parquet, 2022-2024)
+#     pooled n=7,997  0.5506
+#
+# ONE RATE FOR BOTH LEAGUES, and that is defensible here only because they agree: 1.25pp apart,
+# and BASE_RATES_BY_SPORT has no league dimension. It would NOT be defensible for the European
+# leagues, which run 0.571 (Turkey) to 0.649 (Italy) -- so if those are ever served, this needs
+# a per-league lookup rather than a second borrowed constant. See CLAUDE.md's basketball entry.
+#
+# MEASURED COST AT THE APP'S OWN DEFAULT: ZERO. With min_probability at its default 0.6, all 58
+# home picks across 136 real basketball fixtures (Aug-Oct 2026) sit at 0.6421 or above, so none
+# falls below the new 0.6006 bar, and every away pick clears 0.4994 by the same slider. The
+# correction only bites for a user who lowers the slider, where it removes 34 picks -- 29 of
+# them settled -- every one of which sat at or below the rate backing the home team gets free.
+# Removing those is the gate working, but it DOES change already-published cards, which is the
+# one thing a user has objected to before, so it is recorded here rather than left implicit.
+#
+# Only h2h is listed. Basketball has no draw, so double_chance cannot exist for it, and
+# goals_total/corners_total are football markets -- those keys stay ABSENT rather than zeroed,
+# so _base_rate returns None and the gate declines to judge a market the sport does not have.
+_BASKETBALL_BASE_RATES: dict[tuple[str, str, float | None], float] = {
+    ("h2h", "home", None): 0.5506,
+    ("h2h", "away", None): 0.4494,
+}
+
 BASE_RATES_BY_SPORT: dict[str, dict[tuple[str, str, float | None], float]] = {
     "tennis": _TENNIS_BASE_RATES,
+    # Covers the WNBA too: both leagues share Sport(slug="nba"), which is why one rate had to
+    # be checked against both rather than taken from the NBA alone.
+    "nba": _BASKETBALL_BASE_RATES,
 }
 
 # How far above its market's base rate a pick must sit to count as saying anything. A pick at
@@ -658,9 +702,13 @@ def _base_rate(candidate: _MarketCandidate, sport_slug: str | None = None) -> fl
     """The share of real fixtures this outcome occurs in regardless of who is playing.
 
     Sport-specific rates win where they exist; otherwise the football-measured table applies.
-    NBA deliberately has no override — its h2h home rate is a real home-court advantage in the
-    same 45-55% territory the football numbers describe, so borrowing them is defensible in a
-    way borrowing them for tennis was not.
+
+    THIS DOCSTRING USED TO SAY NBA DELIBERATELY HAS NO OVERRIDE, on the grounds that its home
+    rate sits "in the same 45-55% territory the football numbers describe". Measured 2026-10-04,
+    that was true only at the very top edge -- basketball's real rate is 0.5506 against
+    football's 0.4582 -- and it missed the structural point entirely: football's h2h is a
+    three-way market and basketball's is two-way, so the two cannot share a split however close
+    the numbers look. Basketball now has its own measured rates; see _BASKETBALL_BASE_RATES.
 
     None for a market/line with no measured base rate (a line we have not quantified, or a
     market the sport does not have). Such a candidate is not filtered out - we cannot judge its

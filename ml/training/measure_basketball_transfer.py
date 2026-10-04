@@ -66,6 +66,7 @@ Euroleague games, and the provider uses one global team-id namespace, so pooling
 realistic and free. Per-league attribution is by the TEST GAME's own competition.
 """
 
+import argparse
 import sys
 from itertools import pairwise
 from pathlib import Path
@@ -132,7 +133,31 @@ def _top_label_ece(prob: np.ndarray, actual: np.ndarray) -> tuple[float, list[tu
     return ece, table
 
 
+EUROPEAN_LEAGUES = [
+    "acb",
+    "lnb",
+    "bbl",
+    "lega_a",
+    "greek_bl",
+    "turkish_bsl",
+    "euroleague",
+]
+
+
 def main() -> None:
+    # --leagues keeps POPULATIONS APART, and that is not cosmetic. The WNBA is in the same
+    # collected set but is a different question: pooling it with the European leagues would
+    # blend two home-advantage regimes into one always-home baseline and report a single number
+    # for two distinct bets. Features themselves cannot cross-contaminate (assemble_from_game_log
+    # filters by TEAM_ABBREVIATION and no team plays in both), but the BASELINE would.
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--leagues",
+        default=",".join(EUROPEAN_LEAGUES),
+        help="comma-separated leagues to score, or 'all' (default: the seven European ones)",
+    )
+    args = parser.parse_args()
+
     pooled_path = DATA / "basketball_game_log_pooled.parquet"
     if not pooled_path.exists():
         # Rebuilt from the per-league frames rather than required on disk: those are committed
@@ -153,6 +178,13 @@ def main() -> None:
 
     games = pd.read_parquet(pooled_path)
     games["GAME_DATE"] = pd.to_datetime(games["GAME_DATE"]).dt.date
+    if args.leagues != "all":
+        wanted = [s.strip() for s in args.leagues.split(",") if s.strip()]
+        missing = sorted(set(wanted) - set(games["LEAGUE"].unique()))
+        if missing:
+            raise SystemExit(f"no collected data for: {', '.join(missing)}")
+        games = games[games["LEAGUE"].isin(wanted)].copy()
+    print(f"scoring leagues: {', '.join(sorted(games['LEAGUE'].unique()))}")
     model = NBAModel(str(ARTEFACT), MODEL_VERSION)
 
     # Each league's newest collected season is its held-out set. Compared by start year so the
