@@ -544,13 +544,19 @@ _TENNIS_BASE_RATES: dict[tuple[str, str, float | None], float] = {
 # leagues, which run 0.571 (Turkey) to 0.649 (Italy) -- so if those are ever served, this needs
 # a per-league lookup rather than a second borrowed constant. See CLAUDE.md's basketball entry.
 #
-# MEASURED COST AT THE APP'S OWN DEFAULT: ZERO. With min_probability at its default 0.6, all 58
-# home picks across 136 real basketball fixtures (Aug-Oct 2026) sit at 0.6421 or above, so none
-# falls below the new 0.6006 bar, and every away pick clears 0.4994 by the same slider. The
-# correction only bites for a user who lowers the slider, where it removes 34 picks -- 29 of
-# them settled -- every one of which sat at or below the rate backing the home team gets free.
-# Removing those is the gate working, but it DOES change already-published cards, which is the
-# one thing a user has objected to before, so it is recorded here rather than left implicit.
+# MEASURED COST: ZERO PUBLISHED CARDS ALTERED, and zero upcoming picks lost.
+#
+# Verified in production after the change rather than predicted: every basketball pick still
+# sitting below the new bar (31 of them, minimum 0.5231) is PAST KICKOFF, so pick_freeze.py
+# serves it from the frozen candidate list and short-circuits before any guard runs. Every
+# fixture with a FUTURE kickoff clears the new bar already -- the lowest is 0.6421.
+#
+# An earlier version of this comment said the correction would remove 34 picks, 29 of them
+# settled, for a user who lowered their slider. THAT WAS WRONG, and the error is worth keeping
+# visible because it was the pessimistic direction: it ignored the kickoff freeze, which exists
+# precisely so a guard tightened after the fact cannot reach backwards. The MIN_FEATURE_
+# COMPLETENESS 0.25 -> 0.35 episode that deleted 21 published picks happened BEFORE that freeze
+# existed; this correction cannot repeat it.
 #
 # Only h2h is listed. Basketball has no draw, so double_chance cannot exist for it, and
 # goals_total/corners_total are football markets -- those keys stay ABSENT rather than zeroed,

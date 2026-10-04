@@ -2697,17 +2697,23 @@ leagues at 0.571-0.649; serving those needs a per-league lookup, not a second bo
 Pinned by `test_basketball_base_rate.py`, which asserts the pair sums to 1 and that football's
 does not -- the structural property, rather than just the numbers.
 
-**MEASURED COST AT THE APP'S OWN DEFAULT: ZERO.** With `min_probability` at its default 0.6, all
-58 home picks across those 136 fixtures sit at **0.6421 or above**, so none falls below the new
-0.6006 bar, and every away pick clears 0.4994 by the same slider. Checked before changing
-anything, because the previous guard tightening (`MIN_FEATURE_COMPLETENESS` 0.25 -> 0.35)
-retroactively deleted 21 published picks and drew a direct complaint.
+**MEASURED COST: ZERO PUBLISHED CARDS ALTERED, AND ZERO UPCOMING PICKS LOST** -- verified in
+production after deploying rather than predicted beforehand. Every basketball pick still below
+the new bar (31, minimum 0.5231) is PAST KICKOFF, so `pick_freeze.py` serves it from the frozen
+candidate list and short-circuits before any guard runs. Every FUTURE-kickoff fixture already
+clears it; the lowest is 0.6421.
 
-**The honest cost, stated rather than buried: it is NOT zero for a user who lowers the slider.**
-There it removes 34 picks, 29 of them already settled. Every one sat at or below the no-skill
-rate, so removing them is the gate working -- but it does change already-published cards, which
-is the one thing that has been objected to before. Recorded in the module and here so the
-tradeoff is visible rather than discovered.
+> **I GOT THIS WRONG FIRST, in the pessimistic direction, and the mistake is the useful part.**
+> I reported that the correction would remove 34 picks, 29 of them settled, for any user who
+> lowered their slider -- and wrote that into the module, this file and the delivery board
+> before checking. It ignored the kickoff freeze, which exists for exactly this: "our guards are
+> settled at kickoff and can never rewrite a published card."
+>
+> The `MIN_FEATURE_COMPLETENESS` 0.25 -> 0.35 episode that deleted 21 published picks and drew a
+> direct complaint happened BEFORE that freeze existed. **A guard tightening can no longer reach
+> backwards**, which is a stronger guarantee than I credited the system with -- and it means the
+> reflex of measuring a guard change against settled history, correct in August, now needs to
+> ask first whether the freeze already covers it.
 
 **A claim of mine that did not survive its own check**, kept because the wrong version was the
 more reassuring one: I first reported that correcting the rate would LOOSEN the away bar. It
