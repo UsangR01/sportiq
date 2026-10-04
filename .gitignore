@@ -40,6 +40,17 @@ ml/mlruns/
 # game-log exception above exists to prevent.
 !ml/data/football_xg_*.parquet
 
+# The European basketball game logs (233KB for seven competitions), for a different reason from
+# the football ones above: they are not shipped in the image and nothing serves them. They are
+# the INPUT TO A MEASUREMENT that cannot be re-collected at will -- API-Basketball's free tier
+# serves only 2022-2023..2024-2025 and caps at 100 requests/day, so a plan change upstream would
+# strand ml/training/measure_basketball_transfer.py with no way to reproduce its own numbers.
+# Committing them keeps that measurement checkable by someone who does not hold the key.
+!ml/data/basketball_game_log_*.parquet
+# ...except the pooled frame, which is a plain concat of the seven and is rebuilt on demand by
+# the measurement script. No reason to store 171KB of duplicate.
+ml/data/basketball_game_log_pooled.parquet
+
 # ml/artifacts holds every training run ever (27MB, mostly superseded), EXCEPT deployed/, which
 # holds only what models_registry marks active (~2.6MB) and must ship inside the image — a
 # container built from a clean clone would otherwise resolve a perfectly portable filename to
