@@ -84,6 +84,16 @@ def test_league_ids_match_therundown_slugs_where_covered():
         "super_lig",
         "bundesliga_2",
         "serie_b",
+        # The six added 2026-10-04, probed the same way: TheRundown's own /sports list (36
+        # entries) carries none of them. It has UEFAEURO (17) and FIFA (18) but no Nations
+        # League entry at all, so even the one non-domestic addition here gets its odds from
+        # API-Football alone -- the arrangement Brasileirao has run on since it was added.
+        "brasileirao_b",
+        "laliga2",
+        "argentina_primera",
+        "colombia_primera",
+        "england_l2",
+        "unl",
     }
     assert set(LEAGUE_IDS.keys()) == {
         "epl",
@@ -114,6 +124,12 @@ def test_league_ids_match_therundown_slugs_where_covered():
         "super_lig",
         "bundesliga_2",
         "serie_b",
+        "brasileirao_b",
+        "laliga2",
+        "argentina_primera",
+        "colombia_primera",
+        "england_l2",
+        "unl",
     }
     for league_slug in LEAGUE_IDS:
         if league_slug in no_rundown_coverage:
@@ -139,6 +155,13 @@ def test_calendar_year_season_leagues_are_exactly_the_non_european_convention_on
         "allsvenskan",
         "eliteserien",
         "veikkausliiga",
+        # Three of the five added 2026-10-04, each checked against the provider's own season
+        # window rather than inferred from the country: Brazil's Serie B runs 2026-03-21 ->
+        # 2026-11-14, Argentina 2026-01-22 -> 2026-11-08, Colombia 2026-01-16 -> 2026-11-12.
+        # laliga2 and england_l2 are ordinary Aug-May and must stay OUT of this set.
+        "brasileirao_b",
+        "argentina_primera",
+        "colombia_primera",
     }
     assert _current_football_season("scottish_prem", datetime(2026, 1, 15, tzinfo=UTC)) == 2025
     assert _current_football_season("mls", datetime(2026, 1, 15, tzinfo=UTC)) == 2026

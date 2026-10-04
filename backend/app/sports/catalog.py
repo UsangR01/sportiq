@@ -71,4 +71,21 @@ FOOTBALL_LEAGUES: list[tuple[str, str, str]] = [
     ("super_lig", "Süper Lig", "Turkey"),
     ("bundesliga_2", "2. Bundesliga", "Germany"),
     ("serie_b", "Serie B", "Italy"),
+    # Five added 2026-10-04, collected on 2026-09-28 and unserved until now. See
+    # api_football.py's LEAGUE_IDS for each one's verified id and season window; three of them
+    # are calendar-year and sit in CALENDAR_YEAR_SEASON_LEAGUES.
+    #
+    # Display names follow this list's existing convention of the name a viewer would recognise
+    # rather than the provider's own string: API-Football calls id 141 "Segunda Division" and
+    # id 128 "Liga Profesional Argentina". Every country here already has a flag.
+    ("brasileirao_b", "Serie B", "Brazil"),
+    ("laliga2", "Segunda Division", "Spain"),
+    ("argentina_primera", "Liga Profesional", "Argentina"),
+    ("colombia_primera", "Primera A", "Colombia"),
+    ("england_l2", "League Two", "England"),
+    # The Nations League is filed by API-Football under country "World", and that string is
+    # NOT used here: there is no world.png, so it would render the globe fallback that
+    # tests/test_league_flags.py exists to prevent. "Europe" is both flagged already (the three
+    # UEFA club competitions above use it) and the more accurate label for a UEFA competition.
+    ("unl", "Nations League", "Europe"),
 ]

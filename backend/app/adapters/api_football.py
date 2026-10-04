@@ -83,6 +83,44 @@ LEAGUE_IDS: dict[str, int] = {
     "super_lig": 203,
     "bundesliga_2": 79,
     "serie_b": 136,
+    # Five leagues collected on 2026-09-28 whose parquet history has existed ever since while
+    # this map did not list them -- so the app ingested nothing for any of them and no fixture,
+    # odds row or prediction could reach a user. Served now rather than after the 33-league
+    # retrain, because one model serves the whole sport: the Scottish Premiership, MLS and the
+    # CSL each ran on an EPL/Brasileirao-trained artefact for weeks. The retrain makes these
+    # picks better; it is not what makes them possible.
+    #
+    # Every id and season window re-confirmed live via /leagues?id=N on 2026-10-04, each with
+    # odds, fixture-statistics and standings coverage all true:
+    #     brasileirao_b      72   2026-03-21 -> 2026-11-14   CALENDAR-YEAR
+    #     argentina_primera  128  2026-01-22 -> 2026-11-08   CALENDAR-YEAR
+    #     colombia_primera   239  2026-01-16 -> 2026-11-12   CALENDAR-YEAR
+    #     laliga2            141  2026-08-14 -> 2027-06-06   ordinary Aug-May
+    #     england_l2          42  2026-08-15 -> 2027-05-08   ordinary Aug-May
+    "brasileirao_b": 72,
+    "laliga2": 141,
+    "argentina_primera": 128,
+    "colombia_primera": 239,
+    "england_l2": 42,
+    # THE FIRST NATIONAL-TEAM COMPETITION THIS PRODUCT CARRIES, added 2026-10-04 to close the
+    # hole every international break leaves in the football feed. The club competitions here
+    # (ucl/uel/uecl) pause along with the domestic leagues, so for roughly four weeks a year we
+    # ingested nothing that was actually being played and the card went empty -- in September,
+    # and again on 2026-10-04 with zero football fixtures between the 4th and the 6th.
+    # Confirmed live: id 5, season 2026 runs 2026-09-24 -> 2026-11-17, odds/statistics/standings
+    # all covered. The start-year convention already yields 2026, so it needs no season set.
+    #
+    # DELIBERATELY NOT BARRED from headline picks. Two properties are genuinely weaker than any
+    # club league here, and both argue for reading its early results sceptically rather than for
+    # hiding it:
+    #   - league_baselines.league_baseline_from_db returns None below
+    #     MIN_MATCHES_FOR_OWN_BASELINE (30), so until this competition accumulates that many
+    #     settled matches in our OWN database its fixtures are priced off the pooled
+    #     club-football blend. That is the exact mechanism that mispriced 2. Bundesliga, which
+    #     claimed 0.665 where the league's own rate was 0.593.
+    #   - National teams enter Elo at a flat INITIAL_ELO and only ever play here, so elo_diff --
+    #     Layer 2's strongest feature -- is ~0 for every early fixture.
+    "unl": 5,
 }
 
 # Leagues whose season runs on the calendar year (Jan-Dec) rather than the European Aug-May
@@ -109,6 +147,14 @@ CALENDAR_YEAR_SEASON_LEAGUES = {
     "allsvenskan",
     "eliteserien",
     "veikkausliiga",
+    # Three of the five added 2026-10-04. Checked per league against the provider's own season
+    # windows rather than inherited from Brasileirao's being Brazilian: Brazil's Serie B runs
+    # 2026-03-21 -> 2026-11-14, Argentina 2026-01-22 -> 2026-11-08 and Colombia 2026-01-16 ->
+    # 2026-11-12, all inside one calendar year. laliga2 and england_l2 are ordinary Aug-May and
+    # are deliberately absent.
+    "brasileirao_b",
+    "argentina_primera",
+    "colombia_primera",
     # NOTE: the J1 League is NOT here despite its 2021-2025 history being calendar-year. See
     # END_YEAR_SEASON_LEAGUES below — Japan switched conventions from 2026-27.
 }

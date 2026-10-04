@@ -2470,6 +2470,78 @@ list entirely:
   panel in the running mobile app (Expo web), no console errors. Full backend suite (187 tests),
   `ruff check .`, and `black --check .` all pass; `npx tsc --noEmit` clean on mobile.
 
+## Six leagues served, and the first national-team competition (2026-10-04)
+
+Prompted by "are there no leagues on our ingested leagues that are ongoing - knowing the euro
+nations leagues is ongoing", and the answer was two different things.
+
+**The football feed was genuinely empty, and it was the international break.** Measured on the
+day: 160 fixtures across 24 leagues in the next fortnight, but **zero on 4-6 October** and the
+next real slate on the 9th-11th (104 on the Saturday alone). Nothing was broken -- every
+domestic league pauses, and `ucl`/`uel`/`uecl` pause with them, so for roughly four weeks a
+year we ingested nothing that was actually being played. That recurs every September, October,
+November and March.
+
+**`unl` (UEFA Nations League, id 5) is the first NATIONAL-TEAM competition here**, added to close
+exactly that hole. Verified live before being written down: season 2026 runs 2026-09-24 ->
+2026-11-17 with odds/statistics/standings coverage all true, and **104 fixtures in a -10/+21 day
+window -- 5 live, 8 on the 5th, 10 on the 6th**, which is precisely the three days that had none.
+
+- **DELIBERATELY NOT BARRED from headline picks**, by explicit decision when offered the choice.
+  Two properties are weaker than any club league here and argue for reading its early numbers
+  sceptically rather than for hiding it: `league_baseline_from_db` returns None below
+  `MIN_MATCHES_FOR_OWN_BASELINE` (30), so until the competition accumulates that many settled
+  matches in our OWN database its fixtures are priced off the pooled club-football blend -- the
+  exact mechanism that mispriced 2. Bundesliga (claimed 0.665 where the league's own rate was
+  0.593); and national teams enter Elo at a flat `INITIAL_ELO`, so `elo_diff`, Layer 2's
+  strongest feature, is ~0 for every early fixture.
+- **National-team features are REAL, which was not safe to assume** -- the whole change would
+  have delivered blank cards otherwise. `/teams/statistics?league=5` returns genuine values per
+  national team: France attack 1.0 / defence 0.3 / form_pts 2.33, Belgium 1.7 / 0.3 / 2.0, 9 of
+  16 fields populated. That clears `MIN_FEATURE_COMPLETENESS`.
+- **TEAM IDS DO NOT COLLIDE, and this was checked rather than reasoned about.** National teams
+  occupy API-Football's LOW id range (Belgium 1, France 2) while the lowest club row we hold is
+  Manchester United at 33 -- ids 1-32 are entirely free. API-Football uses one global team
+  namespace, which is also why `ucl` has always shared team rows with the domestic leagues. So
+  no `unl:` prefix is needed, unlike WNBA-under-NBA and ATP/WTA, where the providers number each
+  competition from 1 and an unprefixed id really would have merged two different teams.
+- **Country is "Europe", not the provider's "World".** There is no `world.png`, so that string
+  would render the globe fallback `tests/test_league_flags.py` exists to prevent.
+- TheRundown carries no Nations League entry (its own /sports list is 36 entries, with
+  `UEFAEURO` 17 and `FIFA` 18 but nothing for this), so odds come from API-Football alone.
+
+**The five collected-but-unserved leagues went in at the same time** -- `brasileirao_b` 72,
+`laliga2` 141, `argentina_primera` 128, `colombia_primera` 239, `england_l2` 42. Their parquet
+history had existed since 2026-09-28 while `LEAGUE_IDS` did not list them, so the app ingested
+nothing for any of them: **the "work completed, never delivered" shape again**, and the third
+time this exact gap between a collection config and `LEAGUE_IDS` has cost something.
+
+- **Served BEFORE the 33-league retrain, deliberately.** One model serves the whole sport, and
+  the Scottish Premiership, MLS and the CSL each ran on an EPL/Brasileirao-trained artefact for
+  weeks. The retrain makes these picks better; it is not what makes them possible, and
+  `test_train_serve_league_parity.py` asserts one direction only for exactly this reason.
+- **Three are calendar-year** (`brasileirao_b` 2026-03-21 -> 2026-11-14, `argentina_primera`
+  2026-01-22 -> 2026-11-08, `colombia_primera` 2026-01-16 -> 2026-11-12); `laliga2` and
+  `england_l2` are ordinary Aug-May. Checked per league against the provider's own window rather
+  than inferred from the country -- the Brasileirao and J1 League lesson.
+- `resolve_current_season` reported 2026 for all six, matching the hardcoded fallback in every
+  case, so the convention sets agree with the provider rather than merely coexisting with it.
+- Real fixtures on first contact: 275 across the six in a -7/+14 window (unl 78,
+  argentina_primera 45, brasileirao_b 43, laliga2 38, england_l2 36, colombia_primera 35).
+
+**34 leagues now, and both wirings agree** -- `LEAGUE_IDS` and `catalog.py` at 34 each, zero
+drift in either direction. `ensure_football_leagues` seeds the new rows at API startup, so no
+production shell is involved.
+
+**Two exhaustive-set guards failed and were UPDATED rather than loosened**, which is what they
+are for: `test_calendar_year_season_leagues_are_exactly_...` and
+`test_league_ids_match_therundown_slugs_where_covered` both enumerate every league explicitly,
+so adding one forces a conscious declaration of its season convention and its odds source.
+
+**Still outstanding, and unchanged by this:** the corners retry sweep and the 33-league retrain
+itself. Serving these six does not need the retrain, but the retrain is what will give them
+their own league priors instead of the pooled blend.
+
 ## Mobile implementation status
 
 `mobile/` is a real Expo Router app (SDK 57, TypeScript), scaffolded and live-tested end to end against the running backend on **both** Expo web and a real Android emulator (registration, login, logout, guest-session creation/migration, and every §5.2 screen route) — not just created and left unverified.
