@@ -2720,6 +2720,84 @@ more reassuring one: I first reported that correcting the rate would LOOSEN the 
 tightens it (0.3379 -> 0.4994). The error was comparing against `double_chance` X2 (0.5418)
 instead of `h2h` away (0.2879) -- basketball has no double chance at all.
 
+## European basketball is SERVED (2026-10-04)
+
+Pro plan subscribed ($15/month, 7,500 requests/day, expires 2026-11-04) after the transfer test
+passed. Both things flagged as unverified were checked BEFORE building on them: the current
+season is unlocked (306 ACB fixtures, 17 played, 289 not started) and odds are real (5-8
+bookmakers a fixture one day out).
+
+**`app/adapters/api_basketball.py`** serves `acb` 117, `lnb` 2, `bbl` 40, `lega_a` 52,
+`greek_bl` 45, `turkish_bsl` 104, `euroleague` 120 -- under `Sport(slug="nba")`, so they share
+the NBA model, the Basketball tab and the base rates. That sharing is measured, not assumed.
+
+**FOUR PROVIDER BEHAVIOURS MEASURED AGAINST THE LIVE API, each a silent bug if missed:**
+
+- **THE ODDS MARKET IS `Home/Away`, NOT `3Way Result`.** Basketball books offer both. `3Way`
+  prices REGULATION time, carries a Draw at 11-16, and its home price is systematically
+  LONGER -- 4.55 against 4.33 from the same bookmaker on one real fixture. Reading it would hand
+  the pipeline a draw the model never predicts and inflate home EV by ~5% on every basketball
+  card. It is also the thinner market: 8 of 8 sampled books offer Home/Away, only 3 offer 3Way.
+- **`AOT` ("after over time") IS A FINISHED GAME**, 3.6-6.6% of a season. Mapping only `FT`
+  leaves one game in twenty permanently unsettled. Codes were ENUMERATED across three full days
+  of every league rather than read from documentation: `FT`, `NS`, `AOT`, `CANC`, `POST`, `Q4`.
+  An unknown code falls back to `scheduled`, never `live` -- the football default that once put
+  a LIVE badge on four postponed fixtures.
+- **TWO SEASON FORMATS IN ONE PROVIDER**: domestic leagues use the STRING `"2026-2027"`, the
+  EuroLeague the INTEGER `2026`. And **no season carries `current: true`**, so
+  `resolve_current_season`'s trick -- prefer the provider's own statement to a hardcoded
+  convention -- has nothing to read here. `_season_for` is therefore a RULE, kept in one
+  function with its own tests, rolling over in **September** (BBL 18 Sep, EuroLeague 24 Sep,
+  ACB 26 Sep, Greece 3 Oct).
+- **The `/leagues` seasons array is UNSORTED with no current flag**, so `seasons[-1]` is not the
+  newest -- reading it by position reported Greece's latest season as 2016-2017.
+
+**ROUTING: `get_stats_adapter`/`get_odds_adapters` gained an OPTIONAL `league_slug`.** They were
+keyed by SPORT, which held while each sport had one fixtures source. These leagues broke that:
+they belong under `Sport(slug="nba")` but BallDontLie has no European coverage, so routing by
+sport alone would send every request to a provider that cannot answer it. A league override
+rather than a second Sport row -- that would have needed its own `models_registry` row pointing
+at the same artefact, its own base rates and its own tab, splitting basketball across two places
+to work around a routing detail. **Omitting the league preserves the old behaviour exactly**,
+which is what kept every existing call site valid; only the test doubles needed the new kwarg.
+
+**IDS ARE PREFIXED `ab:`, PER PROVIDER RATHER THAN PER LEAGUE.** The prefix exists because
+`Team`/`Fixture` uniqueness is `(sport_id, external_id)` and these share a Sport row with the
+NBA and WNBA -- the hazard that made WNBA ids `wnba:`-prefixed. Per-PROVIDER because
+API-Basketball uses ONE global team namespace: Valencia is 2341 in both the ACB and the
+EuroLeague, so a per-league prefix would split one club into two rows with two disjoint form and
+Elo histories.
+
+**Team stats come from the season game list, not `/statistics`** -- that list is already fetched
+once per league per run, so every team's stats come out of one response. 7 requests a day rather
+than 113, which is most of why Pro rather than Ultra was the right plan.
+
+**VERIFIED LIVE END TO END, not just unit-tested**: all seven leagues ingesting (14-18 fixtures
+each in a -2/+7 window, correct completed/scheduled split), team stats real (11 of 16 fields --
+the four key-player features and moneyline are absent exactly as for the WNBA), **71 price rows
+across 8 priced ACB fixtures with ZERO draw prices**, and a real h2h value. 888 tests pass.
+
+`greece.png` was the one missing flag, caught by `test_league_flags.py` the moment the catalog
+grew -- which is the entire reason that cross-language test exists. Adding it also surfaced a
+DUPLICATE `Turkey` key I had introduced, the same class ruff caught when `_RUNDOWN_SPORT_IDS`
+gained tennis twice.
+
+**KNOWN AND NOT FIXED, deliberately:**
+- **`Sport.name` is still literally "NBA Basketball"** while that row now holds Spanish, Greek
+  and pan-European competitions. Mobile hardcodes "Basketball" in `SPORT_TABS`, so this is only
+  visible through the API. Left alone because it is a one-off UPDATE on a production row rather
+  than a code change.
+- **`days_since_last_match` is measured from NOW, not from the fixture's kickoff**, so a team
+  playing in six days reports 0 days rest and `_back_to_back` reads 1.0. This is inherited
+  behaviour shared with `balldontlie.py`, not something this adapter introduced -- but it means
+  `rest_days`/`back_to_back` are weaker features than their names suggest for every basketball
+  fixture ingested well before tip-off. Fixing it changes NBA semantics too, so it wants its own
+  measurement.
+- **No per-league baselines.** Football's `league_baselines.py` has no basketball equivalent, and
+  European home advantage spans 0.571 (Turkey) to 0.649 (Italy) -- 7.8pp the model cannot see.
+  The transfer test passed without it, so it is the next gain rather than a prerequisite, and it
+  is the likeliest explanation for Germany's BBL being the one league below its own baseline.
+
 ## Mobile implementation status
 
 `mobile/` is a real Expo Router app (SDK 57, TypeScript), scaffolded and live-tested end to end against the running backend on **both** Expo web and a real Android emulator (registration, login, logout, guest-session creation/migration, and every §5.2 screen route) — not just created and left unverified.
