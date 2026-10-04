@@ -2542,6 +2542,101 @@ so adding one forces a conscious declaration of its season convention and its od
 itself. Serving these six does not need the retrain, but the retrain is what will give them
 their own league priors instead of the pooled blend.
 
+## European basketball: the NBA weights DO transfer, and the blocker is a plan (2026-10-04)
+
+Asked to look into France, Spain, Greece, Turkey, Italy and Germany. Two findings, and the
+second one is the useful one.
+
+**NO NEW VENDOR IS NEEDED.** API-Basketball (`v1.basketball.api-sports.io`) answers to the SAME
+API-Sports key the football adapter already uses -- same account, Free tier, 100 requests/day,
+valid to 2027-07-27. All six leagues exist, are in season now, and carry 11-19 seasons with
+`odds`, `standings` and team/player statistics coverage all true:
+
+    acb         117  Spain     18 seasons    lnb          2  France   19
+    bbl          40  Germany   19            lega_a      52  Italy    19
+    greek_bl     45  Greece    18            turkish_bsl 104  Turkey   11
+    euroleague  120  Europe    18
+
+**THE BLOCKER IS THE PLAN, not coverage.** Free serves three seasons and refuses the rest
+verbatim: *"Free plans do not have access to this season, try from 2022 to 2024."* Probed both
+neighbours to pin it exactly -- 2021-2022 and 2025-2026 both refuse, 2022-2023 and 2024-2025
+both return full seasons. Serving needs a paid subscription; the price was NOT verified (the
+pricing pages return 403 or are JS-only) and is a dashboard check rather than something to
+assume.
+
+**WHAT FREE BOUGHT: the transfer test that should precede paying.** One model serves a whole
+sport here, so these leagues would run on NBA weights exactly as the WNBA already does -- a bet
+CLAUDE.md has recorded as explicitly unmeasured since August. Europe is the harsher test:
+
+    NBA        227.1 total points   home win 0.552
+    Europe     164.8 (-27.4%)       home win 0.603 (+5.2pp, range 0.571 Turkey - 0.649 Italy)
+
+The -27.4% is larger than the -16.7% that 40-minute FIBA games versus 48-minute NBA games
+explains, so pace and efficiency differ too. And two of the sixteen features
+(`last10_point_diff_*`, `net_rating_diff`) are ABSOLUTE point differentials learned on the
+227-point game, while `home_court_indicator` is a constant whose learned meaning is NBA home
+advantage. Football fixed this exact class with `league_baselines.py`; basketball has no
+equivalent.
+
+**CRITERIA PRE-REGISTERED IN THE SCRIPT BEFORE ANY NUMBER EXISTED** -- Brier beats always-home
+(PRIMARY, because always-home already scores ~0.60 accuracy here so accuracy alone cannot
+separate skill from the home prior), accuracy within 1.0pp, top-label ECE <= 0.10. Result on
+**1,926 held-out games** (each league's newest collected season, features assembled through the
+REAL `assemble_from_game_log` including its own leakage guard), **all three PASS**:
+
+    accuracy   0.6547   vs always-home 0.6121    +4.26pp
+    Brier      0.2211   vs             0.2375    better
+    log loss   0.6340   vs             0.6679
+    ECE        0.0303
+
+**This is a better answer than the inputs predicted**, and it is worth stating why it is
+plausible rather than suspicious: the features that transfer are the SCALE-FREE ones -- win
+rates, rest days, head-to-head -- and the two point-differential features are differences
+between two teams in the SAME league, so a league-wide scoring level largely cancels. The
+absolute magnitudes shrink, but their ordering survives.
+
+**HONEST LIMITS, none of them gating and all reported by the script:**
+- **Germany's BBL is the one league WORSE than its own always-home baseline** (Brier 0.2394 vs
+  0.2297, accuracy 0.612 against a 0.645 home rate). 1 of 7.
+- **The Euroleague loses on accuracy** (0.594 against a 0.618 home rate) while winning on Brier
+  (0.2304 vs 0.2360) -- better probabilities, worse hard calls.
+- **The top confidence bucket is overconfident**: claims 0.934, delivers 0.788. n=33, so this is
+  a prompt rather than a finding, but it is the band a product shows most prominently.
+- Feature completeness is **0.681** (11 of 16 -- the four key-player features and moneyline are
+  absent, exactly as for the WNBA), comfortably over `MIN_FEATURE_COMPLETENESS`.
+- No odds were collected, so there is no ROI number and none was invented.
+
+**A SEPARATE ISSUE THIS TURNED UP, affecting live football.** `backend/Dockerfile` COPYs
+`ml/data/football_game_log_*.parquet` and `football_xg_*.parquet` into the image, and
+`.gitignore` carries explicit exceptions so they are tracked. **Eleven leagues' frames were
+never committed** -- the six added 2026-09-15 and the five served 2026-10-04 -- and the failure
+is silent because the glob still matches the 22 tracked frames, so the build succeeds and just
+omits the rest (Docker COPY sees the git clone, not the working tree). Per the exception's own
+comment that is the difference between real retrodiction and every retrodicted prediction
+coming out as the flat prior. Fixed by committing them, 1.1MB for 22 frames.
+
+**A third thing worth not repeating:** `/leagues` returns the `seasons` array UNSORTED and with
+no `current: true` on this plan, so `seasons[-1]` is not the newest -- the first pass here
+reported Greece's latest season as 2016-2017 and Spain's as 2020-2021, both wrong. Read it with
+`max()`, and note that `resolve_current_season`'s trick of preferring the provider's own
+`current` flag has nothing to read on this API, so a serving adapter would need its own
+convention. The season label also has TWO FORMATS in one provider: domestic leagues use the
+string `"2026-2027"`, the Euroleague the integer `2026`.
+
+**Also found and not yet fixed: `_base_rate` has no basketball override**, so basketball falls
+back to football's `("h2h","home") = 0.4582` and a home pick need only clear 0.5082 -- while
+NBA's own measured home-win rate is **0.552** and these European leagues run 0.571-0.649. So a
+basketball home pick can pass the gate while being no better than always backing home. That is
+true of NBA and the WNBA today, not just hypothetically of Europe, and the module docstring's
+claim that NBA sits "in the same 45-55% territory" holds only at its very top edge.
+
+**Next step if this proceeds:** price the plan, then build an `APIBasketballAdapter` (prefixed
+team ids -- the provider numbers teams in its own namespace, Valencia is 2341, so the
+WNBA-under-NBA hazard applies; `AOT` mapped as COMPLETED, since it is 3.6-6.6% of a season and
+mapping only `FT` would leave those never settling). `greece.png` is missing from the mobile
+flag set, and `Sport.name` is literally "NBA Basketball", which goes wrong once it holds
+Spanish and Greek leagues.
+
 ## Mobile implementation status
 
 `mobile/` is a real Expo Router app (SDK 57, TypeScript), scaffolded and live-tested end to end against the running backend on **both** Expo web and a real Android emulator (registration, login, logout, guest-session creation/migration, and every §5.2 screen route) — not just created and left unverified.
