@@ -33,7 +33,7 @@ LIVE_SCORES_WINDOW_DAYS = 1
 
 
 async def _ingest_live_scores_for_league(sport: Sport, league: League) -> None:
-    adapter = AdapterFactory.get_stats_adapter(sport.slug)
+    adapter = AdapterFactory.get_stats_adapter(sport.slug, league.slug)
 
     async with async_session_factory() as db:
         payloads = await adapter.fetch_fixtures(

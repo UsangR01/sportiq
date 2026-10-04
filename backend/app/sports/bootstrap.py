@@ -19,20 +19,22 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.sports.catalog import FOOTBALL_LEAGUES
+from app.sports.catalog import BASKETBALL_LEAGUES, FOOTBALL_LEAGUES
 from app.sports.models import League, Sport
 
 logger = logging.getLogger(__name__)
 
 
-async def ensure_football_leagues(db: AsyncSession) -> list[str]:
+async def _ensure_leagues(db: AsyncSession, sport_slug: str, catalog: list[tuple]) -> list[str]:
     """Insert a League row for any catalog entry that has none. Returns the slugs created."""
-    sport = (await db.execute(select(Sport).where(Sport.slug == "football"))).scalar_one_or_none()
+    sport = (await db.execute(select(Sport).where(Sport.slug == sport_slug))).scalar_one_or_none()
     if sport is None:
         # Deliberately NOT created here. A missing Sport row means the database was never
         # seeded at all, which is a bootstrap problem for seed_sports.py to solve loudly rather
         # than something an API start should paper over.
-        logger.warning("no football sport row - run scripts/seed_sports.py; skipping league sync")
+        logger.warning(
+            "no %s sport row - run scripts/seed_sports.py; skipping league sync", sport_slug
+        )
         return []
 
     existing = {
@@ -42,7 +44,7 @@ async def ensure_football_leagues(db: AsyncSession) -> list[str]:
         ).all()
     }
     created = []
-    for slug, name, country in FOOTBALL_LEAGUES:
+    for slug, name, country in catalog:
         if slug in existing:
             continue
         db.add(
@@ -51,5 +53,21 @@ async def ensure_football_leagues(db: AsyncSession) -> list[str]:
         created.append(slug)
     if created:
         await db.commit()
-        logger.warning("seeded %d new football leagues: %s", len(created), ", ".join(created))
+        logger.warning("seeded %d new %s leagues: %s", len(created), sport_slug, ", ".join(created))
     return created
+
+
+async def ensure_football_leagues(db: AsyncSession) -> list[str]:
+    """Kept as its own name because callers and tests refer to it directly."""
+    return await _ensure_leagues(db, "football", FOOTBALL_LEAGUES)
+
+
+async def ensure_basketball_leagues(db: AsyncSession) -> list[str]:
+    """The European competitions, seeded under Sport(slug="nba").
+
+    SAME SPORT ROW AS THE NBA AND WNBA, which is the whole design: they are served by the NBA
+    model (measured, not assumed -- see ml/training/measure_basketball_transfer.py), share its
+    base rates and share the Basketball tab. Only the data PROVIDER differs, and that is handled
+    by AdapterFactory's league-level override rather than by splitting the sport.
+    """
+    return await _ensure_leagues(db, "nba", BASKETBALL_LEAGUES)

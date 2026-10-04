@@ -110,7 +110,7 @@ async def test_ingest_live_scores_isolates_one_sports_adapter_failure(monkeypatc
     monkeypatch.setattr(
         factory_module.AdapterFactory,
         "get_stats_adapter",
-        lambda slug: broken_adapter if slug == broken_slug else healthy_adapter,
+        lambda slug, league=None: broken_adapter if slug == broken_slug else healthy_adapter,
     )
 
     try:
@@ -234,7 +234,7 @@ async def test_ingest_live_scores_isolates_one_sports_unregistered_adapter(monke
     monkeypatch.setattr(
         factory_module.AdapterFactory,
         "get_stats_adapter",
-        lambda slug: broken_adapter if slug == broken_slug else healthy_adapter,
+        lambda slug, league=None: broken_adapter if slug == broken_slug else healthy_adapter,
     )
 
     try:

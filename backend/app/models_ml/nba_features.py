@@ -207,6 +207,8 @@ async def assemble_from_live_db(db, fixture, home_features, away_features) -> di
     """
     from sqlalchemy import select
 
+    from app.adapters.api_basketball import BASKETBALL_LEAGUE_IDS
+    from app.adapters.api_basketball import fetch_h2h_win_rate as fetch_basketball_h2h
     from app.adapters.balldontlie import fetch_h2h_win_rate
     from app.fixtures.models import Team
     from app.odds.models import Odds
@@ -262,9 +264,13 @@ async def assemble_from_live_db(db, fixture, home_features, away_features) -> di
         league = (
             await db.execute(select(League.slug).where(League.id == fixture.league_id))
         ).scalar_one_or_none() or "nba"
-        h2h_win_rate_home = await fetch_h2h_win_rate(
-            home_team.external_id, away_team.external_id, league
-        )
+        # WHICH PROVIDER, not just which namespace. NBA and WNBA come from BallDontLie; the
+        # European competitions under this same Sport row come from API-Basketball and use
+        # "ab:"-prefixed ids. Sending one provider's id to the other returns no meetings, which
+        # reads as "these two have never played" rather than as a lookup sent somewhere wrong --
+        # the same silent-failure shape the WNBA namespace split already had to guard against.
+        h2h = fetch_basketball_h2h if league in BASKETBALL_LEAGUE_IDS else fetch_h2h_win_rate
+        h2h_win_rate_home = await h2h(home_team.external_id, away_team.external_id, league)
 
     best_odds = (
         (

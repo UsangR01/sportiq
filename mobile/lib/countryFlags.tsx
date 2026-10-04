@@ -21,6 +21,11 @@ const COUNTRY_FLAG_IMAGES: Record<string, number> = {
   USA: require("../assets/flags/usa.png"),
   Scotland: require("../assets/flags/scotland.png"),
   China: require("../assets/flags/china.png"),
+  // Added with the European basketball leagues. Greece was the one country among the seven with
+  // no flag, which backend/tests/test_league_flags.py caught the moment the catalog grew -- the
+  // whole reason that cross-language test exists, since a missing flag renders the globe
+  // fallback with no error, no warning and no log line.
+  Greece: require("../assets/flags/greece.png"),
   // Added for tennis: an ATP season visits ~30 countries, far more than football's handful of
   // leagues. Every one of these corresponds to a real tournament location in
   // TOURNAMENT_LOCATION_COUNTRIES below.

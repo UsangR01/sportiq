@@ -375,7 +375,7 @@ async def test_rerunning_ingest_does_not_duplicate_team_features(monkeypatch):
     import app.adapters.factory as factory_module
 
     monkeypatch.setattr(
-        factory_module.AdapterFactory, "get_stats_adapter", lambda slug: fake_adapter
+        factory_module.AdapterFactory, "get_stats_adapter", lambda slug, league=None: fake_adapter
     )
 
     try:
@@ -454,7 +454,7 @@ async def test_ingest_queues_a_prediction_for_a_fixture_that_has_none_yet(monkey
     import app.adapters.factory as factory_module
 
     monkeypatch.setattr(
-        factory_module.AdapterFactory, "get_stats_adapter", lambda slug: fake_adapter
+        factory_module.AdapterFactory, "get_stats_adapter", lambda slug, league=None: fake_adapter
     )
 
     queued_fixture_ids: list[str] = []
@@ -594,7 +594,7 @@ async def test_ingest_fixtures_isolates_one_sports_adapter_failure(monkeypatch):
 
     import app.adapters.factory as factory_module
 
-    def _fake_get_stats_adapter(slug):
+    def _fake_get_stats_adapter(slug, league=None):
         if slug == broken_slug:
             return broken_adapter
         if slug == healthy_slug:
@@ -707,7 +707,7 @@ async def test_ingest_fixtures_isolates_one_sports_unregistered_adapter(monkeypa
 
     import app.adapters.factory as factory_module
 
-    def _fake_get_stats_adapter(slug):
+    def _fake_get_stats_adapter(slug, league=None):
         if slug == broken_slug:
             return broken_adapter
         if slug == healthy_slug:
@@ -793,7 +793,9 @@ async def test_a_withdrawn_fixture_is_flagged_and_unflagged_by_the_real_ingest_p
 
     def use(payloads):
         monkeypatch.setattr(
-            factory_module.AdapterFactory, "get_stats_adapter", lambda s: FakeAdapter(payloads)
+            factory_module.AdapterFactory,
+            "get_stats_adapter",
+            lambda s, league=None: FakeAdapter(payloads),
         )
 
     async def state(external_id):
@@ -888,7 +890,9 @@ async def test_a_prediction_from_a_superseded_model_is_regenerated(monkeypatch):
     import app.adapters.factory as factory_module
 
     monkeypatch.setattr(
-        factory_module.AdapterFactory, "get_stats_adapter", lambda s: FakeAdapter([payload])
+        factory_module.AdapterFactory,
+        "get_stats_adapter",
+        lambda s, league=None: FakeAdapter([payload]),
     )
     queued: list[str] = []
     import app.workers.run_predictions as run_predictions_module
@@ -1004,7 +1008,7 @@ async def test_a_redrawn_fixture_updates_its_players(monkeypatch):
         monkeypatch.setattr(
             factory_module.AdapterFactory,
             "get_stats_adapter",
-            lambda slug: FakeAdapter([payload("atp:p-jarry", "Nicolas Jarry")]),
+            lambda slug, league=None: FakeAdapter([payload("atp:p-jarry", "Nicolas Jarry")]),
         )
         await _ingest_fixtures_for_league(sport, league)
         assert (await players())[1] == "Nicolas Jarry"
@@ -1013,7 +1017,7 @@ async def test_a_redrawn_fixture_updates_its_players(monkeypatch):
         monkeypatch.setattr(
             factory_module.AdapterFactory,
             "get_stats_adapter",
-            lambda slug: FakeAdapter([payload("atp:p-bonzi", "Benjamin Bonzi")]),
+            lambda slug, league=None: FakeAdapter([payload("atp:p-bonzi", "Benjamin Bonzi")]),
         )
         await _ingest_fixtures_for_league(sport, league)
 

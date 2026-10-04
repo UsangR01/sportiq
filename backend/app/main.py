@@ -69,10 +69,14 @@ def create_app() -> FastAPI:
         """
         try:
             from app.core.database import async_session_factory
-            from app.sports.bootstrap import ensure_football_leagues
+            from app.sports.bootstrap import (
+                ensure_basketball_leagues,
+                ensure_football_leagues,
+            )
 
             async with async_session_factory() as db:
                 await ensure_football_leagues(db)
+                await ensure_basketball_leagues(db)
         except Exception:  # pragma: no cover - startup must survive anything here
             logger.exception("league catalog sync failed at API startup")
 

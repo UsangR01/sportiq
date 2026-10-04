@@ -207,7 +207,9 @@ async def _fetch_odds_payloads(
 
     payloads: list[OddsPayload] = []
     for adapter in (
-        adapters if adapters is not None else AdapterFactory.get_odds_adapters(sport.slug)
+        adapters
+        if adapters is not None
+        else AdapterFactory.get_odds_adapters(sport.slug, league.slug)
     ):
         try:
             payloads.extend(

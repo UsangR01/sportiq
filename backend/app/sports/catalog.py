@@ -89,3 +89,27 @@ FOOTBALL_LEAGUES: list[tuple[str, str, str]] = [
     # UEFA club competitions above use it) and the more accurate label for a UEFA competition.
     ("unl", "Nations League", "Europe"),
 ]
+
+
+# Basketball leagues seeded under Sport(slug="nba"), alongside the NBA and WNBA rows that
+# scripts/seed_sports.py creates. Same list-plus-parity discipline as FOOTBALL_LEAGUES above:
+# adding a league needs this list and api_basketball.py's BASKETBALL_LEAGUE_IDS to agree.
+#
+# These are served by the NBA model, which was MEASURED rather than assumed -- see
+# ml/training/measure_basketball_transfer.py (+4.26pp over always-home on 1,926 held-out games,
+# all three pre-registered criteria passed).
+#
+# Greece is why tests/test_league_flags.py covers this list too: greece.png did not exist in the
+# mobile flag set until these were added, and a missing flag renders a globe with no error, no
+# warning and no log line.
+BASKETBALL_LEAGUES: list[tuple[str, str, str]] = [
+    ("acb", "Liga ACB", "Spain"),
+    ("lnb", "Betclic Elite", "France"),
+    ("bbl", "Basketball Bundesliga", "Germany"),
+    ("lega_a", "Lega Basket Serie A", "Italy"),
+    ("greek_bl", "Basket League", "Greece"),
+    ("turkish_bsl", "Basketbol Super Ligi", "Turkey"),
+    # Pan-European, so "Europe" rather than a country -- the same string the three UEFA club
+    # competitions already use, and it has a flag.
+    ("euroleague", "EuroLeague", "Europe"),
+]

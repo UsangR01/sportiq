@@ -301,7 +301,7 @@ async def _active_model_version(db: AsyncSession, sport_id) -> str | None:
 async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
     # NOTE: TDD §6.2 references a sports.data_source_slug column that isn't in the §2.1 schema
     # listing. Using sport.slug directly as the AdapterFactory key until that's reconciled.
-    adapter = AdapterFactory.get_stats_adapter(sport.slug)
+    adapter = AdapterFactory.get_stats_adapter(sport.slug, league.slug)
 
     async with async_session_factory() as db:
         fixture_payloads = await adapter.fetch_fixtures(

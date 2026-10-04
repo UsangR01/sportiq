@@ -1,3 +1,4 @@
+from app.adapters.api_basketball import BASKETBALL_LEAGUE_IDS, APIBasketballAdapter
 from app.adapters.api_football import APIFootballAdapter
 from app.adapters.balldontlie import BallDontLieAdapter
 from app.adapters.balldontlie_tennis import BallDontLieTennisAdapter
@@ -45,6 +46,31 @@ _ODDS_ADAPTERS: dict[str, list[type[DataSourceAdapter]]] = {
 }
 
 
+# LEAGUE-LEVEL OVERRIDES, because one sport can span two providers.
+#
+# _STATS_ADAPTERS above is keyed by SPORT, which held while each sport had one fixtures source.
+# The European basketball competitions broke that: they live under Sport(slug="nba") -- so they
+# share the NBA model, the sport tab and the base rates, which a measured transfer test says is
+# right -- but BallDontLie has no European coverage at all, so routing them by sport would send
+# every request to a provider that cannot answer it.
+#
+# A LEAGUE OVERRIDE RATHER THAN A SECOND SPORT ROW, deliberately. A separate Sport would need
+# its own models_registry row pointing at the same artefact, its own base rates and its own tab,
+# splitting basketball across two places in the app to work around a routing detail. The odds
+# side already precedes this: _ODDS_ADAPTERS is per-sport precisely because coverage differs by
+# LEAGUE within football.
+_STATS_ADAPTERS_BY_LEAGUE: dict[str, type[DataSourceAdapter]] = {
+    league: APIBasketballAdapter for league in BASKETBALL_LEAGUE_IDS
+}
+
+# Same split for odds: these leagues are priced by API-Basketball alone. TheRundown carries none
+# of them -- its own /sports list is 36 entries with no European basketball entry at all -- so
+# querying it would only ever raise the per-adapter ValueError ingest_odds already isolates.
+_ODDS_ADAPTERS_BY_LEAGUE: dict[str, list[type[DataSourceAdapter]]] = {
+    league: [APIBasketballAdapter] for league in BASKETBALL_LEAGUE_IDS
+}
+
+
 class AdapterFactory:
     """Resolves the odds, stats, and injury adapters for a sport at runtime (TDD §6.2).
     Stats/injury adapters are sport-specific; odds adapters are per-sport too now (see
@@ -52,12 +78,25 @@ class AdapterFactory:
     football's per-league split."""
 
     @staticmethod
-    def get_odds_adapters(sport_slug: str) -> list[DataSourceAdapter]:
+    def get_odds_adapters(
+        sport_slug: str, league_slug: str | None = None
+    ) -> list[DataSourceAdapter]:
+        """league_slug is OPTIONAL so every existing caller keeps its exact behaviour; it only
+        changes the answer for a league that has its own entry above."""
+        if league_slug is not None and league_slug in _ODDS_ADAPTERS_BY_LEAGUE:
+            return [cls() for cls in _ODDS_ADAPTERS_BY_LEAGUE[league_slug]]
         adapter_classes = _ODDS_ADAPTERS.get(sport_slug, [TheRundownAdapter])
         return [cls() for cls in adapter_classes]
 
     @staticmethod
-    def get_stats_adapter(data_source_slug: str) -> DataSourceAdapter:
+    def get_stats_adapter(
+        data_source_slug: str, league_slug: str | None = None
+    ) -> DataSourceAdapter:
+        """The league override wins where one exists -- see _STATS_ADAPTERS_BY_LEAGUE. Passing
+        no league preserves the original per-sport behaviour exactly, which is what keeps every
+        existing call site and test valid."""
+        if league_slug is not None and league_slug in _STATS_ADAPTERS_BY_LEAGUE:
+            return _STATS_ADAPTERS_BY_LEAGUE[league_slug]()
         adapter_cls = _STATS_ADAPTERS.get(data_source_slug)
         if adapter_cls is None:
             raise ValueError(
