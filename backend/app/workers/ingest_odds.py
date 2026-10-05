@@ -343,11 +343,44 @@ async def _ingest_odds() -> None:
             for sport in sports
         }
 
+    failed: list[str] = []
     for sport in sports:
         for league in leagues_by_sport[sport.id]:
-            # Per-adapter ValueErrors (no odds coverage for this league) are already caught
-            # inside _fetch_odds_payloads — nothing further to isolate at this level.
-            await _ingest_odds_for_league(sport, league)
+            # ONE LEAGUE MUST NOT TAKE DOWN THE RUN, and until 2026-10-05 it did.
+            #
+            # _fetch_odds_payloads isolates per-ADAPTER ValueErrors (a league a provider has no
+            # coverage for), and that was read as enough. It is not: everything AFTER the fetch
+            # -- _resolve_fixture, _orient_payload, the Odds insert, the Redis write, the commit
+            # -- ran unguarded, so a single league raising anything else aborted the whole task
+            # for every remaining league AND every remaining sport.
+            #
+            # MEASURED: football and basketball odds stopped entirely on 2026-10-02 at 20:04 and
+            # were still stopped three days later, while tennis stayed fresh to within two hours
+            # throughout -- because tennis runs on its own separate tasks and never shared this
+            # loop. The feed does not show an error for this. With no odds, EV ranking and the
+            # min_odds filter both silently degrade to probability-only, which is the failure
+            # mode CLAUDE.md already records surfacing as an apparent MODELLING problem.
+            #
+            # The same isolation ingest_fixtures.py and ingest_live_scores.py both have.
+            try:
+                await _ingest_odds_for_league(sport, league)
+            except Exception:  # noqa: BLE001 - one league's failure is not the run's failure
+                failed.append(f"{sport.slug}/{league.slug}")
+                logger.exception(
+                    "Odds ingestion failed for %s/%s; continuing with the other leagues",
+                    sport.slug,
+                    league.slug,
+                )
+
+    # A count rather than silence: a run that quietly stopped writing is indistinguishable from
+    # a run with nothing to write, and that is precisely how three days passed unnoticed.
+    if failed:
+        logger.warning(
+            "Odds ingestion failed for %d of %d league(s): %s",
+            len(failed),
+            sum(len(v) for v in leagues_by_sport.values()),
+            ", ".join(failed),
+        )
 
 
 async def _ingest_tennis_odds(adapters: list | None = None) -> None:

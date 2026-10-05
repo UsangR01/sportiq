@@ -67,7 +67,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import httpx
 
@@ -287,7 +287,13 @@ class APIBasketballAdapter(DataSourceAdapter):
             games = await self._season_games(client, league)
         return _compute_team_stats(team_id, games, n_matches)
 
-    async def fetch_odds(self, sport: str, league: str, days_ahead: int) -> list[OddsPayload]:
+    async def fetch_odds(
+        self,
+        sport: str,
+        league: str,
+        days_ahead: int,
+        dates: list[date] | None = None,
+    ) -> list[OddsPayload]:
         """Moneyline only, from the two-way "Home/Away" market.
 
         /odds takes league+season and returns whichever games the books have actually priced --
@@ -313,14 +319,21 @@ class APIBasketballAdapter(DataSourceAdapter):
             game_id = game.get("id")
             if game_id is None:
                 continue
-            # The window is applied here because /odds has no `date` parameter. The books price
-            # only a few days out anyway, so this usually drops nothing -- it exists so a
-            # provider that starts pricing the whole season cannot quietly widen our ingest.
+            # The window is applied HERE because /odds has no `date` parameter at all ("The
+            # Date field do not exist."), so unlike the other adapters this one cannot push the
+            # filter to the provider. `dates` is the caller's explicit list of match days --
+            # capture_closing_odds narrows to a single day with it -- and it wins over the
+            # broader days_ahead cutoff when supplied.
             try:
-                if _kickoff(game).date() > cutoff:
-                    continue
+                kickoff_date = _kickoff(game).date()
             except (KeyError, TypeError, ValueError):
-                pass  # an unparseable date is not a reason to discard a real price
+                kickoff_date = None  # an unparseable date is not a reason to drop a real price
+            if kickoff_date is not None:
+                if dates is not None:
+                    if kickoff_date not in set(dates):
+                        continue
+                elif kickoff_date > cutoff:
+                    continue
             for bookmaker in entry.get("bookmakers") or []:
                 for bet in bookmaker.get("bets") or []:
                     if bet.get("name") != MONEYLINE_MARKET:
