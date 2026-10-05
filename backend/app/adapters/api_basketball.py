@@ -74,6 +74,8 @@ import httpx
 from app.adapters.base import (
     DataSourceAdapter,
     FixturePayload,
+    H2HPanel,
+    H2HPanelStat,
     InjuryUpdate,
     OddsPayload,
     TeamStats,
@@ -495,3 +497,91 @@ async def fetch_h2h_win_rate(
     if not decided:
         return None
     return sum(decided) / len(decided)
+
+
+async def _h2h_meetings(home_raw: str, away_raw: str) -> list[dict]:
+    """Decided meetings between two teams, newest first. Shared by the win rate and the panel."""
+    settings = get_settings()
+    if not settings.api_football_key:
+        return []
+    async with httpx.AsyncClient(
+        base_url=BASE_URL,
+        headers={"x-apisports-key": settings.api_football_key},
+        timeout=30.0,
+    ) as client:
+        response = await client.get("/games", params={"h2h": f"{home_raw}-{away_raw}"})
+        response.raise_for_status()
+        games = _api_response(response).get("response") or []
+    decided = [
+        g
+        for g in games
+        if (g.get("status") or {}).get("short") in _FINISHED_STATUSES
+        and _score((g.get("scores") or {}).get("home")) is not None
+        and _score((g.get("scores") or {}).get("away")) is not None
+    ]
+    decided.sort(key=lambda g: str(g["date"]), reverse=True)
+    return decided
+
+
+H2H_PANEL_MEETINGS = 10
+
+
+async def fetch_h2h_panel(
+    home_external_id: str, away_external_id: str, league: str = "acb"
+) -> H2HPanel | None:
+    """The fixture-detail head-to-head panel for the European competitions.
+
+    WHY THIS EXISTS AT ALL: _fetch_head_to_head routed every sport_slug == "nba" fixture to
+    BallDontLie, which is correct for the NBA and the WNBA and fatal for these -- their ids are
+    "ab:"-prefixed and BallDontLie cannot parse them. The resulting error was NOT an
+    httpx.HTTPError, so the panel's own try/except did not catch it and the whole fixture screen
+    returned HTTP 500. Every European basketball fixture detail was broken; the WNBA was fine.
+
+    TWO STAT ROWS, for the same reason BallDontLie's NBA panel has them: the final score is the
+    only per-meeting number guaranteed across these competitions, which yields points scored and
+    points conceded. Fabricating rebounds or shooting percentages to match football's five-row
+    panel would mean inventing them.
+
+    Values are relative to THIS fixture's home/away assignment, not each historical meeting's
+    own -- a team's record must not flip depending on which side it happened to be on before.
+    """
+    home_raw = home_external_id.removeprefix(ID_PREFIX)
+    away_raw = away_external_id.removeprefix(ID_PREFIX)
+    try:
+        meetings = await _h2h_meetings(home_raw, away_raw)
+    except httpx.HTTPError:
+        logger.warning("API-Basketball h2h panel failed for %s", league, exc_info=True)
+        return None
+    meetings = meetings[:H2H_PANEL_MEETINGS]
+    if not meetings:
+        return None
+
+    home_wins = away_wins = 0
+    scored: list[int] = []
+    conceded: list[int] = []
+    for game in meetings:
+        home_score = _score((game.get("scores") or {}).get("home"))
+        away_score = _score((game.get("scores") or {}).get("away"))
+        was_home = str(game["teams"]["home"]["id"]) == home_raw
+        ours, theirs = (home_score, away_score) if was_home else (away_score, home_score)
+        scored.append(ours)
+        conceded.append(theirs)
+        if ours > theirs:
+            home_wins += 1
+        else:
+            away_wins += 1
+
+    def avg(values: list[int]) -> float:
+        return round(sum(values) / len(values), 1)
+
+    return H2HPanel(
+        meetings_count=len(meetings),
+        home_wins=home_wins,
+        # Basketball has no draws, so this is structurally 0 rather than merely unobserved.
+        draws=0,
+        away_wins=away_wins,
+        stats=[
+            H2HPanelStat(label="Points scored", home=avg(scored), away=avg(conceded)),
+            H2HPanelStat(label="Points conceded", home=avg(conceded), away=avg(scored)),
+        ],
+    )

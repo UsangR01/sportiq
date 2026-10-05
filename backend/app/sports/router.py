@@ -8,14 +8,24 @@ from app.sports.schemas import LeagueOption, SportResponse
 
 router = APIRouter(tags=["sports"])
 
-# Above this, a sport's leagues are NOT offered as filters. Basketball (NBA/WNBA) and tennis
-# (ATP/WTA) are two competitions each that a user thinks of separately and would pick between;
-# football's 18 would turn one dropdown row into a scrolling list of everything, and the feed
-# already groups by league internally, which is the right affordance at that count.
+# Above this, a sport's leagues are NOT offered as filters. Tennis (ATP/WTA) and basketball are
+# competitions a user thinks of separately and would pick between; football's 34 would turn one
+# row into a scrolling list of everything, and the feed already groups by league internally,
+# which is the right affordance at that count.
 #
-# A threshold rather than a per-sport allowlist so a third basketball or tennis competition
-# appears on its own, and so nothing has to be edited in two places when a league is added.
-LEAGUE_PICKER_MAX = 4
+# A threshold rather than a per-sport allowlist so a new competition appears on its own, and so
+# nothing has to be edited in two places when a league is added.
+#
+# RAISED 4 -> 12 ON 2026-10-05, AND THE OLD VALUE IS WHY. Basketball went from 2 leagues to 9
+# when the European competitions landed, crossed the threshold, and its picker VANISHED -- the
+# NBA and WNBA chips a user had been using disappeared along with the new leagues they were
+# looking for. Reported as "I don't see other Basketball leagues", and the picker showing
+# nothing at all is a worse answer than showing nine.
+#
+# 12 rather than 9 deliberately: a threshold set exactly at today's count re-breaks silently the
+# next time a league is added, which is precisely the failure being fixed. Football stays out at
+# 34 by design, not by accident.
+LEAGUE_PICKER_MAX = 12
 
 
 @router.get("/sports", response_model=list[SportResponse])

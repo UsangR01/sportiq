@@ -16,6 +16,7 @@ from app.fixtures.models import (
     TeamFeatures,
     TeamKeyPlayer,
 )
+from app.fixtures.service import season_start_year
 from app.models_ml.key_player_availability import get_key_player_availability
 from app.sports.models import Sport
 from app.workers.celery import celery_app, run_task
@@ -92,7 +93,7 @@ async def _maybe_trigger_reinference(db, sport: Sport, team_id, player_name: str
         # TDD §3.3 says Stage 2 runs "again on any RotoWire re-inference trigger", not just
         # at the original ingest time.
         available, per_combined = await get_key_player_availability(
-            db, team_id, int(fixture.season)
+            db, team_id, season_start_year(fixture.season) or 0
         )
         team_features = (
             await db.execute(

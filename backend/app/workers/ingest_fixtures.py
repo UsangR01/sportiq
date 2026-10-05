@@ -9,7 +9,7 @@ from app.adapters.base import FixturePayload, TeamStats
 from app.adapters.factory import AdapterFactory
 from app.core.database import async_session_factory
 from app.fixtures.models import Fixture, FixtureLiveState, FixtureStatus, Team, TeamFeatures
-from app.fixtures.service import get_or_create_team
+from app.fixtures.service import get_or_create_team, season_start_year
 from app.history.models import MatchResult, Outcome
 from app.models_ml.elo import INITIAL_ELO, apply_match_result
 from app.models_ml.key_player_availability import get_key_player_availability
@@ -488,9 +488,18 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
                 # app/models_ml/key_player_availability.py). Reads exclusively from
                 # player_injury_status, never a box score; returns (None, None) on its own for
                 # any team/season Stage 1 never ran for, so no per-sport gate is needed here.
-                key_players_available, key_players_per_combined = await get_key_player_availability(
-                    db, team_id, int(fixture.season)
-                )
+                # season_start_year rather than int(): API-Basketball labels a domestic European
+                # season "2026-2027", and int() on that raised inside this loop -- which the
+                # per-league isolation swallowed, leaving six leagues with fixtures but no
+                # TeamFeatures and no predictions for anything still to be played.
+                season_year = season_start_year(fixture.season)
+                if season_year is None:
+                    key_players_available, key_players_per_combined = None, None
+                else:
+                    (
+                        key_players_available,
+                        key_players_per_combined,
+                    ) = await get_key_player_availability(db, team_id, season_year)
 
                 # Re-running this worker (daily, per TDD §2.3) for the same not-yet-played
                 # fixture previously inserted a brand-new TeamFeatures row every time — no

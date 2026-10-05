@@ -234,3 +234,61 @@ def test_the_catalog_and_the_league_id_map_agree():
     """Two separate wirings that must not drift -- the same failure that left nine football
     leagues trained but never ingested. A league in one and not the other is invisible."""
     assert {slug for slug, _, _ in BASKETBALL_LEAGUES} == set(BASKETBALL_LEAGUE_IDS)
+
+
+# --------------------------------------- the three production bugs found the morning after
+
+
+def test_the_season_label_parses_for_both_provider_formats():
+    """THE BUG THAT COST SIX LEAGUES THEIR PREDICTIONS. int(fixture.season) was safe while every
+    season label was a bare year; API-Basketball labels a domestic season "2026-2027".
+
+    Measured in production the morning these went live: of 73 domestic fixtures, all 21
+    COMPLETED carried a prediction and all 52 SCHEDULED carried none, while the EuroLeague --
+    whose label is the bare year 2026 -- had 10 of 10. The ValueError fired inside
+    ingest_fixtures' upcoming-features loop and the per-league isolation swallowed it, so the
+    leagues ingested fixtures perfectly and silently produced nothing to show.
+    """
+    from app.fixtures.service import season_start_year
+
+    assert season_start_year("2026-2027") == 2026  # domestic European basketball
+    assert season_start_year("2026") == 2026  # EuroLeague, football, BallDontLie
+    assert season_start_year(2026) == 2026
+    # Unparseable costs the one feature that needs it, never the league's predictions.
+    assert season_start_year(None) is None
+    assert season_start_year("") is None
+    assert season_start_year("abc") is None
+
+
+def test_european_basketball_head_to_head_does_not_go_to_balldontlie():
+    """EVERY European basketball fixture detail returned HTTP 500 until this routed correctly.
+
+    _fetch_head_to_head sent all sport_slug == "nba" fixtures to BallDontLie, which cannot parse
+    an "ab:"-prefixed id. The resulting error was NOT an httpx.HTTPError, so the panel's own
+    try/except did not catch it and the whole fixture screen failed -- while the WNBA, same sport
+    row and same code path, was fine.
+    """
+    import inspect
+
+    from app.fixtures import router as fixtures_router
+
+    source = inspect.getsource(fixtures_router._fetch_head_to_head)
+    assert "BASKETBALL_LEAGUE_IDS" in source, (
+        "the h2h dispatch no longer distinguishes API-Basketball leagues from BallDontLie ones; "
+        "every European basketball fixture detail will 500 again"
+    )
+    assert hasattr(fixtures_router, "_api_basketball_head_to_head")
+
+
+def test_basketball_still_fits_under_the_league_picker_threshold():
+    """The reported symptom: basketball grew from 2 leagues to 9, crossed LEAGUE_PICKER_MAX,
+    and its filter chips vanished entirely -- including the NBA and WNBA ones that had always
+    been there. A threshold set exactly at today's count would re-break on the next addition,
+    so this asserts real headroom rather than a bare inequality."""
+    from app.sports.router import LEAGUE_PICKER_MAX
+
+    nba_and_wnba = 2
+    assert len(BASKETBALL_LEAGUES) + nba_and_wnba <= LEAGUE_PICKER_MAX
+    assert (
+        LEAGUE_PICKER_MAX - (len(BASKETBALL_LEAGUES) + nba_and_wnba) >= 1
+    ), "no room for another basketball competition before the picker silently disappears"

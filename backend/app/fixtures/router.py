@@ -1511,8 +1511,41 @@ async def _fetch_head_to_head(
     if sport_slug == "football":
         return await _football_head_to_head(home_team, away_team)
     if sport_slug in ("nba", "tennis"):
+        # BASKETBALL IS TWO PROVIDERS UNDER ONE SPORT. The NBA and WNBA come from BallDontLie;
+        # the European competitions come from API-Basketball with "ab:"-prefixed ids that
+        # BallDontLie cannot parse. Routing them there raised a non-HTTP error that the panel's
+        # own try/except did not catch, so the entire fixture screen returned 500 -- every
+        # European basketball fixture, while the WNBA was fine.
+        from app.adapters.api_basketball import BASKETBALL_LEAGUE_IDS
+
+        if league_slug in BASKETBALL_LEAGUE_IDS:
+            return await _api_basketball_head_to_head(league_slug, home_team, away_team)
         return await _balldontlie_head_to_head(sport_slug, league_slug, home_team, away_team)
     return None
+
+
+async def _api_basketball_head_to_head(
+    league_slug: str, home_team: Team, away_team: Team
+) -> HeadToHeadResponse | None:
+    from app.adapters.api_basketball import fetch_h2h_panel
+
+    try:
+        panel = await fetch_h2h_panel(home_team.external_id, away_team.external_id, league_slug)
+    except httpx.HTTPError:
+        logger.warning("H2H fetch failed for %s; rendering the fixture without it", league_slug)
+        return None
+    if panel is None:
+        return None
+    return HeadToHeadResponse(
+        meetings_count=panel.meetings_count,
+        home_wins=panel.home_wins,
+        draws=panel.draws,
+        away_wins=panel.away_wins,
+        stats=[
+            ComparisonStat(label=s.label, home=s.home, away=s.away, suffix=s.suffix)
+            for s in panel.stats
+        ],
+    )
 
 
 async def _balldontlie_head_to_head(

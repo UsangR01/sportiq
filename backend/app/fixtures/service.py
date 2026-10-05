@@ -156,3 +156,33 @@ async def find_fixture_by_abbreviations_and_time(
         .all()
     )
     return matches[0] if len(matches) == 1 else None
+
+
+def season_start_year(season: str | None) -> int | None:
+    """The YEAR a season label starts in, or None if the label does not carry one.
+
+    EXISTS BECAUSE int(fixture.season) IS NOT SAFE ACROSS PROVIDERS, and the failure was total
+    rather than partial. Every season label this product had ever stored was a bare year --
+    football's "2026", BallDontLie's "2026" -- so parsing one with int() worked everywhere until
+    API-Basketball arrived, where DOMESTIC European competitions label a season "2026-2027"
+    while the EuroLeague labels the same season "2026".
+
+    Measured in production the morning after those leagues went live: of 73 domestic fixtures,
+    all 21 COMPLETED ones carried a prediction and all 52 SCHEDULED ones carried none, while the
+    EuroLeague had 10 of 10. int("2026-2027") raises ValueError inside ingest_fixtures' upcoming
+    -features loop, the per-league isolation catches it and moves on, and the result is a league
+    that ingests fixtures perfectly and silently produces no TeamFeatures and no predictions for
+    anything still to be played. Nothing errored in the feed; the cards were simply empty.
+
+    Returns None rather than raising or guessing, because the only caller that needs this is
+    Stage 2 key-player availability, which already returns (None, None) for any season Stage 1
+    never ran for -- and that is every basketball season. An unparseable label should cost that
+    one feature, not the whole league's predictions.
+    """
+    if season is None:
+        return None
+    head = str(season).strip().split("-")[0].strip()
+    try:
+        return int(head)
+    except ValueError:
+        return None
