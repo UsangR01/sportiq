@@ -2798,6 +2798,62 @@ gained tennis twice.
   The transfer test passed without it, so it is the next gain rather than a prerequisite, and it
   is the likeliest explanation for Germany's BBL being the one league below its own baseline.
 
+## Three bugs the first live basketball morning exposed (2026-10-05)
+
+Reported as "I don't see other Basketball leagues". The ingest itself had worked -- **83 European
+fixtures across all seven leagues overnight** -- and three independent faults sat on top of it.
+Each is recorded with the production measurement that found it, because none of the three
+produced an error anyone would have seen.
+
+**1. THE LEAGUE PICKER VANISHED, taking the NBA and WNBA chips with it.**
+`app/sports/router.py:LEAGUE_PICKER_MAX` was **4**: above that a sport's leagues are not offered
+as filters at all, because football's 34 would be a scrolling list and the feed already groups by
+league. Basketball went 2 -> 9 and crossed it, so `/sports` returned `leagues: []` and the filter
+sheet lost the two chips a user had been using as well as the seven they were looking for.
+**Raised to 12, not 9** -- a threshold set at today's exact count re-breaks silently on the next
+addition, which is the fault being fixed. Football stays out at 34 by design.
+
+**2. SIX LEAGUES PRODUCED NO PREDICTIONS, AND THE SPLIT NAMED THE CAUSE.** Measured:
+
+    domestic European   21 of 21 COMPLETED fixtures had a prediction
+                         0 of 52 SCHEDULED  fixtures had one
+    EuroLeague          10 of 10 scheduled  had one, feature completeness 0.6875
+
+`int(fixture.season)` is safe on a bare year and raises on **"2026-2027"** -- which is exactly how
+API-Basketball labels a DOMESTIC season while labelling the EuroLeague's **2026**. It fired inside
+`ingest_fixtures`' upcoming-features loop, the per-league isolation caught it and moved on, and
+the result was six leagues that ingested fixtures perfectly and silently produced nothing to show.
+**Nothing errored in the feed; the cards were simply empty.**
+
+Replaced with `app/fixtures/service.py:season_start_year`, which returns **None rather than
+raising**: an unparseable label should cost the one feature that needs it -- Stage 2 key-player
+availability, already `(None, None)` for every basketball season -- and not the league's entire
+prediction set. `ingest_injuries.py` carried the identical call and was fixed with it.
+
+> This is the THIRD time a season-label assumption has cost a league its data (Brasileirao's
+> calendar year, the J1 League's end-year label, now a span label breaking a downstream `int()`).
+> The first two were about computing the WRONG season; this one is about a season label that is
+> not a number at all. Any new provider's season format should be run through
+> `season_start_year` before anything does arithmetic on it.
+
+**3. EVERY EUROPEAN FIXTURE DETAIL RETURNED HTTP 500.** `_fetch_head_to_head` routed every
+`sport_slug == "nba"` fixture to BallDontLie, which cannot parse an `ab:`-prefixed id. The
+resulting error was **not an `httpx.HTTPError`**, so the panel's own `try/except` -- written for
+rate limits -- did not catch it, and the whole fixture screen failed. The WNBA, same sport row and
+same code path, was fine throughout, which is what made it look like a data problem rather than a
+routing one. Fixed with a real `api_basketball.fetch_h2h_panel` (record plus points scored and
+conceded -- the final score is the only per-meeting number these competitions guarantee) and
+dispatch by league.
+
+**Verified in production after deploying**: the picker offers all 9 basketball leagues, fixture
+detail returns 200 for the EuroLeague, ACB, Lega A, BBL and the WNBA, and a real ACB panel renders
+5 meetings at 1-0-4 with points 74.6 against 88.2.
+
+**STILL PENDING AND SELF-HEALING**: scheduled European fixtures get their features and predictions
+on the next `ingest-fixtures-daily` run (02:00 UTC). The 7-day lookahead means that one run covers
+the whole week ahead, so cards populate from tomorrow morning -- but today's fixtures are lost,
+because the fix landed after this morning's run.
+
 ## Mobile implementation status
 
 `mobile/` is a real Expo Router app (SDK 57, TypeScript), scaffolded and live-tested end to end against the running backend on **both** Expo web and a real Android emulator (registration, login, logout, guest-session creation/migration, and every §5.2 screen route) — not just created and left unverified.
