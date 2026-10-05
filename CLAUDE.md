@@ -2854,6 +2854,54 @@ on the next `ingest-fixtures-daily` run (02:00 UTC). The 7-day lookahead means t
 the whole week ahead, so cards populate from tomorrow morning -- but today's fixtures are lost,
 because the fix landed after this morning's run.
 
+## Odds stopped being written, and one league could take down the whole run (2026-10-05)
+
+Reported as "there are no odds for all the games on card today". Not a basketball problem and
+not caused by the new leagues: the newest odds row anywhere in the football window was
+**2026-10-04T02:15:13**, about 31 hours and five scheduled runs stale, while TENNIS was fresh to
+within two hours throughout -- because tennis runs on its own separate tasks
+(`ingest-tennis-odds-hourly`, `ingest-tennis-rundown-odds-every-2-hours`) and never shares the
+6-hourly loop.
+
+**THE STRUCTURAL BUG: `_ingest_odds` had no per-league isolation.** `_fetch_odds_payloads`
+catches per-ADAPTER `ValueError` and `httpx.HTTPError`, and that was read as sufficient. It is
+not -- everything AFTER the fetch (`_resolve_fixture`, `_orient_payload`, the `Odds` insert, the
+Redis write, the `commit`) ran unguarded, so one league raising anything else aborted the task
+for every remaining league AND every remaining sport. The same isolation `ingest_fixtures.py`
+and `ingest_live_scores.py` both already had. Now per-league, with a WARNING naming the
+failures, because **a run that quietly stopped writing is indistinguishable from a run with
+nothing to write** -- which is exactly how a day and a half passed unnoticed.
+
+**A BUG INTRODUCED THE DAY BEFORE, which would have caused the identical outage.**
+`APIBasketballAdapter.fetch_odds` was written `(sport, league, days_ahead)` while the ABC
+declares a fourth parameter, `dates`, that `_fetch_odds_payloads` passes on EVERY call. The
+resulting `TypeError` is caught by neither `except` clause, so from the first basketball league
+onward it would have killed the whole run. **Python enforces an abstract method's PRESENCE, not
+its signature**, so this imports cleanly, satisfies ABCMeta, passes every unit test that calls it
+directly, and breaks only at runtime in the caller.
+
+`tests/test_adapter_abc_signatures.py` pins the class across all seven adapters in both
+directions -- a missing ABC parameter, and an ABC parameter promoted to required. Verified to
+FAIL against the pre-fix source rather than assumed to.
+
+**WHY THIS MATTERS MORE THAN IT LOOKS:** with no odds, EV ranking and the `min_odds` filter both
+silently degrade to probability-only. CLAUDE.md already records that failure surfacing once as an
+apparent MODELLING problem ("a chunk of the MLS predictions were all under 3.5"), and it is the
+reason an odds outage has to be loud rather than inferred from a feed that still looks populated.
+
+**THE ROOT CAUSE OF THE ORIGINAL STOP IS NOT IDENTIFIED.** It predates every commit in this work
+-- there are no commits at all between 29 Sep and 4 Oct -- so it is data- or environment-driven.
+TheRundown was tested directly and returns cleanly without raising. The isolation now names the
+failing league in the logs instead of swallowing it, which is the instrument that was missing.
+
+**TWO MEASUREMENT MISTAKES OF MINE, both recorded because both were the confident version:**
+- I reported the outage as "three days, since 2 Oct 20:04". That came from a SINGLE sampled
+  fixture; across the window the newest write is 2026-10-04T02:15:13. Still an outage, ~31 hours
+  rather than ~3 days.
+- I then declared it recovered. The watcher tested odds PRESENCE and exited on its first
+  iteration against three-day-old rows. **Freshness, not presence, is the test** -- a stale price
+  is indistinguishable from a fresh one in every field except `updated_at`.
+
 ## Mobile implementation status
 
 `mobile/` is a real Expo Router app (SDK 57, TypeScript), scaffolded and live-tested end to end against the running backend on **both** Expo web and a real Android emulator (registration, login, logout, guest-session creation/migration, and every §5.2 screen route) — not just created and left unverified.
