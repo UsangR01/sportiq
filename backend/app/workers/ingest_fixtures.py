@@ -468,6 +468,10 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
         # league), and fetch_team_stats is expensive/rate-limited — cache per external_id so
         # each team is only fetched once per run instead of once per (fixture, team) pair.
         team_stats_cache: dict[str, TeamStats] = {}
+        # Collected rather than only logged per team: a handful of misses is ordinary, a league
+        # where every team fails is an outage, and the difference is invisible one line at a
+        # time. See the summary warning after the commit.
+        failed_team_stats: list[str] = []
         for fixture in upcoming:
             for team_id in (fixture.home_team_id, fixture.away_team_id):
                 # fetch_team_stats needs the provider's own team ID, not our internal UUID —
@@ -479,9 +483,38 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
                 if team is None or team.external_id is None:
                     continue
                 if team.external_id not in team_stats_cache:
-                    team_stats_cache[team.external_id] = await adapter.fetch_team_stats(
-                        team.external_id, n_matches=FEATURE_WINDOW_MATCHES, league=league.slug
-                    )
+                    # ONE TEAM MUST NOT COST THE LEAGUE ITS ENTIRE FEATURE SET, and until
+                    # 2026-10-06 it did. This call was unguarded and db.commit() sits AFTER the
+                    # loop, so a single team raising -- a rate limit, a player with no history,
+                    # any provider hiccup -- aborted the loop before the commit and left the
+                    # league with fixtures written and NO TeamFeatures at all.
+                    #
+                    # MEASURED: tennis feature completeness collapsed from ~0.59-0.73 to 0.0909
+                    # (1 of 11 features) on 2026-10-05, the first nightly run after the league
+                    # count went 32 -> 45, and every scheduled tennis fixture lost its pick --
+                    # the completeness floor correctly refusing a vector that was empty. The
+                    # fixtures themselves ingested fine, which is the signature of dying between
+                    # the fixture upsert and the feature commit.
+                    #
+                    # Skipping one team leaves THAT team's features absent, which the floor
+                    # already handles honestly; it no longer takes the other teams with it.
+                    try:
+                        team_stats_cache[team.external_id] = await adapter.fetch_team_stats(
+                            team.external_id,
+                            n_matches=FEATURE_WINDOW_MATCHES,
+                            league=league.slug,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - one team is not the league
+                        failed_team_stats.append(team.external_id)
+                        logger.warning(
+                            "fetch_team_stats failed for %s/%s team=%s (%s) — skipping that "
+                            "team, the rest of the league is unaffected",
+                            sport.slug,
+                            league.slug,
+                            team.external_id,
+                            exc,
+                        )
+                        continue
                 stats = team_stats_cache[team.external_id]
 
                 # Stage 2 of TDD §3.3's key-player availability feature — sport-agnostic (see
@@ -543,6 +576,15 @@ async def _ingest_fixtures_for_league(sport: Sport, league: League) -> None:
                     )
                 )
         await db.commit()
+
+        if failed_team_stats:
+            logger.warning(
+                "Team stats failed for %d team(s) in %s/%s: %s",
+                len(failed_team_stats),
+                sport.slug,
+                league.slug,
+                ", ".join(failed_team_stats[:10]),
+            )
 
         # A freshly-ingested fixture never got a prediction of its own before this — the only
         # existing trigger was ingest_injuries.py's re-inference path, which fires just for a

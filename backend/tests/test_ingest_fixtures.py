@@ -1123,3 +1123,96 @@ async def test_an_unknown_league_is_a_warning_not_a_crash(monkeypatch):
 
     monkeypatch.setattr(module, "_ingest_fixtures_for_league", _fake)
     await module._ingest_one_league("no-such-sport", "no-such-league")
+
+
+async def test_one_team_failing_does_not_cost_the_league_its_whole_feature_set(monkeypatch):
+    """THE TENNIS OUTAGE. fetch_team_stats sat unguarded inside the per-team loop while
+    db.commit() sits AFTER it, so a single team raising aborted the loop before the commit and
+    the league ended up with fixtures written and NO TeamFeatures at all.
+
+    Measured: tennis feature completeness collapsed from ~0.59-0.73 to 0.0909 -- one feature of
+    eleven -- on 2026-10-05, and every scheduled tennis fixture lost its pick, the completeness
+    floor correctly refusing an empty vector. The fixtures themselves ingested perfectly, which
+    is the signature of dying between the fixture upsert and the feature commit.
+
+    Two teams, one of which always fails. The survivor must still get its row.
+    """
+    kickoff = datetime.now(UTC) + timedelta(days=1)
+    async with async_session_factory() as db:
+        slug = f"test-sport-{uuid.uuid4().hex[:8]}"
+        sport = Sport(slug=slug, name="Test Sport", model_type="test", active=True)
+        db.add(sport)
+        await db.flush()
+        league = League(
+            sport_id=sport.id,
+            slug="test-league",
+            name="Test League",
+            country="XX",
+            tier=1,
+            active=True,
+        )
+        db.add(league)
+        await db.commit()
+        await db.refresh(sport)
+        await db.refresh(league)
+
+    payload = FixturePayload(
+        external_id="fx-teamfail-1",
+        league_external_id="test-league",
+        home_team_external_id="healthy-1",
+        away_team_external_id="broken-1",
+        kickoff_utc=kickoff,
+        season="2026",
+        home_team_name="Healthy FC",
+        away_team_name="Broken FC",
+        status="scheduled",
+    )
+
+    class OneBadTeamAdapter(FakeAdapter):
+        async def fetch_team_stats(self, team_id, n_matches, league=None):
+            if team_id == "broken-1":
+                raise httpx.HTTPError("rate limited")
+            return TeamStats(team_external_id=team_id, form_pts_5=0.5)
+
+    import app.adapters.factory as factory_module
+
+    monkeypatch.setattr(
+        factory_module.AdapterFactory,
+        "get_stats_adapter",
+        lambda slug, league=None: OneBadTeamAdapter([payload]),
+    )
+
+    try:
+        await _ingest_fixtures_for_league(sport, league)
+
+        async with async_session_factory() as db:
+            fixture = (
+                await db.execute(select(Fixture).where(Fixture.external_id == "fx-teamfail-1"))
+            ).scalar_one()
+            rows = (
+                (
+                    await db.execute(
+                        select(TeamFeatures).where(TeamFeatures.fixture_id == fixture.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        # Before the fix this was 0 -- the commit was never reached. The broken team legitimately
+        # has no row; the healthy one must.
+        assert len(rows) == 1, (
+            "one team's stats failure wiped the league's whole feature set; the per-team "
+            "isolation in the features loop has regressed"
+        )
+    finally:
+        async with async_session_factory() as db:
+            fixture = (
+                await db.execute(select(Fixture).where(Fixture.external_id == "fx-teamfail-1"))
+            ).scalar_one_or_none()
+            if fixture is not None:
+                await db.execute(delete(TeamFeatures).where(TeamFeatures.fixture_id == fixture.id))
+                await db.execute(delete(Fixture).where(Fixture.id == fixture.id))
+            await db.execute(delete(Team).where(Team.sport_id == sport.id))
+            await db.execute(delete(League).where(League.sport_id == sport.id))
+            await db.execute(delete(Sport).where(Sport.id == sport.id))
+            await db.commit()
