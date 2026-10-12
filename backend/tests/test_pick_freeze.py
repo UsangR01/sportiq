@@ -547,3 +547,161 @@ async def test_a_completed_fixture_also_yields_to_a_qualifying_alternative(
 
     assert row is not None, "a settled card must not vanish when an alternative clears the floor"
     assert row["best_pick"]["odds"] == pytest.approx(1.55)
+
+
+# --------------------------------------------------------------------------------------
+# The two ways a card got frozen BLANK, both found in production on 2026-10-12
+# --------------------------------------------------------------------------------------
+
+
+async def _make_fixture(*, kickoff, estimated, with_prediction):
+    """A fixture with full control over the two things the freeze reads."""
+    async with async_session_factory() as db:
+        slug = f"blank-{uuid.uuid4().hex[:8]}"
+        sport = Sport(slug=slug, name="Blank Test", model_type="test", active=True)
+        db.add(sport)
+        await db.flush()
+        league = League(
+            sport_id=sport.id, slug=f"l-{slug}", name="L", country=None, tier=1, active=True
+        )
+        db.add(league)
+        await db.flush()
+        home = Team(sport_id=sport.id, league_id=league.id, name="H", external_id=f"h{slug}")
+        away = Team(sport_id=sport.id, league_id=league.id, name="A", external_id=f"a{slug}")
+        db.add_all([home, away])
+        await db.flush()
+        fixture = Fixture(
+            sport_id=sport.id,
+            league_id=league.id,
+            external_id=f"fx-{slug}",
+            home_team_id=home.id,
+            away_team_id=away.id,
+            kickoff_utc=kickoff,
+            kickoff_is_estimated=estimated,
+            status=FixtureStatus.SCHEDULED,
+            season="2026",
+        )
+        db.add(fixture)
+        await db.flush()
+        if with_prediction:
+            db.add(
+                Prediction(
+                    fixture_id=fixture.id,
+                    model_version="freeze_test_v1",
+                    home_prob=0.72,
+                    draw_prob=0.10,
+                    away_prob=0.18,
+                    confidence_tier=ConfidenceTier.MEDIUM,
+                    created_at=kickoff - timedelta(hours=4),
+                    kind=PredictionKind.PRE_MATCH,
+                    feature_completeness=0.7,
+                )
+            )
+        await db.commit()
+        return sport.id, fixture.id
+
+
+async def _cleanup(sport_id, fixture_id):
+    async with async_session_factory() as db:
+        await db.execute(delete(FrozenPick).where(FrozenPick.fixture_id == fixture_id))
+        await db.execute(delete(Prediction).where(Prediction.fixture_id == fixture_id))
+        await db.execute(delete(Fixture).where(Fixture.sport_id == sport_id))
+        await db.execute(delete(Team).where(Team.sport_id == sport_id))
+        await db.execute(delete(League).where(League.sport_id == sport_id))
+        await db.execute(delete(Sport).where(Sport.id == sport_id))
+        await db.commit()
+
+
+async def _frozen_row(fixture_id):
+    async with async_session_factory() as db:
+        return (
+            await db.execute(select(FrozenPick).where(FrozenPick.fixture_id == fixture_id))
+        ).scalar_one_or_none()
+
+
+async def test_a_placeholder_midnight_is_not_treated_as_a_kickoff():
+    """THE TENNIS OUTAGE. A match with no scheduled_time is stored at MIDNIGHT of its match day
+    with kickoff_is_estimated set, so it satisfied `kickoff_utc <= now` from 00:00 -- hours
+    before it was played, and often before its prediction existed.
+
+    Measured in production: of 26 past tennis fixtures carrying a prediction, 25 would get a
+    pick from the live path and ZERO showed one. Their predictions were written 4-9 hours
+    BEFORE kickoff with healthy completeness, so the data was fine; the freeze ran at the wrong
+    moment and recorded the absence permanently.
+    """
+    now = datetime.now(UTC)
+    sport_id, fixture_id = await _make_fixture(
+        # Midnight today: already "past" by the old rule, but the match has not been played.
+        kickoff=now.replace(hour=0, minute=0, second=0, microsecond=0),
+        estimated=True,
+        with_prediction=True,
+    )
+    try:
+        await _freeze(fixture_id)
+        assert await _frozen_row(fixture_id) is None, (
+            "a placeholder midnight was treated as a real kickoff; the card is frozen hours "
+            "before the match is played"
+        )
+    finally:
+        await _cleanup(sport_id, fixture_id)
+
+
+async def test_a_placeholder_is_frozen_once_its_day_has_ended():
+    """The other half -- the delay must not mean 'never'. A placeholder means 'some time on day
+    D', so once that day is over the match really is in the past and the card must be fixed."""
+    now = datetime.now(UTC)
+    sport_id, fixture_id = await _make_fixture(
+        kickoff=now - timedelta(hours=30),
+        estimated=True,
+        with_prediction=True,
+    )
+    try:
+        await _freeze(fixture_id)
+        row = await _frozen_row(fixture_id)
+        assert row is not None, "a placeholder a day and a half old must be frozen"
+        assert row.candidates, "it had a real prediction, so the card must not be blank"
+    finally:
+        await _cleanup(sport_id, fixture_id)
+
+
+async def test_a_fixture_with_no_prediction_is_deferred_rather_than_frozen_blank():
+    """An absent prediction is a RACE, not a verdict.
+
+    _bulk_best_picks only visits fixtures that have a prediction, so an absent key meant the
+    usual empty candidate list got written -- and an empty list is permanent: apply_frozen
+    treats it as "our guards refused everything" and backfill_frozen_candidates repairs only
+    NULL. A fixture born already past its placeholder kickoff races the queued prediction task
+    and can lose, which is exactly how a card ends up blank forever.
+    """
+    now = datetime.now(UTC)
+    sport_id, fixture_id = await _make_fixture(
+        kickoff=now - timedelta(minutes=10),
+        estimated=False,
+        with_prediction=False,
+    )
+    try:
+        await _freeze(fixture_id)
+        assert await _frozen_row(fixture_id) is None, (
+            "a fixture with no prediction was frozen blank; the next cycle can no longer "
+            "record the card it goes on to show"
+        )
+    finally:
+        await _cleanup(sport_id, fixture_id)
+
+
+async def test_a_fixture_that_never_gets_a_prediction_is_still_recorded():
+    """The bound. Deferring forever would let these accumulate and crowd out real work under
+    FREEZE_PER_RUN, and a card that genuinely showed nothing deserves that honest record."""
+    now = datetime.now(UTC)
+    sport_id, fixture_id = await _make_fixture(
+        kickoff=now - timedelta(hours=12),
+        estimated=False,
+        with_prediction=False,
+    )
+    try:
+        await _freeze(fixture_id)
+        row = await _frozen_row(fixture_id)
+        assert row is not None, "past the grace window this must be recorded, not retried"
+        assert row.candidates == [], "nothing was ever shown, and that is what must be recorded"
+    finally:
+        await _cleanup(sport_id, fixture_id)

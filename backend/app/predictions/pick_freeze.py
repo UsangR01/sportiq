@@ -22,9 +22,9 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.fixtures.models import Fixture, FixtureStatus
@@ -57,6 +57,36 @@ async def frozen_picks_for(db: AsyncSession, fixture_ids: list[uuid.UUID]) -> di
 FREEZE_CHUNK = 40
 FREEZE_PER_RUN = 200
 
+# A PLACEHOLDER MIDNIGHT IS NOT A KICKOFF, and freezing against one is why tennis cards went
+# blank. A tennis match whose provider gives no scheduled_time is stored at MIDNIGHT of its
+# match day with kickoff_is_estimated set -- balldontlie_tennis._match_kickoff_utc says so
+# outright: "a DATE placeholder... not a real start time, and must not be displayed as one."
+#
+# The freeze selected on `kickoff_utc <= now` with no exception for that, so such a fixture is
+# eligible from 00:00 on its own match day -- often hours before it is played, and frequently
+# before its prediction has even been written. MEASURED 2026-10-12 against production: of 26
+# past tennis fixtures carrying a prediction, 25 would get a pick from the live path and ZERO
+# showed one, because each had been frozen with an empty candidate set. Their predictions were
+# written 4-9 HOURS BEFORE kickoff with healthy feature completeness (0.64-0.73), so the data
+# was fine -- the freeze simply ran at the wrong moment and recorded the absence permanently.
+#
+# Waiting a full day past the placeholder is what "the day this match belonged to has ended"
+# means, and it mirrors the reasoning already used for the abandoned-fixture sweep: a
+# placeholder means "some time on day D", so the last moment it could still be underway is the
+# end of that day.
+PLACEHOLDER_FREEZE_DELAY_HOURS = 24
+
+# How long to keep retrying a fixture that has no prediction at all before recording the blank.
+#
+# A fixture is eligible for freezing the instant its kickoff passes, but its prediction is
+# written by a QUEUED task -- so a fixture born already past its kickoff (every placeholder
+# tennis match) races the freeze and can lose. Skipping it costs one five-minute cycle.
+#
+# Bounded rather than indefinite: a fixture that genuinely never gets a prediction must still
+# end up with an honest record of having shown nothing, and an unbounded skip would let those
+# accumulate and crowd out real work under FREEZE_PER_RUN.
+MISSING_PREDICTION_GRACE_HOURS = 6
+
 
 async def freeze_started_fixtures(db: AsyncSession, limit: int = FREEZE_PER_RUN) -> int:
     """Freeze any fixture whose kickoff has passed and that has no frozen row yet.
@@ -69,6 +99,10 @@ async def freeze_started_fixtures(db: AsyncSession, limit: int = FREEZE_PER_RUN)
 
     POSTPONED fixtures are skipped: they have no pick by design, so there is nothing to protect,
     and freezing a null would only make a rescheduled match unable to regain one.
+
+    AN ESTIMATED KICKOFF IS NOT A KICKOFF -- see PLACEHOLDER_FREEZE_DELAY_HOURS. Those wait a
+    full day, because a midnight placeholder means "some time on day D" and freezing at 00:05
+    captured a card most of a day before the match was played.
     """
     now = datetime.now(UTC)
     started = (
@@ -77,7 +111,17 @@ async def freeze_started_fixtures(db: AsyncSession, limit: int = FREEZE_PER_RUN)
                 select(Fixture.id)
                 .outerjoin(FrozenPick, FrozenPick.fixture_id == Fixture.id)
                 .where(
-                    Fixture.kickoff_utc <= now,
+                    or_(
+                        # A real kickoff: unchanged behaviour, freeze within one cycle.
+                        # `is_not(True)` rather than `is_(False)` so a NULL flag -- every
+                        # fixture ingested before that column existed -- keeps the old path.
+                        (Fixture.kickoff_is_estimated.is_not(True)) & (Fixture.kickoff_utc <= now),
+                        (Fixture.kickoff_is_estimated.is_(True))
+                        & (
+                            Fixture.kickoff_utc
+                            <= now - timedelta(hours=PLACEHOLDER_FREEZE_DELAY_HOURS)
+                        ),
+                    ),
                     Fixture.status != FixtureStatus.POSTPONED,
                     FrozenPick.id.is_(None),
                 )
@@ -169,10 +213,38 @@ async def _freeze(db: AsyncSession, fixture_ids: list[uuid.UUID], *, reason: str
     #
     # `surviving` is the whole point -- see FrozenPick.candidates. The winner is stored too, but
     # only so a row written before that column existed still renders.
-    best, _all, surviving = await _bulk_best_picks(db, fixture_ids, with_survivors=True)
+    best, all_picks, surviving = await _bulk_best_picks(db, fixture_ids, with_survivors=True)
+
+    # A FIXTURE WITH NO PREDICTION HAS NOT SHOWN A CARD YET, so there is nothing to record.
+    #
+    # _bulk_best_picks only visits fixtures that HAVE a prediction, so an absent key here means
+    # "no prediction", not "nothing survived". Writing the usual empty candidate list for those
+    # conflates the two -- and the two are not the same: an empty list is a permanent record
+    # ("our guards refused everything"), while no prediction is a race the next cycle will win.
+    # backfill_frozen_candidates repairs NULL and never repairs empty, so the conflation is
+    # unrecoverable once written.
+    #
+    # Bounded by MISSING_PREDICTION_GRACE_HOURS so a fixture that never gets one is still
+    # recorded honestly rather than retried forever.
+    now = datetime.now(UTC)
+    kickoffs = dict(
+        (
+            await db.execute(
+                select(Fixture.id, Fixture.kickoff_utc).where(Fixture.id.in_(fixture_ids))
+            )
+        ).all()
+    )
+    deferred = 0
 
     written = 0
     for fixture_id in fixture_ids:
+        if fixture_id not in all_picks:
+            kickoff = kickoffs.get(fixture_id)
+            if kickoff is not None and kickoff > now - timedelta(
+                hours=MISSING_PREDICTION_GRACE_HOURS
+            ):
+                deferred += 1
+                continue
         pick = best.get(fixture_id)
         db.add(
             FrozenPick(
@@ -201,6 +273,10 @@ async def _freeze(db: AsyncSession, fixture_ids: list[uuid.UUID], *, reason: str
         )
         written += 1
     await db.commit()
+    if deferred:
+        # Worth a line: a steady stream here means predictions are lagging ingest, which is the
+        # condition that silently blanked every tennis card for a week.
+        logger.info("deferred %d card(s) with no prediction yet; will retry next cycle", deferred)
     logger.info("froze %d cards (%s)", written, reason)
     return written
 
