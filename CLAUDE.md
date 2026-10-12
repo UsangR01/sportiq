@@ -2902,6 +2902,69 @@ failing league in the logs instead of swallowing it, which is the instrument tha
   iteration against three-day-old rows. **Freshness, not presence, is the test** -- a stale price
   is indistinguishable from a fresh one in every field except `updated_at`.
 
+## The freeze was blanking cards, and tennis took the worst of it (2026-10-12)
+
+Reported as scarcely ever seeing tennis cards. **The features were fine** -- the 2026-10-06
+per-team isolation fix worked, median tennis feature completeness is back to **0.6818** from
+0.0909, and 63 of 73 fixtures carry a prediction. What was broken is the FREEZE.
+
+**THE MEASUREMENT THAT NAMED IT.** Of 26 past tennis fixtures carrying a prediction, **25 would
+get a pick from the live path and ZERO showed one** -- every one frozen with an empty candidate
+set. Their predictions were written **4-9 HOURS BEFORE kickoff** with healthy completeness
+(0.64-0.73), so the data was never the problem; the freeze ran at the wrong moment and recorded
+the absence permanently.
+
+The giveaway is that `best_pick` and `all_market_picks` DISAGREE on the same fixture:
+`all_market_picks` is deliberately not frozen, so it shows the healthy live candidates while
+`best_pick` serves the empty frozen record.
+
+**TWO CAUSES, both the freeze firing at a moment that was not a kickoff.**
+
+1. **A PLACEHOLDER MIDNIGHT IS NOT A KICKOFF.** A tennis match with no `scheduled_time` is
+   stored at MIDNIGHT of its match day with `kickoff_is_estimated` set --
+   `balldontlie_tennis._match_kickoff_utc` says so outright: *"a DATE placeholder... not a real
+   start time, and must not be displayed as one."* `freeze_started_fixtures` selected on
+   `kickoff_utc <= now` with no exception for it, so such a fixture was eligible from **00:00 on
+   its own match day**, hours before it was played. Estimated kickoffs now wait
+   `PLACEHOLDER_FREEZE_DELAY_HOURS` (24) -- which is what "the day this match belonged to has
+   ended" means, the same reasoning the abandoned-fixture sweep already applies to the same
+   placeholders.
+
+2. **NO PREDICTION IS A RACE, NOT A VERDICT.** `_bulk_best_picks` only visits fixtures that HAVE
+   a prediction, so an absent key wrote the usual empty candidate list. Those are not the same
+   thing, and the code says so elsewhere: an empty list is **permanent** (`apply_frozen` reads it
+   as "our guards refused everything") while `backfill_frozen_candidates` repairs only NULL. A
+   fixture born already past its placeholder kickoff races the QUEUED prediction task and can
+   lose. Now deferred to the next five-minute cycle, bounded by `MISSING_PREDICTION_GRACE_HOURS`
+   (6) so a fixture that never gets one is still recorded honestly rather than retried forever.
+
+**NOT TENNIS-ONLY, and the split is informative:** over 25 Sep - 12 Oct, past fixtures carrying a
+prediction that show no card are **tennis 138 of 231 (60%)** against **football 68 of 196 (35%)**.
+Football has no placeholder kickoffs, so cause 2 reaches it alone -- and some of its 35% will be
+legitimate refusals, since it has more markets and more gates. Tennis is the outlier precisely
+because cause 1 stacks on top. The fix is sport-agnostic.
+
+**THE TRADE THIS MAKES, stated rather than buried:** an estimated-kickoff fixture is now computed
+LIVE for up to a day longer, so its card can move during that window -- the very mutability the
+freeze exists to prevent. That is the right side to err on when the alternative is a card frozen
+permanently blank, but it is a real cost and not a free fix.
+
+**THE ALREADY-BLANK CARDS ARE NOT REPAIRED, and that is a decision rather than an oversight.**
+Re-deriving them would ADD picks that were never shown, which this file records as the same
+defect as deleting ones that were. The honest complication: users saw nothing for those fixtures
+*because of this bug*, not because a guard refused -- so an argument exists either way, and it is
+the user's call rather than a silent sweep. `backfill_frozen_candidates` cannot do it anyway: it
+repairs NULL and these are empty.
+
+Four tests pin both failure modes AND both bounds (a placeholder IS frozen once its day ends; a
+never-predicted fixture IS recorded past the grace window), verified to FAIL against the pre-fix
+source rather than assumed to. 931 passed.
+
+**A brief 502 was seen while diagnosing this** -- `/health` itself, `x-render-routing:
+dynamic-paid-error` -- and it recovered within 30 seconds on its own. Recorded because it was
+initially called an outage; one minute of 502 on a starter instance is a recycle, not an
+incident.
+
 ## Mobile implementation status
 
 `mobile/` is a real Expo Router app (SDK 57, TypeScript), scaffolded and live-tested end to end against the running backend on **both** Expo web and a real Android emulator (registration, login, logout, guest-session creation/migration, and every §5.2 screen route) — not just created and left unverified.
