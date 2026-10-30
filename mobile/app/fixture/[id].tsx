@@ -319,7 +319,7 @@ function Standings({ fixture }: { fixture: FixtureDetail }) {
           <Text className="flex-1 text-[10px] font-semibold uppercase tracking-wide text-gray-400">
             Team
           </Text>
-          {["P", "GD", "PTS"].map((heading) => (
+          {query.data.columns.map((heading) => (
             <Text
               key={heading}
               className="w-9 text-right text-[10px] font-semibold uppercase tracking-wide text-gray-400"
@@ -358,15 +358,20 @@ function Standings({ fixture }: { fixture: FixtureDetail }) {
               >
                 {row.team_name}
               </Text>
-              <Text className="w-9 text-right text-xs tabular-nums text-gray-500 dark:text-gray-400">
-                {row.played}
-              </Text>
-              <Text className="w-9 text-right text-xs tabular-nums text-gray-500 dark:text-gray-400">
-                {row.goal_difference > 0 ? `+${row.goal_difference}` : row.goal_difference}
-              </Text>
-              <Text className="w-9 text-right text-xs font-bold tabular-nums text-gray-900 dark:text-gray-100">
-                {row.points}
-              </Text>
+              {/* Server-driven, so basketball's P/DIFF/W renders without a mobile change.
+                  The middle column is a difference in both sports, so it keeps its sign. */}
+              {row.values.map((value, column) => (
+                <Text
+                  key={column}
+                  className={`w-9 text-right text-xs tabular-nums ${
+                    column === row.values.length - 1
+                      ? "font-bold text-gray-900 dark:text-gray-100"
+                      : "text-gray-500 dark:text-gray-400"
+                  }`}
+                >
+                  {column === 1 && value > 0 ? `+${value}` : value}
+                </Text>
+              ))}
             </Row>
           );
         })}

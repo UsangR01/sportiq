@@ -79,6 +79,7 @@ from app.adapters.base import (
     H2HPanelStat,
     InjuryUpdate,
     OddsPayload,
+    StandingRow,
     TeamStats,
 )
 from app.core.config import get_settings
@@ -102,10 +103,24 @@ BASKETBALL_LEAGUE_IDS: dict[str, int] = {
     "euroleague": 120,  # pan-European; its clubs also play their domestic leagues
 }
 
+
+# STANDINGS ONLY -- deliberately NOT merged into BASKETBALL_LEAGUE_IDS, which drives adapter
+# ROUTING (factory.py, the H2H dispatch, nba_features). Adding the NBA there would send its
+# fixtures, odds and team stats to API-Basketball instead of BallDontLie, which owns them.
+#
+# The NBA and the WNBA appear here because BallDontLie CANNOT serve a table at any tier we
+# hold: /standings returns 401 for both, measured, as do /stats and /season_averages. So the
+# table comes from the provider that has it while everything else keeps its existing source.
+STANDINGS_LEAGUE_IDS: dict[str, int] = {**BASKETBALL_LEAGUE_IDS, "nba": 12, "wnba": 13}
+
 # Leagues whose season API-Basketball labels with a bare YEAR rather than a span. Checked per
 # league against the provider's own season windows, never inferred -- that assumption is exactly
 # what Brasileirao and the J1 League each broke for football.
-YEAR_SEASON_LEAGUES = {"euroleague"}
+# The WNBA is here for a DIFFERENT reason from the EuroLeague and it matters: it runs
+# May-September inside ONE calendar year, so the span label is not merely a formatting
+# mismatch, it names the wrong season. Measured: season "2026-2027" returns 0 rows, season
+# "2026" returns 30 -- and a wrong season does not raise, it returns HTTP 200 with results=0.
+YEAR_SEASON_LEAGUES = {"euroleague", "wnba"}
 
 # Month from which a new autumn-spring season is considered to have started. European basketball
 # tips off mid-September (measured: BBL 18 Sep, Euroleague 24 Sep, ACB/Lega A 26 Sep, Greece
@@ -538,6 +553,84 @@ async def _h2h_meetings(home_raw: str, away_raw: str) -> list[dict]:
 
 
 H2H_PANEL_MEETINGS = 10
+
+
+async def fetch_standings(league: str) -> list[StandingRow]:
+    """The league table, computed by the provider rather than from our own fixtures.
+
+    BASKETBALL IS NOT FOOTBALL-SHAPED, and two differences are measured rather than assumed:
+
+    1. **`group.points` is 0 for the NBA and the WNBA.** European competitions award 2 points a
+       win and rank on them; the North American leagues rank on WIN-LOSS RECORD and the provider
+       returns a zero there. Writing that into `points` and letting the client print "PTS" would
+       show a column of zeros, so the router picks the display columns per sport -- wins for
+       basketball, points for football.
+    2. **The NBA returns TWO tables** (60 rows then 30) because it is grouped by conference and
+       by division. Every table is flattened here with its group label kept, so the fixture
+       screen can show the subject team's own section instead of a 60-row list with silent
+       duplicates.
+
+    `drawn` is structurally 0: basketball cannot tie. `goal_difference` carries the POINT
+    differential -- the field is football-named because the row type is shared, and the column
+    LABEL is what the user reads.
+    """
+    league_id = STANDINGS_LEAGUE_IDS.get(league)
+    if league_id is None:
+        raise ValueError(f"No API-Basketball league id mapping for league={league!r}")
+    settings = get_settings()
+    if not settings.api_football_key:
+        return []
+    async with httpx.AsyncClient(
+        base_url=BASE_URL,
+        headers={"x-apisports-key": settings.api_football_key},
+        timeout=30.0,
+    ) as client:
+        response = await client.get(
+            "/standings", params={"league": league_id, "season": _season_for(league)}
+        )
+        response.raise_for_status()
+    rows: list[StandingRow] = []
+    seen: set[str] = set()
+    for table in _api_response(response).get("response", []):
+        for entry in table:
+            team = entry.get("team") or {}
+            external_id = f"{ID_PREFIX}{team.get('id')}"
+            # API-Basketball suffixes every WNBA club with " W" ("Minnesota Lynx W"). That is
+            # the provider disambiguating itself from the men's league, not part of the club's
+            # name, and showing it would read as a typo on the table. Scoped to the WNBA rather
+            # than stripped globally, so a club legitimately ending in " W" survives elsewhere.
+            team_name = (team.get("name") or "").strip()
+            if league == "wnba" and team_name.endswith(" W"):
+                team_name = team_name[:-2]
+            group = (entry.get("group") or {}).get("name")
+            # ONE ROW PER TEAM, first table wins. The NBA returns 60 rows for 30 teams --
+            # every club once by CONFERENCE and again by DIVISION -- and the provider returns
+            # the conference table first, which is the canonical NBA standings view. Keying on
+            # (team, group) instead would be "correct" and render each club twice.
+            if external_id in seen:
+                continue
+            seen.add(external_id)
+            games = entry.get("games") or {}
+            points = entry.get("points") or {}
+            scored, conceded = points.get("for"), points.get("against")
+            rows.append(
+                StandingRow(
+                    rank=entry.get("position") or 0,
+                    team_external_id=external_id,
+                    team_name=team_name,
+                    played=(games.get("played") or 0),
+                    won=((games.get("win") or {}).get("total") or 0),
+                    drawn=0,
+                    lost=((games.get("lose") or {}).get("total") or 0),
+                    goal_difference=(
+                        (scored - conceded) if scored is not None and conceded is not None else 0
+                    ),
+                    points=((entry.get("group") or {}).get("points") or 0),
+                    form=entry.get("form"),
+                    group=group,
+                )
+            )
+    return rows
 
 
 async def fetch_h2h_panel(

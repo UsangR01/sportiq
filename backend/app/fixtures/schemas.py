@@ -303,6 +303,10 @@ class StandingRowResponse(BaseModel):
     # fixture for; that row simply is not a link, rather than a link that 404s.
     team_id: uuid.UUID | None = None
     team_name: str
+    # The three numbers this row DISPLAYS, parallel to StandingsResponse.columns. Separate from
+    # the typed fields below because what a table shows differs by sport: football shows goal
+    # difference and points, basketball shows point differential and wins.
+    values: list[int] = []
     played: int
     won: int
     drawn: int
@@ -314,8 +318,21 @@ class StandingRowResponse(BaseModel):
 
 
 class StandingsResponse(BaseModel):
+    """A league table, with the column HEADINGS supplied by the server.
+
+    THE SPORTS DO NOT SHARE A VOCABULARY, and hardcoding football's "P / GD / PTS" in the
+    client is what made this football-only. Basketball has no draws, no goal difference, and
+    -- measured -- the NBA and WNBA return `group.points` of 0 because they rank on win-loss
+    record rather than awarded points. Rendering "PTS" there would print a column of zeros.
+
+    Same answer as ComparisonStat on the H2H panel: the server names the columns and the
+    client renders whatever it is given, so a fourth sport needs no mobile change.
+    """
+
     league_slug: str
     league_name: str
+    # Parallel to each row's `values`. Three columns by convention, not by constraint.
+    columns: list[str] = []
     rows: list[StandingRowResponse] = []
 
 

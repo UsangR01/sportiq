@@ -244,6 +244,9 @@ export interface StandingRowResponse {
    * in the provider's table we have never ingested a fixture for. */
   team_id: string | null;
   team_name: string;
+  /** The numbers this row displays, parallel to StandingsResponse.columns. Sport-specific:
+   *  football shows goal difference and points, basketball point differential and wins. */
+  values: number[];
   played: number;
   won: number;
   drawn: number;
@@ -258,6 +261,9 @@ export interface StandingRowResponse {
 export interface StandingsResponse {
   league_slug: string;
   league_name: string;
+  /** Column headings, supplied by the server because the sports do not share a vocabulary —
+   *  football "P/GD/PTS", basketball "P/DIFF/W". Parallel to each row's `values`. */
+  columns: string[];
   rows: StandingRowResponse[];
 }
 
