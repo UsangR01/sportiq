@@ -143,9 +143,25 @@ celery_app.conf.beat_schedule = {
         "task": "app.workers.ingest_fixtures.ingest_fixtures",
         "schedule": crontab(hour=2, minute=0),
     },
-    "ingest-injuries-every-30-minutes": {
+    "ingest-injuries-every-6-hours": {
         "task": "app.workers.ingest_injuries.ingest_injuries",
-        "schedule": 1800.0,
+        # WAS EVERY 30 MINUTES, AND THAT SPENT 76% OF THE DAILY ALLOWANCE ON DATA NO MODEL
+        # READS. fetch_injuries costs one /fixtures call per league plus one /injuries call per
+        # distinct fixture date, so at 34 leagues it is ~119 calls a run -- ~5,700/day against
+        # an API-Football Pro allowance of 7,500.
+        #
+        # Nothing consumes it. The four key-player features it feeds were pruned in d0a24d9;
+        # FEATURE_NAMES, CORNERS_FEATURE_NAMES and LAYER2_CONTEXT_FEATURES all contain zero
+        # key-player entries today, and the re-inference trigger therefore re-runs a prediction
+        # that cannot change. CLAUDE.md already called this "affordable to widen, but pointless"
+        # -- sized against Ultra's 75,000/day. On Pro it is not merely pointless: it starves the
+        # standings and H2H panels, which are what a user actually sees go missing.
+        #
+        # KEPT RATHER THAN DELETED, at ~476 calls/day. The pipeline stays warm and the table
+        # keeps real rows for whenever player availability is rebuilt, which is the thing this
+        # repo keeps losing by letting a disabled path rot. Restore a tighter cadence in the
+        # same change that makes a model read the feature again.
+        "schedule": crontab(minute=20, hour="*/6"),
     },
     # Weekly, because settled fixtures accumulate at roughly 90/week: more often re-reports the
     # same number, less often sits on a met trigger. See check_market_signal.py.
