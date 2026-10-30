@@ -113,11 +113,24 @@ async def test_only_a_completed_fixture_gets_a_panel(status):
 
 
 @pytest.mark.asyncio
-async def test_basketball_has_no_panel_and_spends_no_call():
-    """BallDontLie's /stats is 401 on this plan, so the final score -- already shown above the
-    panel -- is the only real per-match number. Returning before the cache also keeps the
-    keyspace to the sports that use it. db is None: reaching a query would raise."""
-    assert await _fetch_match_stats(None, "nba", "wnba", FakeFixture(), None) == []
+async def test_basketball_now_has_a_panel_but_still_spends_nothing_on_an_unplayed_match():
+    """THIS TEST USED TO ASSERT THE OPPOSITE, and the old version is why it is worth keeping.
+
+    It read: "BallDontLie's /stats is 401 on this plan, so the final score is the only real
+    per-match number." The 401 is real; the conclusion was not. API-Basketball -- already
+    subscribed -- publishes a full box score, so basketball now renders rebounds, assists,
+    shooting percentages, steals and turnovers like every other sport.
+
+    What still holds is the GATE: an unplayed fixture is refused before any call or cache
+    lookup. db is None here, so reaching a query would raise rather than quietly pass.
+    """
+    assert (
+        await _fetch_match_stats(
+            None, "nba", "wnba", FakeFixture(status=FixtureStatus.SCHEDULED), None
+        )
+        == []
+    )
+    assert await _fetch_match_stats(None, "nba", "wnba", FakeFixture(external_id=None), None) == []
 
 
 @pytest.mark.asyncio
