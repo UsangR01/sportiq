@@ -8,6 +8,7 @@ import httpx
 from app.adapters.base import (
     DataSourceAdapter,
     FixturePayload,
+    H2HMeeting,
     InjuryUpdate,
     OddsPayload,
     TeamStats,
@@ -1083,30 +1084,6 @@ async def fetch_match_stats(fixture_external_id: str) -> dict[str, MatchStats]:
         str(team_block["team"]["id"]): _parse_match_stats_block(team_block)
         for team_block in _api_response(response).get("response", [])
     }
-
-
-@dataclass(frozen=True)
-class H2HMeeting:
-    """One past meeting, as the Meetings tab renders it.
-
-    `result` is W/D/L FROM THE CURRENT FIXTURE'S HOME TEAM'S POINT OF VIEW, not from whichever
-    side that club happened to occupy in the historical match — same reasoning as
-    _goals_from_home_side_perspective. A record that flips depending on past venue is not a
-    record. `home_team`/`away_team` and the score keep the meeting's OWN orientation, because
-    the row shows where it was actually played.
-    """
-
-    fixture_external_id: str
-    kickoff_utc: datetime
-    # Optional because a row is still worth showing without it — the date, the scoreline and the
-    # verdict are the substance, and the client simply omits the label. Team names are NOT
-    # optional: "X v Y" is unrenderable without them, so a row missing one is dropped instead.
-    competition: str | None
-    home_team: str
-    away_team: str
-    home_score: int
-    away_score: int
-    result: str  # "W" | "D" | "L", for the current fixture's home side
 
 
 @dataclass(frozen=True)

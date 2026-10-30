@@ -1524,6 +1524,20 @@ async def _fetch_head_to_head(
     return None
 
 
+def _meeting_rows(panel) -> list[MeetingRow]:
+    """An adapter's past meetings, mapped for the Meetings tab.
+
+    Shared by basketball and tennis, and delegating to football's own `_meeting_row` because
+    all three adapters now return the SAME `H2HMeeting` -- api_football used to define its own
+    identical copy, which is why this could not be shared before.
+
+    The data was there all along: every one of these games is already fetched to compute the
+    record and the averages, so surfacing them costs no extra request. The panel simply never
+    carried them past the adapter boundary for anything but football.
+    """
+    return [_meeting_row(m) for m in panel.meetings]
+
+
 async def _api_basketball_head_to_head(
     league_slug: str, home_team: Team, away_team: Team
 ) -> HeadToHeadResponse | None:
@@ -1545,6 +1559,7 @@ async def _api_basketball_head_to_head(
             ComparisonStat(label=s.label, home=s.home, away=s.away, suffix=s.suffix)
             for s in panel.stats
         ],
+        meetings=_meeting_rows(panel),
     )
 
 
@@ -1580,6 +1595,7 @@ async def _balldontlie_head_to_head(
             ComparisonStat(label=s.label, home=s.home, away=s.away, suffix=s.suffix)
             for s in panel.stats
         ],
+        meetings=_meeting_rows(panel),
     )
 
 

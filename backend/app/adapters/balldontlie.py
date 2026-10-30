@@ -9,6 +9,7 @@ from app.adapters.api_football import RECENT_FORM_LENGTH
 from app.adapters.base import (
     DataSourceAdapter,
     FixturePayload,
+    H2HMeeting,
     H2HPanel,
     H2HPanelStat,
     InjuryUpdate,
@@ -439,6 +440,7 @@ async def fetch_h2h_panel(
     home_points: list[int] = []
     away_points: list[int] = []
     home_wins = 0
+    rows: list[H2HMeeting] = []
     for g in meetings:
         # Re-expressed from THIS fixture's home team's perspective, whichever side they were on
         # in that meeting.
@@ -449,6 +451,31 @@ async def fetch_h2h_panel(
         away_points.append(conceded)
         if scored > conceded:
             home_wins += 1
+        try:
+            kickoff = datetime.fromisoformat(str(g["datetime"]).replace("Z", "+00:00"))
+        except (KeyError, ValueError):
+            # Counted in the record, omitted from the list: an undated row cannot be ordered,
+            # and inventing a date would sort it wrongly against real ones.
+            continue
+        rows.append(
+            H2HMeeting(
+                # Prefixed exactly as the fixture ids are for this league, so a WNBA meeting
+                # cannot be confused with the NBA game that shares its provider id.
+                fixture_external_id=league_external_id(league, g["id"]),
+                kickoff_utc=kickoff.astimezone(UTC),
+                home_team=(g["home_team"] or {}).get("full_name")
+                or (g["home_team"] or {}).get("name")
+                or "",
+                away_team=(g["visitor_team"] or {}).get("full_name")
+                or (g["visitor_team"] or {}).get("name")
+                or "",
+                home_score=g["home_team_score"],
+                away_score=g["visitor_team_score"],
+                # No draw branch: basketball cannot tie.
+                result="W" if scored > conceded else "L",
+                competition="WNBA" if league == "wnba" else "NBA",
+            )
+        )
 
     def mean(values: list[int]) -> float:
         return round(sum(values) / len(values), 1)
@@ -459,6 +486,7 @@ async def fetch_h2h_panel(
         # Basketball cannot draw, so this is structurally zero rather than unmeasured.
         draws=0,
         away_wins=len(meetings) - home_wins,
+        meetings=rows,
         # ONE row, not two. "Points allowed" is the exact mirror of "Points scored" in a
         # two-team head-to-head -- 73.8/87.0 becomes 87.0/73.8 -- so showing both fills the
         # panel without adding a single fact. This is football's "Goals" row, and with /stats
