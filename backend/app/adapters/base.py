@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 
 
@@ -202,6 +202,33 @@ class H2HPanelStat:
 
 
 @dataclass
+class H2HMeeting:
+    """One past meeting between the same two teams, for the panel's Meetings tab.
+
+    The data is FREE -- every adapter already fetches these games to compute the record and
+    the averages, and then threw them away for every sport but football. Surfacing them is a
+    mapping, not a new request.
+
+    `result` is W/D/L from the CURRENT fixture's home team's point of view, while home_team/
+    away_team keep the historical meeting's own orientation, so a row can legitimately read
+    "B v A 2-3 - W". Showing the real venue while scoring from one fixed perspective is what
+    makes a run of rows readable.
+
+    `competition` is optional because it is genuinely absent for some providers; a row with no
+    label is better than a fabricated one.
+    """
+
+    fixture_external_id: str
+    kickoff_utc: datetime
+    home_team: str
+    away_team: str
+    home_score: int
+    away_score: int
+    result: str
+    competition: str | None = None
+
+
+@dataclass
 class H2HPanel:
     """Head-to-head history shaped for DISPLAY, produced by whichever adapter owns the sport.
 
@@ -221,3 +248,5 @@ class H2HPanel:
     draws: int
     away_wins: int
     stats: list[H2HPanelStat]
+    # Defaulted rather than required so an adapter that cannot supply them stays valid.
+    meetings: list[H2HMeeting] = field(default_factory=list)

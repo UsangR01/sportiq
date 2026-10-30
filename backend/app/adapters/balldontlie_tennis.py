@@ -91,6 +91,7 @@ from app.adapters.api_football import RECENT_FORM_LENGTH
 from app.adapters.base import (
     DataSourceAdapter,
     FixturePayload,
+    H2HMeeting,
     H2HPanel,
     H2HPanelStat,
     InjuryUpdate,
@@ -1043,9 +1044,11 @@ async def fetch_h2h_panel(
             return None
 
         stats: list[H2HPanelStat] = []
+        rows: list[H2HMeeting] = []
         try:
             meetings = await _recent_meetings(client, home_raw, away_raw)
             stats = await _serve_return_averages(client, meetings, home_raw, away_raw)
+            rows = _meeting_rows(meetings, home_raw)
         except httpx.HTTPError:
             # The record is already real and worth showing on its own.
             pass
@@ -1057,7 +1060,48 @@ async def fetch_h2h_panel(
         draws=0,
         away_wins=int(away_wins),
         stats=stats,
+        meetings=rows,
     )
+
+
+def _meeting_rows(meetings: list[dict], home_raw: str) -> list[H2HMeeting]:
+    """Past meetings shaped for the panel, scored from the CURRENT fixture's home player.
+
+    Orientation is the whole difficulty, and it is the same trap `_home_away_players` exists
+    for: the provider's player1/player2 slots are not our home/away, so the row must be read
+    by ID rather than by position. Reading it by position would invert roughly half of them.
+
+    Score is SETS WON, matching Outcome.home_score for tennis everywhere else in this codebase.
+    A match whose sets cannot be counted -- a retirement inside the first set, a walkover --
+    is skipped rather than shown as 0-0, since a fabricated scoreline is worse than an absent
+    row. It still counts toward the record, which comes from the provider's own H2H endpoint.
+    """
+    rows: list[H2HMeeting] = []
+    for match in meetings:
+        home_player, away_player = _home_away_players(match)
+        home_sets, away_sets = _sets_won(match)
+        if home_sets is None or away_sets is None:
+            continue
+        # _sets_won answers in the match's own home/away, which is the id-based tiebreak --
+        # so re-express against THIS fixture's home player.
+        ours_is_match_home = str((home_player or {}).get("id")) == str(home_raw)
+        scored, conceded = (home_sets, away_sets) if ours_is_match_home else (away_sets, home_sets)
+        if scored == conceded:
+            # Equal completed sets happens on a retirement and has no honest W/L.
+            continue
+        rows.append(
+            H2HMeeting(
+                fixture_external_id=str(match.get("id")),
+                kickoff_utc=_match_kickoff_utc(match),
+                home_team=(home_player or {}).get("full_name") or "",
+                away_team=(away_player or {}).get("full_name") or "",
+                home_score=home_sets,
+                away_score=away_sets,
+                result="W" if scored > conceded else "L",
+                competition=(match.get("tournament") or {}).get("name"),
+            )
+        )
+    return rows
 
 
 async def fetch_match_stat_panel(

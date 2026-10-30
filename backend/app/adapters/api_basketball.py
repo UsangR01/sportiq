@@ -74,6 +74,7 @@ import httpx
 from app.adapters.base import (
     DataSourceAdapter,
     FixturePayload,
+    H2HMeeting,
     H2HPanel,
     H2HPanelStat,
     InjuryUpdate,
@@ -572,6 +573,7 @@ async def fetch_h2h_panel(
     home_wins = away_wins = 0
     scored: list[int] = []
     conceded: list[int] = []
+    rows: list[H2HMeeting] = []
     for game in meetings:
         home_score = _score((game.get("scores") or {}).get("home"))
         away_score = _score((game.get("scores") or {}).get("away"))
@@ -583,6 +585,27 @@ async def fetch_h2h_panel(
             home_wins += 1
         else:
             away_wins += 1
+        try:
+            kickoff = _kickoff(game)
+        except (KeyError, ValueError):
+            kickoff = None
+        if kickoff is None:
+            # Without a date the row cannot be ordered or labelled, and a fabricated one would
+            # sort wrongly against the others. The meeting still counts toward the record.
+            continue
+        rows.append(
+            H2HMeeting(
+                fixture_external_id=f"{ID_PREFIX}{game.get('id')}",
+                kickoff_utc=kickoff,
+                home_team=(game["teams"]["home"] or {}).get("name") or "",
+                away_team=(game["teams"]["away"] or {}).get("name") or "",
+                home_score=home_score,
+                away_score=away_score,
+                # Basketball cannot draw, so W/L only -- no "D" branch to get wrong.
+                result="W" if ours > theirs else "L",
+                competition=(game.get("league") or {}).get("name"),
+            )
+        )
 
     def avg(values: list[int]) -> float:
         return round(sum(values) / len(values), 1)
@@ -597,4 +620,5 @@ async def fetch_h2h_panel(
             H2HPanelStat(label="Points scored", home=avg(scored), away=avg(conceded)),
             H2HPanelStat(label="Points conceded", home=avg(conceded), away=avg(scored)),
         ],
+        meetings=rows,
     )

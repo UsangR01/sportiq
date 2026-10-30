@@ -276,10 +276,15 @@ class HeadToHeadResponse(BaseModel):
     draws: int
     away_wins: int
     stats: list[ComparisonStat] = []
-    # FOOTBALL ONLY, and empty rather than absent elsewhere. The meetings come free from the
-    # same payload the averages are computed from, but only API-Football returns them in a shape
-    # that carries a competition name — the tennis and basketball H2H paths do not, so their
-    # Meetings tab stays hidden rather than showing a list with blank labels.
+    # ALL THREE SPORTS as of 2026-10-30, and empty rather than absent when a provider cannot
+    # supply them. The meetings come free from the same payload the averages are computed from
+    # — every adapter already fetched these games to derive the record and then discarded them,
+    # so this was a mapping gap rather than a data one. Tennis labels each row with its
+    # tournament and basketball with its competition, so no row renders a blank label.
+    #
+    # A row is OMITTED, never fabricated, where the scoreline cannot be stated honestly: a
+    # tennis retirement with equal completed sets has no W/L, and a meeting with no usable date
+    # cannot be ordered. Both still count toward the record, which comes from the provider.
     meetings: list[MeetingRow] = []
 
 
