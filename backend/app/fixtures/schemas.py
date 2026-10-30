@@ -266,10 +266,12 @@ class HeadToHeadResponse(BaseModel):
     Available for football, tennis and basketball. Null — never a fabricated empty record —
     when the two have genuinely never met, or a team could not be resolved.
 
-    DEPTH VARIES BY PROVIDER, and NBA/WNBA is the thin one for a reason worth stating:
-    BallDontLie's /stats returns 401 on this plan, so no box score exists at any price we hold
-    and the only real per-meeting numbers are the final scores. Two rows is what the data
-    supports; inventing more would mean fabricating them."""
+    DEPTH VARIES BY PROVIDER, and basketball's used to be the thin one. BallDontLie's /stats
+    is 401 at every tier this account holds, so through it the only real per-meeting number is
+    the final score. That was recorded as a hard limit and was not one: API-Basketball, already
+    paid for, returns the box score, so basketball now shows seven rows -- for the NBA and WNBA
+    too, whose clubs are joined to that provider BY NAME since their fixtures come from
+    BallDontLie and share no id with it."""
 
     meetings_count: int
     home_wins: int
@@ -382,7 +384,10 @@ class FixtureDetail(FixtureSummary):
     # settled at 9 is a very different read from one that settled at 14).
     #
     # EMPTY, never fabricated, until there is something real to show: the fixture must be
-    # COMPLETED, and each row is dropped when neither side has a value. Basketball is empty by
-    # nature -- BallDontLie's /stats is 401 on this plan, so the final score is the only real
-    # per-match number and it is already displayed above.
+    # COMPLETED, and each row is dropped when neither side has a value. Basketball is empty
+    # here, but NOT for the reason this comment used to give. BallDontLie's /stats is 401, which
+    # was read as "no box score exists at any price we hold" -- API-Basketball has one, and the
+    # H2H panel now uses it. Wiring it into THIS panel is a real remaining gap rather than a
+    # provider limit: it needs the fixture's own id in that provider's namespace, which the
+    # European leagues already carry and the NBA/WNBA would have to resolve.
     match_stats: list[ComparisonStat] = []
