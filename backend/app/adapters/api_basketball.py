@@ -554,6 +554,13 @@ async def _h2h_meetings(home_raw: str, away_raw: str) -> list[dict]:
 
 H2H_PANEL_MEETINGS = 10
 
+# Box scores are fetched PER MEETING -- one /games/statistics/teams call each -- so the stat
+# window is deliberately narrower than the record window above. The record is free (it comes
+# out of the single /games?h2h= call), the stats are not, and this panel is fetched per
+# FIXTURE-DETAIL VIEW rather than per ingested fixture, so its cost scales with how many
+# people open cards. Mirrors api_football's own H2H_DETAIL_MEETINGS = 5 for the same reason.
+H2H_STAT_MEETINGS = 5
+
 
 async def fetch_standings(league: str) -> list[StandingRow]:
     """The league table, computed by the provider rather than from our own fixtures.
@@ -633,6 +640,118 @@ async def fetch_standings(league: str) -> list[StandingRow]:
     return rows
 
 
+# Resolved team-name -> provider-id maps, per league, held for the life of the process. The
+# list changes once a season; a restart re-resolves, which is cheap and self-correcting.
+_TEAM_NAME_CACHE: dict[str, dict[str, int]] = {}
+
+
+def normalise_team_name(name: str) -> str:
+    """Key for matching a club across the two basketball providers.
+
+    The NBA and WNBA have their FIXTURES from BallDontLie and their table and box scores from
+    here, and the two id spaces cannot meet -- so the club name is the only join. Measured
+    before being relied on: 18 of 18 NBA clubs we hold match exactly.
+
+    The one real discrepancy is this provider suffixing every WNBA club " W" ("Minnesota
+    Lynx W"), stripped here rather than special-cased per club.
+    """
+    cleaned = (name or "").strip()
+    if cleaned.endswith(" W"):
+        cleaned = cleaned[:-2]
+    return cleaned.casefold()
+
+
+async def resolve_team_ids_by_name(league: str, names: list[str]) -> dict[str, int]:
+    """Provider team ids for clubs we only know by name — the NBA and WNBA.
+
+    Returns only what it actually finds. A caller that gets back fewer ids than it asked for
+    must degrade rather than guess, because the wrong id returns a real, confident, WRONG
+    head-to-head.
+    """
+    league_id = STANDINGS_LEAGUE_IDS.get(league)
+    if league_id is None:
+        return {}
+    settings = get_settings()
+    if not settings.api_football_key:
+        return {}
+    if league not in _TEAM_NAME_CACHE:
+        async with httpx.AsyncClient(
+            base_url=BASE_URL,
+            headers={"x-apisports-key": settings.api_football_key},
+            timeout=30.0,
+        ) as client:
+            response = await client.get(
+                "/teams", params={"league": league_id, "season": _season_for(league)}
+            )
+            response.raise_for_status()
+            entries = _api_response(response).get("response") or []
+        _TEAM_NAME_CACHE[league] = {
+            normalise_team_name(entry.get("name")): entry["id"]
+            for entry in entries
+            if entry.get("id") is not None
+        }
+    lookup = _TEAM_NAME_CACHE[league]
+    resolved = {}
+    for name in names:
+        found = lookup.get(normalise_team_name(name))
+        if found is not None:
+            resolved[name] = found
+    return resolved
+
+
+async def _box_score_stats(
+    client: httpx.AsyncClient, meetings: list[dict], home_raw: str
+) -> list[H2HPanelStat]:
+    """Averaged box scores across the most recent meetings, from THIS fixture's home side.
+
+    NEVER FABRICATES A ZERO. Each measure averages over its OWN list of real values, so a
+    meeting that reports rebounds but not fouls contributes to the rebound average and is
+    simply absent from the fouls one -- the same rule football's H2H panel already follows.
+    A measure with no real values anywhere is dropped rather than shown as 0.0, which is why
+    personal_fouls and the offensive/defensive rebound split (both null in real responses)
+    will usually not appear at all.
+    """
+    home_values: dict[str, list[float]] = {}
+    away_values: dict[str, list[float]] = {}
+
+    def record(label: str, is_home: bool, value) -> None:
+        if value is None:
+            return
+        (home_values if is_home else away_values).setdefault(label, []).append(float(value))
+
+    for game in meetings[:H2H_STAT_MEETINGS]:
+        try:
+            response = await client.get("/games/statistics/teams", params={"id": game.get("id")})
+            response.raise_for_status()
+            rows = _api_response(response).get("response") or []
+        except httpx.HTTPError:
+            # One unavailable box score must not cost the whole panel: the record and the
+            # points rows are already real.
+            continue
+        for row in rows:
+            is_home = str((row.get("team") or {}).get("id")) == home_raw
+            record("Rebounds", is_home, (row.get("rebounds") or {}).get("total"))
+            record("Assists", is_home, row.get("assists"))
+            record("Steals", is_home, row.get("steals"))
+            record("Turnovers", is_home, row.get("turnovers"))
+            record("Field goal %", is_home, (row.get("field_goals") or {}).get("percentage"))
+            record("3-point %", is_home, (row.get("threepoint_goals") or {}).get("percentage"))
+
+    def mean(values: list[float] | None) -> float | None:
+        return round(sum(values) / len(values), 1) if values else None
+
+    stats: list[H2HPanelStat] = []
+    # Fixed order so the panel does not reshuffle between fixtures.
+    for label in ("Rebounds", "Assists", "Field goal %", "3-point %", "Steals", "Turnovers"):
+        home, away = mean(home_values.get(label)), mean(away_values.get(label))
+        if home is None and away is None:
+            continue
+        stats.append(
+            H2HPanelStat(label=label, home=home, away=away, suffix="%" if "%" in label else "")
+        )
+    return stats
+
+
 async def fetch_h2h_panel(
     home_external_id: str, away_external_id: str, league: str = "acb"
 ) -> H2HPanel | None:
@@ -703,6 +822,23 @@ async def fetch_h2h_panel(
     def avg(values: list[int]) -> float:
         return round(sum(values) / len(values), 1)
 
+    # "Points conceded" used to sit beside "Points scored" and was removed when the real box
+    # score arrived: in a TWO-TEAM head-to-head it is the exact mirror (118.6/115.0 becomes
+    # 115.0/118.6), so it filled a row without adding a fact. Rebounds and shooting are facts.
+    settings = get_settings()
+    box_score_stats: list[H2HPanelStat] = []
+    if settings.api_football_key:
+        try:
+            async with httpx.AsyncClient(
+                base_url=BASE_URL,
+                headers={"x-apisports-key": settings.api_football_key},
+                timeout=30.0,
+            ) as client:
+                box_score_stats = await _box_score_stats(client, meetings, home_raw)
+        except httpx.HTTPError:
+            # The record and the points row are already real and worth showing alone.
+            logger.warning("Box-score stats unavailable for %s", league, exc_info=True)
+
     return H2HPanel(
         meetings_count=len(meetings),
         home_wins=home_wins,
@@ -710,8 +846,8 @@ async def fetch_h2h_panel(
         draws=0,
         away_wins=away_wins,
         stats=[
-            H2HPanelStat(label="Points scored", home=avg(scored), away=avg(conceded)),
-            H2HPanelStat(label="Points conceded", home=avg(conceded), away=avg(scored)),
+            H2HPanelStat(label="Points", home=avg(scored), away=avg(conceded)),
+            *box_score_stats,
         ],
         meetings=rows,
     )

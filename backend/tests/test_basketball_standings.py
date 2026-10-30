@@ -77,3 +77,40 @@ def test_wnba_clubs_match_ours_despite_the_providers_trailing_w(provider_name, o
     ids can never match and the name is the only link. API-Basketball suffixes every WNBA club
     with " W"; without stripping it, not one WNBA row would link to its team."""
     assert _normalise_club_name(provider_name) == _normalise_club_name(ours)
+
+
+# ------------------------------------------------------------------ richer H2H via the
+# ------------------------------------------------------------------ other provider
+
+
+def test_the_cross_provider_name_key_strips_the_wnba_suffix():
+    """Same join as the standings table, and it carries more weight here: the H2H panel feeds
+    box scores, so a wrong match returns a real, confident, WRONG head-to-head rather than an
+    obviously empty one."""
+    from app.adapters.api_basketball import normalise_team_name
+
+    assert normalise_team_name("Minnesota Lynx W") == normalise_team_name("Minnesota Lynx")
+    assert normalise_team_name("  Boston Celtics ") == normalise_team_name("boston celtics")
+    # Not over-eager: a club whose name merely CONTAINS a W is untouched.
+    assert normalise_team_name("Washington Wizards") == "washington wizards"
+
+
+@pytest.mark.asyncio
+async def test_an_unresolvable_club_falls_back_rather_than_guessing(monkeypatch):
+    """The failure that matters. If either club cannot be resolved in the other provider's
+    namespace the enriched panel must return None so the caller degrades to the thin-but-
+    correct BallDontLie panel -- never a partial or guessed pairing.
+    """
+    import app.adapters.api_basketball as ab
+    from app.fixtures.models import Team
+    from app.fixtures.router import _basketball_head_to_head_by_name
+
+    async def only_one(league, names):
+        return {names[0]: 123}  # the away club is unresolvable
+
+    monkeypatch.setattr(ab, "resolve_team_ids_by_name", only_one)
+
+    result = await _basketball_head_to_head_by_name(
+        "nba", Team(name="Boston Celtics"), Team(name="Mystery Club")
+    )
+    assert result is None, "a half-resolved pairing must not produce a panel"

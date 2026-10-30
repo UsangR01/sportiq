@@ -1520,6 +1520,18 @@ async def _fetch_head_to_head(
 
         if league_slug in BASKETBALL_LEAGUE_IDS:
             return await _api_basketball_head_to_head(league_slug, home_team, away_team)
+        if sport_slug == "nba":
+            # THE NBA AND WNBA GET THEIR BOX SCORES FROM THE OTHER PROVIDER TOO. BallDontLie's
+            # /stats is 401 at every tier we hold, so through it this panel is one row -- the
+            # final score -- while the Spanish ACB shows seven. API-Basketball has the box
+            # score, and the clubs match by NAME (18 of 18, measured), so the richer panel is
+            # reachable for the leagues users care most about.
+            #
+            # Falls through to BallDontLie when a club cannot be resolved, rather than
+            # guessing: a wrong id returns a real, confident, WRONG head-to-head.
+            enriched = await _basketball_head_to_head_by_name(league_slug, home_team, away_team)
+            if enriched is not None:
+                return enriched
         return await _balldontlie_head_to_head(sport_slug, league_slug, home_team, away_team)
     return None
 
@@ -1558,6 +1570,47 @@ async def _api_basketball_head_to_head(
         stats=[
             ComparisonStat(label=s.label, home=s.home, away=s.away, suffix=s.suffix)
             for s in panel.stats
+        ],
+        meetings=_meeting_rows(panel),
+    )
+
+
+async def _basketball_head_to_head_by_name(
+    league_slug: str | None, home_team: Team, away_team: Team
+) -> HeadToHeadResponse | None:
+    """The richer basketball panel for leagues whose fixtures come from BallDontLie.
+
+    None -- never a partial guess -- when either club cannot be resolved in the other
+    provider's namespace, so the caller falls back to the thin-but-correct BallDontLie panel.
+    """
+    from app.adapters.api_basketball import ID_PREFIX, fetch_h2h_panel, resolve_team_ids_by_name
+
+    league = league_slug or "nba"
+    try:
+        resolved = await resolve_team_ids_by_name(league, [home_team.name, away_team.name])
+    except httpx.HTTPError:
+        logger.warning("Could not resolve %s clubs for the richer H2H panel", league)
+        return None
+    if home_team.name not in resolved or away_team.name not in resolved:
+        return None
+    try:
+        panel = await fetch_h2h_panel(
+            f"{ID_PREFIX}{resolved[home_team.name]}",
+            f"{ID_PREFIX}{resolved[away_team.name]}",
+            league,
+        )
+    except httpx.HTTPError:
+        return None
+    if panel is None:
+        return None
+    return HeadToHeadResponse(
+        meetings_count=panel.meetings_count,
+        home_wins=panel.home_wins,
+        draws=panel.draws,
+        away_wins=panel.away_wins,
+        stats=[
+            ComparisonStat(label=st.label, home=st.home, away=st.away, suffix=st.suffix)
+            for st in panel.stats
         ],
         meetings=_meeting_rows(panel),
     )
