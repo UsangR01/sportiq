@@ -78,6 +78,12 @@ import pandas as pd  # noqa: E402
 import xgboost as xgb  # noqa: E402
 from app.models_ml import football_features  # noqa: E402
 from app.models_ml.elo import compute_elo_history  # noqa: E402
+from app.models_ml.evaluation import (  # noqa: E402
+    btts_signal_report,
+    build_test_prediction_rows,
+    multiclass_calibration,
+    per_league_market_metrics,
+)
 from app.models_ml.football import FootballModel  # noqa: E402
 from app.models_ml.football_features import (  # noqa: E402
     CORNERS_FEATURE_NAMES,
@@ -86,12 +92,6 @@ from app.models_ml.football_features import (  # noqa: E402
     assemble_from_game_log,
     merge_corners_into_game_log,
     merge_xg_into_game_log,
-)
-from app.models_ml.evaluation import (  # noqa: E402
-    btts_signal_report,
-    build_test_prediction_rows,
-    multiclass_calibration,
-    per_league_market_metrics,
 )
 from app.models_ml.league_baselines import compute_league_baselines  # noqa: E402
 from app.models_ml.markets import CORNERS_LINES, GOALS_LINES, over_under_probs  # noqa: E402
@@ -632,7 +632,6 @@ def model_version_for(artefact_path: Path) -> str:
     return f"{ARTEFACT_PREFIX}v{artefact_path.stem.removeprefix(ARTEFACT_PREFIX)}"
 
 
-
 # Set by --no-activate. A training run is often a MEASUREMENT rather than a promotion, and
 # these scripts register-and-activate unconditionally, so the losing arm of an experiment
 # silently becomes the model that serves users.
@@ -645,6 +644,7 @@ def model_version_for(artefact_path: Path) -> str:
 # train/serve mismatch introduced by the measurement itself. Caught before any prediction was
 # generated with it, by luck of timing rather than by design.
 ACTIVATE_ON_REGISTER = True
+
 
 async def _register_model(
     artefact_path: Path, rps: float, accuracy: float, roi: float | None
@@ -700,10 +700,7 @@ async def _register_model(
             )
         )
         await db.commit()
-        print(
-            f"registered models_registry row: {version} "
-            f"(is_active={ACTIVATE_ON_REGISTER})"
-        )
+        print(f"registered models_registry row: {version} " f"(is_active={ACTIVATE_ON_REGISTER})")
 
 
 async def main_async() -> None:

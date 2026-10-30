@@ -209,7 +209,6 @@ RANDOM_SEED = 20260811
 # ===========================================================================================
 
 
-
 def _iso_monday(d):
     return d - timedelta(days=d.weekday())
 
@@ -418,7 +417,6 @@ def _optuna_objective(trial, X_train, y_train, X_val, y_val) -> float:
     return log_loss(y_val, val_preds)
 
 
-
 # Set by --no-activate. A training run is often a MEASUREMENT rather than a promotion, and
 # these scripts register-and-activate unconditionally, so the losing arm of an experiment
 # silently becomes the model that serves users.
@@ -431,6 +429,7 @@ def _optuna_objective(trial, X_train, y_train, X_val, y_val) -> float:
 # train/serve mismatch introduced by the measurement itself. Caught before any prediction was
 # generated with it, by luck of timing rather than by design.
 ACTIVATE_ON_REGISTER = True
+
 
 async def _register_model(artefact_path: Path, rps: float, accuracy: float) -> None:
     from app.core.database import async_session_factory
@@ -479,10 +478,7 @@ async def _register_model(artefact_path: Path, rps: float, accuracy: float) -> N
             )
         )
         await db.commit()
-        print(
-            f"registered models_registry row: {version} "
-            f"(is_active={ACTIVATE_ON_REGISTER})"
-        )
+        print(f"registered models_registry row: {version} " f"(is_active={ACTIVATE_ON_REGISTER})")
 
 
 async def main_async() -> None:

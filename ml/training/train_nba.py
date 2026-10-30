@@ -218,12 +218,12 @@ def _optuna_objective(trial, X_train, y_train, X_val, y_val) -> float:
     return log_loss(y_val, val_preds)
 
 
-
 # Set by --no-activate. A training run is often a MEASUREMENT rather than a promotion, and this
 # script registers-and-activates unconditionally, so the losing arm of an experiment silently
 # becomes the model that serves users. That is not hypothetical: on 2026-08-13 a tennis
 # form-window arm scoring WORSE on both accuracy and RPS promoted itself simply by finishing.
 ACTIVATE_ON_REGISTER = True
+
 
 async def _register_model(
     artefact_path: Path, rps: float, accuracy: float, roi_simulation: float | None
@@ -274,10 +274,7 @@ async def _register_model(
             )
         )
         await db.commit()
-        print(
-            f"registered models_registry row: {version} "
-            f"(is_active={ACTIVATE_ON_REGISTER})"
-        )
+        print(f"registered models_registry row: {version} " f"(is_active={ACTIVATE_ON_REGISTER})")
 
 
 async def main_async() -> None:

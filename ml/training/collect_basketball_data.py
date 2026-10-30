@@ -69,7 +69,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 load_dotenv(BACKEND_DIR / ".env")  # see collect_nba_data.py for why this is explicit
 
-from app.core.config import get_settings
+from app.core.config import get_settings  # noqa: E402
 
 BASE_URL = "https://v1.basketball.api-sports.io"
 OUT_DIR = Path(__file__).resolve().parents[1] / "data"
@@ -216,15 +216,11 @@ def main() -> None:
 
     key = get_settings().api_football_key
     if not key:
-        raise SystemExit(
-            "API_FOOTBALL_KEY is not set - see the .env resolution note in CLAUDE.md"
-        )
+        raise SystemExit("API_FOOTBALL_KEY is not set - see the .env resolution note in CLAUDE.md")
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     frames = []
-    with httpx.Client(
-        base_url=BASE_URL, headers={"x-apisports-key": key}, timeout=60.0
-    ) as client:
+    with httpx.Client(base_url=BASE_URL, headers={"x-apisports-key": key}, timeout=60.0) as client:
         for slug, config in selected.items():
             frame = collect_league(client, slug, config)
             if frame.empty:
@@ -241,20 +237,12 @@ def main() -> None:
         # the next measurement would score a population nobody chose.
         pooled_path = OUT_DIR / "basketball_game_log_pooled.parquet"
         parts = [
-            p
-            for p in sorted(OUT_DIR.glob("basketball_game_log_*.parquet"))
-            if p != pooled_path
+            p for p in sorted(OUT_DIR.glob("basketball_game_log_*.parquet")) if p != pooled_path
         ]
         pooled = pd.concat([pd.read_parquet(p) for p in parts], ignore_index=True)
         pooled.to_parquet(pooled_path, index=False)
-        print(
-            f"\npooled: {len(pooled)} team-game rows, {pooled['GAME_ID'].nunique()} games"
-        )
-        print(
-            json.dumps(
-                pooled.groupby("LEAGUE")["GAME_ID"].nunique().to_dict(), indent=2
-            )
-        )
+        print(f"\npooled: {len(pooled)} team-game rows, {pooled['GAME_ID'].nunique()} games")
+        print(json.dumps(pooled.groupby("LEAGUE")["GAME_ID"].nunique().to_dict(), indent=2))
 
 
 if __name__ == "__main__":

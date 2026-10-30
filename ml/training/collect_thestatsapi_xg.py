@@ -232,7 +232,6 @@ TARGETS = [
     ("czech_first", "comp_9766", "22/23", 2022),
     # Austria: 24/25 and earlier sampled 0/2 in every season - a genuine upstream gap.
     ("austria_bundesliga", "comp_4893", "25/26", 2025),
-
     # Six leagues added 2026-09-15. Competition ids read from TheStatsAPI's OWN /competitions
     # list, never guessed -- this file already records three invented ids 404ing and a result
     # being discarded because of it. Season labels likewise read from each competition's
@@ -519,9 +518,7 @@ def resolve(league: str, raw: dict, names: dict[str, str]) -> pd.DataFrame | Non
         shots = match.get("shots") or {}
         sot = match.get("shots_on_target") or {}
         big = match.get("big_chances") or {}
-        has_any_stat = any(
-            block.get("home") is not None for block in (expected, shots, sot, big)
-        )
+        has_any_stat = any(block.get("home") is not None for block in (expected, shots, sot, big))
         if score.get("home") is None or not has_any_stat:
             continue
         date = match["date"][:10]
@@ -554,6 +551,7 @@ def resolve(league: str, raw: dict, names: dict[str, str]) -> pd.DataFrame | Non
             best, via_name = ranked[0][1], via_name + 1
         else:
             best = found[0]
+
         def stat(block: dict, side: str) -> float | None:
             value = block.get(side)
             return float(value) if value is not None else None
