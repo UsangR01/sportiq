@@ -66,7 +66,36 @@ def test_seed_model_registry_registers_a_blind_artefact_inactive() -> None:
 
 
 def test_the_trainer_forces_no_activate_for_a_blind_run() -> None:
-    """Not merely defaulted -- FORCED. A blind run is always a measurement, never a promotion."""
-    source = (TRAINERS / "train_football.py").read_text(encoding="utf-8")
+    """Not merely defaulted -- FORCED. A blind run is always a measurement, never a promotion.
 
-    assert "ACTIVATE_ON_REGISTER = not (args.no_activate or args.market_blind)" in source
+    PARSED, NOT STRING-MATCHED. This assertion used to pin the exact text
+    `not (args.no_activate or args.market_blind)`, which broke the moment a THIRD measurement
+    flag (--without-xg) joined the disjunction -- a false failure on a change that strengthened
+    the very property being guarded. The house style for this class of guard is an AST walk
+    (see test_no_activate_keeps_an_incumbent.py), because the property is "market_blind forces
+    this False", not "the line reads exactly so".
+    """
+    tree = ast.parse((TRAINERS / "train_football.py").read_text(encoding="utf-8"))
+
+    assigns = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "ACTIVATE_ON_REGISTER" for t in node.targets)
+    ]
+    assert assigns, "nothing assigns ACTIVATE_ON_REGISTER at all"
+
+    forced = []
+    for node in assigns:
+        value = node.value
+        # `not (...)`: anything in the disjunction being true leaves the model unpromoted.
+        if not (isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.Not)):
+            continue
+        names = {n.attr for n in ast.walk(value.operand) if isinstance(n, ast.Attribute)}
+        forced.append("market_blind" in names)
+
+    assert any(forced), (
+        "no `ACTIVATE_ON_REGISTER = not (... args.market_blind ...)` found — a blind artefact "
+        "could promote itself by finishing, which is how this project twice ended up serving "
+        "a model nobody chose"
+    )
