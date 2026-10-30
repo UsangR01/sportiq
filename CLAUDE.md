@@ -76,7 +76,16 @@ Real logic exists for: auth (`POST /auth/register|login|refresh`, Argon2id + JWT
 
 ## Football model + key-player availability (TDD §3.2/§3.3) — real, trained, live-verified
 
-Built once the user obtained a paid API-Football subscription. **The plan is now Ultra: 75,000 requests/day, active until 2026-09-29** (confirmed live via `GET /status` on 2026-08-13; usage that day was 2,662). It was **Pro at 7,500/day ending 2026-08-29** when most of the collection scripts below were written, and that lower ceiling is the stated reason for several "cannot afford to collect that" decisions in this file — re-read those against 75,000 before treating them as still binding. It remains time-limited, so it is a deadline rather than a permanent unlock. This replaced the prior free-tier key that blocked `next`/current-season fixtures entirely (see the updated "External API research findings" entry below).
+Built once the user obtained a paid API-Football subscription.
+
+> **PLAN HISTORY, AND IT HAS BITTEN TWICE — read this before trusting any cost estimate below.**
+> The line that followed said "Ultra, 75,000/day, active until 2026-09-29" for weeks after that
+> window closed. On **2026-10-30** the account was on **Pro (7,500/day)** following a cost
+> downgrade, and it was upgraded back to **Ultra, 75,000/day, active until 2026-11-29**
+> (confirmed live; usage that day had already reached 7,564 — i.e. straight through Pro's
+> ceiling). **Confirm the live plan with `GET /status` before sizing anything against it.**
+
+**The plan was Ultra: 75,000 requests/day, active until 2026-09-29** (confirmed live via `GET /status` on 2026-08-13; usage that day was 2,662). It was **Pro at 7,500/day ending 2026-08-29** when most of the collection scripts below were written, and that lower ceiling is the stated reason for several "cannot afford to collect that" decisions in this file — re-read those against 75,000 before treating them as still binding. It remains time-limited, so it is a deadline rather than a permanent unlock. This replaced the prior free-tier key that blocked `next`/current-season fixtures entirely (see the updated "External API research findings" entry below).
 
 **Deliberate scope decision, not a hidden gap**: the pipeline is built generically (works for any of the 5 domestic leagues — EPL/Ligue1/Bundesliga/LaLiga/SerieA, all seeded via `scripts/seed_sports.py`, all with working fixture/odds ingestion), but **real trained-model historical data collection now covers EPL and Brasileirão** (5 seasons each, 2021–2025 — Brasileirão was added specifically to give retrodiction and the model itself more real data; see "Real historical data + Elo/streaks/richer H2H" below). The other 3 European leagues are still seeded with working fixture/odds ingestion but have no historical training data collected. A full 5-league × 5-season historical lineup-presence collection would run ~8–9k API calls, close to the daily ceiling in one sitting, and the subscription itself is only active for ~1 month — expanding to the remaining 3 leagues is a natural, bounded follow-up.
 
@@ -3461,3 +3470,100 @@ Runs on push to `main` and on every PR. Real-verified via an actual GitHub Actio
 ## Git
 
 This project's repo root is `C:\Users\User\IdeaProjects\SportIQ` (a proper, scoped git repo — do not run git commands expecting the repo root to be higher up in the directory tree). Remote `origin` points at the existing public repo `github.com/UsangR01/sportiq`.
+
+## The quota outage, and TheStatsAPI cancelled on a measurement (2026-10-30)
+
+Reported as the standings / head-to-head panels having stopped rendering on football cards.
+Not a code bug anywhere: **every API-Football call was being refused.**
+
+**The cause was a plan downgrade, Ultra -> Pro, 75,000 -> 7,500 a day.** Two scheduled jobs
+spend more than that between them before any enrichment runs:
+
+    live scores   5-min x 34 leagues                9,792/day
+    injuries     30-min x 34 leagues x ~3.5 calls   5,712/day
+    odds          3-hourly                          1,088/day
+    daily ingest                                      600/day
+                                           TOTAL   17,192/day   vs 7,500
+
+Measured on the day, usage reached **7,564** and everything after it was refused — so the
+daily ingest at 02:00 ran fine, predictions were fresh, and the panels were dead by morning.
+
+**Both jobs were cut without losing anything.** Live scores fanned out one call per league
+per run whether or not anything was being played (9,792 -> **3,319**, measured on a real
+matchday). Injuries feeds **nothing** — the four key-player features it exists for were pruned
+in `d0a24d9`, and `FEATURE_NAMES`/`CORNERS_FEATURE_NAMES`/`LAYER2_CONTEXT_FEATURES` contain
+zero key-player entries today, so its re-inference trigger re-runs a prediction that cannot
+change (30 min -> 6 hours, 5,712 -> **476**). **Total 17,192 -> 5,483/day, which fits Pro.**
+
+**THE LESSON IS THE ONE ALREADY IN THIS FILE, unlearned:** both cadences were sized when the
+plan was Ultra and neither comment said so. "A constraint recorded as an engineering decision
+should name the budget it assumed." Both now do.
+
+**Two exemptions in the live-score gate are load-bearing**, each verified by removing it and
+watching the matching test fail: anything already LIVE keeps being polled however long it runs
+(else a match that overran would never settle), and a **placeholder midnight kickoff is exempt
+from the clock entirely** — the tennis trap this repo has hit four times.
+
+### TheStatsAPI: CANCELLED, on a pre-registered measurement
+
+`docs/xg-value-preregistration.md` was written **before either arm ran**, with tolerances
+stated up front — the specific failure of the `LAST_N_FORM` rule, which had none.
+
+Two identical 33-league trainings, same seed and split, differing only in the four rolling-xG
+inputs. **Arm B is production's real regime**, since `team_features.xg_for_5`/`xg_against_5`
+have never had a source and live serving has xG missing on every fixture:
+
+    under 2.5 Brier   0.2436 -> 0.2437   +0.0001     material bar: +0.0020   PRIMARY
+    under 3.5 Brier   0.1977 -> 0.1983   +0.0006                             PRIMARY
+    1X2 RPS           0.2093 -> 0.2096   +0.0003
+    1X2 accuracy      0.4962 -> 0.4957   -0.0005     ~5 fixtures in 11,312
+    under-3.5 buckets monotonic in BOTH
+
+**Verdict NEGLIGIBLE -> cancel.** All three reasons to keep it were checked and each failed:
+the corner fallback was idle (**0 of 159** settled fixtures missing counts, Veikkausliiga 0/5
+— API-Football had closed the gap it existed for); the pending retrain needed nothing from it
+(all 33 xG frames and game logs are committed, so the data already paid for survives); and
+live xG measures at ~0.
+
+> **A CAVEAT OF MINE THAT DIED ON ITS OWN CHECK, and the wrong version was the cautious one.**
+> I warned the result might only mean "not enough xG to detect an effect", citing 51% coverage.
+> Wrong unit — that is game-log ROWS, and the features are rolling windows, so coverage at the
+> EXAMPLE level is **94.1%** (10,639 of 11,312 test rows). The experiment had ample xG and still
+> found nothing, which makes the verdict stronger rather than weaker.
+
+**An unset `THESTATSAPI_KEY` is now the EXPECTED state**, not a deployment gap — `render.yaml`
+says so at the key itself, because the comment above it reads like something to go and fix.
+
+**Still open, deliberately**: the pre-registration's NEGLIGIBLE branch also says to PRUNE the
+four xG features, which is coupled to a real bug — `evaluation.py:build_test_prediction_rows`
+indexes those columns directly and killed the `--without-xg` arm at its final parquet write,
+after every metric had been produced.
+
+### The 33-league retrain FAILED its own promotion bar
+
+`LEAGUES` 22 -> 33, which is the long-outstanding retrain. Judged against the bar fixed before
+the run — each model against ITS OWN always-home baseline, since changing the pool changes the
+test set:
+
+    incumbent (22 lg)   0.5082 vs 0.4481 baseline   gap +6.01pp   RPS 0.2084
+    Arm A     (33 lg)   0.4962 vs 0.4431 baseline   gap +5.31pp   RPS 0.2093
+
+Clears RPS, **misses the gap by 0.70pp**, so the incumbent keeps serving and
+`football_xgb_v20261030145823` is registered `is_active=False`. Not relitigated.
+
+**The likely reason is coverage, not volume**: 15 leagues have no collected market odds,
+including **all 11 new ones**, so the pool more than doubled (27,232 -> 58,074 examples) while
+three market features and the entire corners vector went missing for a third of it. Collecting
+market odds for those 11 is the bounded next thing to try.
+
+### CI had been red since 5 October, and nobody could see it
+
+Fixing this exposed that `ruff check .` was failing on main on **one unsorted import**, and
+because lint runs before pytest, **the 936-test suite had not run in CI for 3.5 weeks**. Three
+sequential lint failures were stacked up, so clearing one only revealed the next.
+
+> **I ALSO GOT THE SCOPE WRONG HERE, and the mistake is the useful part.** I checked
+> `ruff check .` and `black --check .` from `backend/`, found the `ml/` errors pre-existing,
+> and told the user `ml/` was outside CI's lint scope. **The workflow runs FOUR lint commands**,
+> two of them `--config backend/pyproject.toml ml/`. Verify against the workflow file, not
+> against the two commands you happen to know.

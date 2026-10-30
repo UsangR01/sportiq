@@ -89,6 +89,26 @@ services:
       # training script -- this file used to say explicitly that nothing in the deployed image
       # read it. A worker does now, so leaving it unset means the fallback logs a warning and
       # does nothing, which is a silent gap rather than a crash.
+      #
+      # SUBSCRIPTION CANCELLED 2026-10-30, DELIBERATELY. An unset key here is now the EXPECTED
+      # state, not a deployment gap to repair -- do not re-provision it without re-reading the
+      # measurement below, because the obvious reading of the paragraph above is "this is
+      # broken, go and fix it".
+      #
+      # Three reasons to keep it were each checked and each failed:
+      #   1. the corner fallback was IDLE -- 0 of 159 settled football fixtures over five days
+      #      were missing corner counts, including Veikkausliiga (0/5), the league it exists
+      #      for. API-Football's coverage had closed the gap;
+      #   2. the pending 33-league retrain needed NOTHING from it -- all 33 xG frames and game
+      #      logs are committed, so the data already paid for survives cancellation;
+      #   3. live xG was measured and is worth ~nothing. Two identical 33-league trainings, one
+      #      with the four rolling-xG inputs and one without, on 94.1% real coverage:
+      #      under-2.5 Brier moved +0.0001 and under-3.5 +0.0006 against a pre-registered
+      #      material threshold of +0.0020. See docs/xg-value-preregistration.md, written
+      #      before either arm ran.
+      #
+      # Production serves with xG ALWAYS absent (team_features.xg_for_5/xg_against_5 have never
+      # had a source), so the no-xG arm IS production's regime -- and it is indistinguishable.
       - key: THESTATSAPI_KEY
         sync: false
       - key: CORS_ORIGINS
