@@ -182,16 +182,12 @@ def main(refresh: bool) -> None:
         for league, code in MAIN_LEAGUES.items():
             for season_code in MAIN_SEASON_CODES:
                 dest = RAW_DIR / f"{code}_{season_code}.csv"
-                if not _download(
-                    client, f"mmz4281/{season_code}/{code}.csv", dest, refresh
-                ):
+                if not _download(client, f"mmz4281/{season_code}/{code}.csv", dest, refresh):
                     continue
                 frame = _read_csv(dest)
                 if frame.empty:
                     continue
-                frames.append(
-                    _normalise(frame, league, _season_start_year_main(season_code))
-                )
+                frames.append(_normalise(frame, league, _season_start_year_main(season_code)))
         for league, code in EXTRA_LEAGUES.items():
             dest = RAW_DIR / f"{code}.csv"
             if not _download(client, f"new/{code}.csv", dest, refresh):
@@ -209,8 +205,7 @@ def main(refresh: bool) -> None:
         combined.assign(
             has_close_1x2=combined["close_avg_home"].notna()
             | combined["close_pinnacle_home"].notna(),
-            has_ou25=combined["close_avg_over25"].notna()
-            | combined["open_avg_over25"].notna(),
+            has_ou25=combined["close_avg_over25"].notna() | combined["open_avg_over25"].notna(),
         )
         .groupby("league")
         .agg(
@@ -240,12 +235,8 @@ def main(refresh: bool) -> None:
 # ---------------------------------------------------------------------------------------------
 
 
-def _devig_1x2(
-    home: float, draw: float, away: float
-) -> tuple[float, float, float] | None:
-    if not all(
-        isinstance(v, (int, float)) and v and v > 1.0 for v in (home, draw, away)
-    ):
+def _devig_1x2(home: float, draw: float, away: float) -> tuple[float, float, float] | None:
+    if not all(isinstance(v, (int, float)) and v and v > 1.0 for v in (home, draw, away)):
         return None
     inv_h, inv_d, inv_a = 1.0 / home, 1.0 / draw, 1.0 / away
     total = inv_h + inv_d + inv_a
@@ -297,9 +288,9 @@ async def resolve_to_fixture_ids() -> None:
         for odds_row in odds[odds["league"] == league].to_dict("records"):
             found = []
             for offset in (0, -1, 1):
-                shifted = (
-                    pd.Timestamp(odds_row["date_day"]) + pd.Timedelta(days=offset)
-                ).strftime("%Y-%m-%d")
+                shifted = (pd.Timestamp(odds_row["date_day"]) + pd.Timedelta(days=offset)).strftime(
+                    "%Y-%m-%d"
+                )
                 found = by_key.get(
                     (shifted, int(odds_row["home_goals"]), int(odds_row["away_goals"])),
                     [],
@@ -313,12 +304,8 @@ async def resolve_to_fixture_ids() -> None:
                 ranked = sorted(
                     (
                         (
-                            _similarity(
-                                odds_row["home_name"], names.get(str(c.TEAM_ID), "")
-                            )
-                            + _similarity(
-                                odds_row["away_name"], names.get(str(c.OPPONENT_ID), "")
-                            ),
+                            _similarity(odds_row["home_name"], names.get(str(c.TEAM_ID), ""))
+                            + _similarity(odds_row["away_name"], names.get(str(c.OPPONENT_ID), "")),
                             c,
                         )
                         for c in found
@@ -326,10 +313,7 @@ async def resolve_to_fixture_ids() -> None:
                     key=lambda pair: -pair[0],
                 )
                 too_weak = ranked[0][0] < 2 * NAME_MATCH_FLOOR
-                too_close = (
-                    len(ranked) > 1
-                    and abs(ranked[0][0] - ranked[1][0]) < AMBIGUITY_MARGIN
-                )
+                too_close = len(ranked) > 1 and abs(ranked[0][0] - ranked[1][0]) < AMBIGUITY_MARGIN
                 if too_weak or too_close:
                     dropped += 1
                     continue
@@ -338,15 +322,9 @@ async def resolve_to_fixture_ids() -> None:
                 best = found[0]
 
             implied = _devig_1x2(
-                _first(
-                    odds_row, "close_pinnacle_home", "close_avg_home", "close_b365_home"
-                ),
-                _first(
-                    odds_row, "close_pinnacle_draw", "close_avg_draw", "close_b365_draw"
-                ),
-                _first(
-                    odds_row, "close_pinnacle_away", "close_avg_away", "close_b365_away"
-                ),
+                _first(odds_row, "close_pinnacle_home", "close_avg_home", "close_b365_home"),
+                _first(odds_row, "close_pinnacle_draw", "close_avg_draw", "close_b365_draw"),
+                _first(odds_row, "close_pinnacle_away", "close_avg_away", "close_b365_away"),
             )
             over25 = _devig_over(
                 _first(
@@ -394,9 +372,7 @@ if __name__ == "__main__":
     import asyncio
 
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--refresh", action="store_true", help="re-download cached raw CSVs"
-    )
+    parser.add_argument("--refresh", action="store_true", help="re-download cached raw CSVs")
     parser.add_argument(
         "--resolve-only",
         action="store_true",

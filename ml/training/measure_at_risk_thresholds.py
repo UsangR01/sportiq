@@ -133,8 +133,14 @@ async def collect(limit: int) -> None:
                 )
             # A 0-0 match legitimately produces no rows, so record that it was fetched or every
             # future run would re-request it forever.
-            rows.append({"FIXTURE_ID": int(fixture_id), "MINUTE": -1,
-                         "SCORING_TEAM_ID": 0, "OWN_GOAL": False})
+            rows.append(
+                {
+                    "FIXTURE_ID": int(fixture_id),
+                    "MINUTE": -1,
+                    "SCORING_TEAM_ID": 0,
+                    "OWN_GOAL": False,
+                }
+            )
             if index % 200 == 0:
                 print(f"  {index}/{len(fixtures)} fixtures")
             await asyncio.sleep(REQUEST_DELAY_SECONDS)
@@ -149,7 +155,9 @@ async def collect(limit: int) -> None:
 
 
 def _game_log() -> pd.DataFrame:
-    frames = [pd.read_parquet(p) for p in sorted(glob.glob(str(DATA_DIR / "football_game_log_*.parquet")))]
+    frames = [
+        pd.read_parquet(p) for p in sorted(glob.glob(str(DATA_DIR / "football_game_log_*.parquet")))
+    ]
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
@@ -296,17 +304,15 @@ def _first_trip_minute(market, selection, line, timeline) -> int | None:
 def _report(stats: dict) -> None:
     """Four numbers per rule, because recovery alone cannot say which way to move a threshold.
 
-      fires   how often the rule trips at all. A rule that fires on most fixtures is noise even
-              when it is usually right -- there is no signal in a warning you always get.
-      wrong   the spec's own bar: how often a pick it warned about went on to WIN anyway.
-              Above 50% the alert is crying wolf and the rule should be loosened.
-      caught  of the picks that actually LOST, how many did it warn about. A rule can be almost
-              never wrong simply by almost never firing, and this is what exposes that.
-      median  when it fires. An accurate warning at 88' is not a product.
+    fires   how often the rule trips at all. A rule that fires on most fixtures is noise even
+            when it is usually right -- there is no signal in a warning you always get.
+    wrong   the spec's own bar: how often a pick it warned about went on to WIN anyway.
+            Above 50% the alert is crying wolf and the rule should be loosened.
+    caught  of the picks that actually LOST, how many did it warn about. A rule can be almost
+            never wrong simply by almost never firing, and this is what exposes that.
+    median  when it fires. An accurate warning at 88' is not a product.
     """
-    print(
-        f"{'pick':24} {'n':>6} {'fires':>7} {'wrong':>7} {'caught':>7} {'median':>7}   verdict"
-    )
+    print(f"{'pick':24} {'n':>6} {'fires':>7} {'wrong':>7} {'caught':>7} {'median':>7}   verdict")
     print("-" * 84)
     concerning, toothless = [], []
     for (market, selection, line), entry in sorted(stats.items()):

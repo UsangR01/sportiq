@@ -78,15 +78,12 @@ BACKEND_DIR = Path(__file__).resolve().parents[2] / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from app.models_ml.nba import NBAModel
-from app.models_ml.nba_features import assemble_from_game_log
+from app.models_ml.nba import NBAModel  # noqa: E402
+from app.models_ml.nba_features import assemble_from_game_log  # noqa: E402
 
 DATA = Path(__file__).resolve().parents[1] / "data"
 ARTEFACT = (
-    Path(__file__).resolve().parents[1]
-    / "artifacts"
-    / "deployed"
-    / "nba_xgb_20260728142552.joblib"
+    Path(__file__).resolve().parents[1] / "artifacts" / "deployed" / "nba_xgb_20260728142552.joblib"
 )
 # The registry version whose artefact this is. The two timestamps differ by a few seconds
 # because _register_model used to mint its own datetime -- documented in CLAUDE.md, corrected
@@ -119,15 +116,11 @@ def _top_label_ece(prob: np.ndarray, actual: np.ndarray) -> tuple[float, list[tu
     edges = [i / ECE_BUCKETS for i in range(ECE_BUCKETS + 1)]
     total, ece, table = len(prob), 0.0, []
     for lo, hi in pairwise(edges):
-        mask = (
-            (confidence >= lo) & (confidence < hi) if hi < 1.0 else (confidence >= lo)
-        )
+        mask = (confidence >= lo) & (confidence < hi) if hi < 1.0 else (confidence >= lo)
         n = int(mask.sum())
         if n == 0:
             continue
-        mean_conf, mean_acc = float(confidence[mask].mean()), float(
-            correct[mask].mean()
-        )
+        mean_conf, mean_acc = float(confidence[mask].mean()), float(correct[mask].mean())
         ece += (n / total) * abs(mean_conf - mean_acc)
         table.append((lo, hi, n, mean_conf, mean_acc))
     return ece, table
@@ -166,9 +159,7 @@ def main() -> None:
         parts = sorted(DATA.glob("basketball_game_log_*.parquet"))
         parts = [p for p in parts if p.name != pooled_path.name]
         if not parts:
-            raise SystemExit(
-                f"no basketball game logs in {DATA} - run collect_basketball_data.py"
-            )
+            raise SystemExit(f"no basketball game logs in {DATA} - run collect_basketball_data.py")
         pd.concat([pd.read_parquet(p) for p in parts], ignore_index=True).to_parquet(
             pooled_path, index=False
         )
@@ -227,16 +218,10 @@ def main() -> None:
         raise SystemExit("no test games assembled")
 
     # Baseline from PRIOR seasons only - never the test season being scored.
-    prior = home_rows[
-        home_rows.apply(lambda r: r["SEASON"] != test_season[r["LEAGUE"]], axis=1)
-    ]
+    prior = home_rows[home_rows.apply(lambda r: r["SEASON"] != test_season[r["LEAGUE"]], axis=1)]
     prior_home_rate = float((prior["WL"] == "W").mean())
-    print(
-        f"\nalways-home baseline probability (prior seasons only): {prior_home_rate:.4f}"
-    )
-    print(
-        f"test games: {len(df)}   with both sides' form populated: {int(df['has_form'].sum())}"
-    )
+    print(f"\nalways-home baseline probability (prior seasons only): {prior_home_rate:.4f}")
+    print(f"test games: {len(df)}   with both sides' form populated: {int(df['has_form'].sum())}")
     print(
         f"feature completeness: {df['completeness'].mean():.4f} (4 key-player + moneyline absent)"
     )
@@ -267,9 +252,7 @@ def main() -> None:
     print(f"{'top-label ECE':<26}{ece:>14.4f}{'-':>14}{'':>20}")
     print("=" * 78)
 
-    print(
-        "\nreliability (predicted-label confidence vs observed), buckets under 20 suppressed:"
-    )
+    print("\nreliability (predicted-label confidence vs observed), buckets under 20 suppressed:")
     for lo, hi, n, conf, acc in table:
         if n < 20:
             continue
@@ -279,9 +262,7 @@ def main() -> None:
         )
 
     print("\nper league (REPORTED, NOT GATING - several are underpowered alone):")
-    print(
-        f"  {'league':<12}{'n':>5}{'acc':>8}{'home rate':>11}{'Brier':>8}{'base Brier':>12}"
-    )
+    print(f"  {'league':<12}{'n':>5}{'acc':>8}{'home rate':>11}{'Brier':>8}{'base Brier':>12}")
     for league, frame in df.groupby("league"):
         p, a = frame["home_prob"].to_numpy(), frame["home_won"].to_numpy()
         lb = np.full_like(p, prior_home_rate)
@@ -311,9 +292,7 @@ def main() -> None:
         f"  P2 accuracy within 1.0pp        {'PASS' if p2 else 'FAIL'}"
         f"   ({model_acc:.4f} vs {base_acc:.4f})"
     )
-    print(
-        f"  P3 top-label ECE <= {P3_MAX_ECE:.2f}        {'PASS' if p3 else 'FAIL'}   ({ece:.4f})"
-    )
+    print(f"  P3 top-label ECE <= {P3_MAX_ECE:.2f}        {'PASS' if p3 else 'FAIL'}   ({ece:.4f})")
     if p1 and p2 and p3:
         print("\n  => ALL PASS: NBA weights transfer. Serving is a plan-cost decision.")
     elif not p1 or not p3:
