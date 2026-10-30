@@ -1955,6 +1955,61 @@ async def get_fixture_live(fixture_id: uuid.UUID, db: AsyncSession = Depends(get
     return LiveStateResponse.model_validate(live_state, from_attributes=True)
 
 
+# Sports that have a league table at all. Tennis is absent BY NATURE, not by gap: there is no
+# table in tennis, and its analogue is the tour ranking, which is a different panel.
+_STANDINGS_SPORTS = {"football", "nba"}
+
+# Column HEADINGS per sport, parallel to each row's `values`. Basketball cannot reuse
+# football's because it has no draws, no goal difference, and -- measured -- the NBA and WNBA
+# report `group.points` as 0, ranking on win-loss record instead. "PTS" there is a column of
+# zeros.
+_STANDINGS_COLUMNS = {
+    "football": ["P", "GD", "PTS"],
+    "nba": ["P", "DIFF", "W"],
+}
+
+
+def _standings_fetcher(sport_slug: str):
+    """The provider that owns this sport's table.
+
+    Basketball's comes from API-Basketball even for the NBA and WNBA, whose fixtures come from
+    BallDontLie -- because BallDontLie CANNOT serve a table at any tier we hold (/standings is
+    401 for both, measured alongside /stats and /season_averages). Routing the table elsewhere
+    while everything else keeps its source is the whole reason STANDINGS_LEAGUE_IDS is separate
+    from BASKETBALL_LEAGUE_IDS.
+    """
+    if sport_slug == "nba":
+        from app.adapters.api_basketball import fetch_standings as basketball_standings
+
+        return basketball_standings
+    from app.adapters.api_football import fetch_standings as football_standings
+
+    return football_standings
+
+
+def _standings_values(sport_slug: str, row: dict) -> list[int]:
+    if sport_slug == "nba":
+        return [row["played"], row["goal_difference"], row["won"]]
+    return [row["played"], row["goal_difference"], row["points"]]
+
+
+def _normalise_club_name(name: str) -> str:
+    """For matching a provider's table row to our own club row BY NAME.
+
+    Needed because the id spaces genuinely differ: our NBA clubs carry BallDontLie ids and our
+    WNBA clubs a "wnba:" prefix, while the table comes from API-Basketball's own namespace, so
+    external_id can never match for those two leagues. Measured first rather than assumed --
+    18 of 18 NBA clubs we hold match on name exactly.
+
+    The trailing " W" is the one real discrepancy: API-Basketball names WNBA clubs "Minnesota
+    Lynx W". Stripped rather than special-cased per club.
+    """
+    cleaned = name.strip()
+    if cleaned.endswith(" W"):
+        cleaned = cleaned[:-2]
+    return cleaned.casefold()
+
+
 @router.get("/fixtures/{fixture_id}/standings", response_model=StandingsResponse | None)
 async def get_fixture_standings(fixture_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     """The league table for this fixture's competition.
@@ -1966,7 +2021,6 @@ async def get_fixture_standings(fixture_id: uuid.UUID, db: AsyncSession = Depend
     call per fixture-detail open, which is the exact cost pattern the H2H cache exists to undo.
     Football only: no other sport this app serves has a league table at all.
     """
-    from app.adapters.api_football import fetch_standings
     from app.core.redis import get_redis
     from app.fixtures.standings_cache import get_cached_standings, set_cached_standings
 
@@ -1981,14 +2035,14 @@ async def get_fixture_standings(fixture_id: uuid.UUID, db: AsyncSession = Depend
     sport = (
         await db.execute(select(Sport).where(Sport.id == fixture.sport_id))
     ).scalar_one_or_none()
-    if league is None or sport is None or sport.slug != "football":
+    if league is None or sport is None or sport.slug not in _STANDINGS_SPORTS:
         return None
 
     redis = get_redis()
     hit, rows = await get_cached_standings(redis, league.slug)
     if not hit:
         try:
-            fetched = await fetch_standings(league.slug)
+            fetched = await _standings_fetcher(sport.slug)(league.slug)
         except ValueError:
             # A league this adapter has no id for. Not an error — the same graceful gap every
             # other per-league call here degrades to.
@@ -2007,23 +2061,41 @@ async def get_fixture_standings(fixture_id: uuid.UUID, db: AsyncSession = Depend
     # the fixture's own sport — without that, a provider id shared with another sport's team
     # would resolve to the wrong club.
     external_ids = [row["team_external_id"] for row in rows]
-    known = {
-        team.external_id: team.id
-        for team in (
+    our_teams = (
+        (
             await db.execute(
                 select(Team).where(
-                    Team.sport_id == fixture.sport_id, Team.external_id.in_(external_ids)
+                    Team.sport_id == fixture.sport_id,
+                    or_(
+                        Team.external_id.in_(external_ids),
+                        # The NBA and WNBA tables come from a DIFFERENT provider than their
+                        # fixtures, so their ids can never match and only the name can link
+                        # them. Scoped to this sport, and to this league where we have one.
+                        Team.league_id == fixture.league_id,
+                    ),
                 )
             )
         )
         .scalars()
         .all()
-    }
+    )
+    known = {team.external_id: team.id for team in our_teams}
+    by_name = {_normalise_club_name(team.name): team.id for team in our_teams}
+
+    def link(row: dict):
+        """Id first, name only as a fallback — an id match is exact, a name match is a guess
+        that happens to be a very good one here (18 of 18 NBA clubs, measured)."""
+        return known.get(row["team_external_id"]) or by_name.get(
+            _normalise_club_name(row["team_name"])
+        )
+
     return StandingsResponse(
         league_slug=league.slug,
         league_name=league.name,
+        columns=_STANDINGS_COLUMNS.get(sport.slug, []),
         rows=[
-            StandingRowResponse(**row, team_id=known.get(row["team_external_id"])) for row in rows
+            StandingRowResponse(**row, team_id=link(row), values=_standings_values(sport.slug, row))
+            for row in rows
         ],
     )
 

@@ -11,6 +11,7 @@ from app.adapters.base import (
     H2HMeeting,
     InjuryUpdate,
     OddsPayload,
+    StandingRow,
     TeamStats,
 )
 from app.core.config import get_settings
@@ -1299,31 +1300,6 @@ async def fetch_h2h_detail(home_external_id: str, away_external_id: str) -> H2HD
             match_stats_by_fixture[fixture_id] = {}
 
     return _parse_h2h_detail(meetings, home_external_id, match_stats_by_fixture)
-
-
-@dataclass(frozen=True)
-class StandingRow:
-    """One row of a league table, computed by the provider rather than by us.
-
-    DELIBERATELY NOT DERIVED FROM OUR OWN FIXTURES. We hold roughly six weeks of results — at
-    the time this was built, ZERO teams in any league had ten completed fixtures and EPL's median
-    was three — so a table computed locally would silently disagree with every other source a
-    user could check. This is one call per league per day against a 75,000/day budget.
-    """
-
-    rank: int
-    team_external_id: str
-    team_name: str
-    played: int
-    won: int
-    drawn: int
-    lost: int
-    goal_difference: int
-    points: int
-    form: str | None
-    # Leagues with conferences or phases (MLS, CSL) return several tables, not one. Named so a
-    # single-table league can leave it null rather than inventing a group.
-    group: str | None
 
 
 @dataclass(frozen=True)

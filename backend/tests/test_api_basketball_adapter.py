@@ -51,10 +51,21 @@ def test_the_season_rolls_over_in_september_not_january_or_july():
     assert _season_for("acb", datetime(2027, 5, 31, tzinfo=UTC)) == "2026-2027"
 
 
-def test_only_the_euroleague_is_declared_a_year_season_league():
+def test_year_season_leagues_are_exactly_the_euroleague_and_the_wnba():
     """Checked per league against the provider's own windows rather than inherited. If a
-    domestic league ever lands here it will silently request the wrong season."""
-    assert YEAR_SEASON_LEAGUES == {"euroleague"}
+    domestic league ever lands here it will silently request the wrong season.
+
+    EXHAUSTIVE ON PURPOSE, so adding a league forces a conscious declaration. It fired when
+    the WNBA was added for standings, which is the guard working rather than the guard being
+    in the way.
+
+    The two are here for DIFFERENT reasons, and the WNBA's is the stronger one: the EuroLeague
+    merely labels its season with a bare year, while the WNBA genuinely RUNS inside one
+    calendar year (May-September). Measured against the live API: season "2026-2027" returns
+    0 rows and "2026" returns 30 -- and a wrong season does not raise, it returns HTTP 200
+    with results=0, which is indistinguishable from a league with nothing scheduled.
+    """
+    assert YEAR_SEASON_LEAGUES == {"euroleague", "wnba"}
 
 
 # --------------------------------------------------------------------------- status mapping
