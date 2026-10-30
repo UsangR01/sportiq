@@ -752,6 +752,91 @@ async def _box_score_stats(
     return stats
 
 
+async def resolve_game_id(
+    league: str,
+    kickoff: datetime,
+    home_name: str,
+    away_name: str,
+    expected_score: tuple[int, int] | None = None,
+) -> int | None:
+    """This provider's id for one match we know only by date and club names.
+
+    Needed ONLY for the NBA and WNBA, whose fixtures come from BallDontLie: their stored
+    external_id is in that provider's namespace, so the box score cannot be reached by id. The
+    European leagues carry an "ab:"-prefixed id already and never come through here.
+
+    Matched on BOTH clubs, never one. A date plus a single name would match the wrong game on
+    any day a club plays twice or a name is ambiguous, and a wrong game id returns a real,
+    confident, WRONG box score rather than an error.
+
+    AND ON THE SCORE WHERE WE HOLD ONE, which is the check that turns "probably the right
+    game" into "verified". The same reasoning the TheStatsAPI corner fallback already uses:
+    an exact scoreline is a far stronger key than two club names spelled by different
+    providers. A name pair that matches while the score does not is treated as a MISS, because
+    the likeliest explanation is that we found the wrong fixture.
+    """
+    league_id = STANDINGS_LEAGUE_IDS.get(league)
+    settings = get_settings()
+    if league_id is None or not settings.api_football_key:
+        return None
+    async with httpx.AsyncClient(
+        base_url=BASE_URL,
+        headers={"x-apisports-key": settings.api_football_key},
+        timeout=30.0,
+    ) as client:
+        response = await client.get(
+            "/games",
+            params={
+                "league": league_id,
+                "season": _season_for(league),
+                "date": kickoff.date().isoformat(),
+            },
+        )
+        response.raise_for_status()
+        games = _api_response(response).get("response") or []
+    wanted = (normalise_team_name(home_name), normalise_team_name(away_name))
+    for game in games:
+        teams = game.get("teams") or {}
+        pair = (
+            normalise_team_name((teams.get("home") or {}).get("name")),
+            normalise_team_name((teams.get("away") or {}).get("name")),
+        )
+        if pair != wanted:
+            continue
+        if expected_score is not None:
+            scores = game.get("scores") or {}
+            found = (_score(scores.get("home") or {}), _score(scores.get("away") or {}))
+            if found != expected_score:
+                logger.warning(
+                    "Skipping %s game %s: names match but score %s != our %s",
+                    league,
+                    game.get("id"),
+                    found,
+                    expected_score,
+                )
+                continue
+        return game.get("id")
+    return None
+
+
+async def fetch_match_box_score(game_id, home_provider_team_id: str) -> list[H2HPanelStat]:
+    """The box score for ONE completed match, shaped for the fixture-detail panel.
+
+    Reuses the same averaging path the H2H panel uses, over a one-match list -- so the labels,
+    the null handling and the "drop a measure with no real values" rule cannot drift apart
+    between the two panels showing the same measures.
+    """
+    settings = get_settings()
+    if not settings.api_football_key or game_id is None:
+        return []
+    async with httpx.AsyncClient(
+        base_url=BASE_URL,
+        headers={"x-apisports-key": settings.api_football_key},
+        timeout=30.0,
+    ) as client:
+        return await _box_score_stats(client, [{"id": game_id}], str(home_provider_team_id))
+
+
 async def fetch_h2h_panel(
     home_external_id: str, away_external_id: str, league: str = "acb"
 ) -> H2HPanel | None:

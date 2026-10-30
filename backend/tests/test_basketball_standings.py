@@ -4,6 +4,8 @@ Three measured provider behaviours sit behind this, each of which fails silently
 loudly if it is got wrong -- which is why they are pinned here rather than trusted to review.
 """
 
+from datetime import UTC, datetime
+
 import pytest
 
 from app.adapters.api_basketball import (
@@ -114,3 +116,54 @@ async def test_an_unresolvable_club_falls_back_rather_than_guessing(monkeypatch)
         "nba", Team(name="Boston Celtics"), Team(name="Mystery Club")
     )
     assert result is None, "a half-resolved pairing must not produce a panel"
+
+
+# ------------------------------------------------------------------ per-match box score
+
+
+@pytest.mark.asyncio
+async def test_a_name_match_with_the_wrong_score_is_refused(monkeypatch):
+    """THE GUARD THAT MAKES THIS SAFE. The NBA and WNBA store a BallDontLie fixture id, which
+    means nothing to the provider holding the box score, so their match is found by date plus
+    both club names. That alone can land on the wrong game -- a club playing twice in a day, a
+    name shared across competitions -- and a wrong game id does not error: it returns a real,
+    confident, WRONG box score.
+
+    So our own settled score verifies the match, the same way the TheStatsAPI corner fallback
+    matches on date + score rather than on names. A name pair that matches while the score
+    does not is a MISS, not a hit.
+    """
+    import httpx
+
+    from app.adapters import api_basketball as ab
+
+    payload = {
+        "errors": [],
+        "response": [
+            {
+                "id": 999,
+                "teams": {"home": {"name": "Indiana Fever"}, "away": {"name": "Chicago Sky"}},
+                "scores": {"home": {"total": 70}, "away": {"total": 61}},
+            }
+        ],
+    }
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=payload))
+    real_client = httpx.AsyncClient
+
+    monkeypatch.setattr(
+        ab.httpx, "AsyncClient", lambda **kw: real_client(**{**kw, "transport": transport})
+    )
+    monkeypatch.setattr(ab, "get_settings", lambda: type("S", (), {"api_football_key": "k"})())
+
+    kickoff = datetime(2026, 8, 16, tzinfo=UTC)
+
+    # Names match AND the score matches -> resolved.
+    assert (
+        await ab.resolve_game_id("wnba", kickoff, "Indiana Fever", "Chicago Sky", (70, 61))
+    ) == 999
+    # Names match but the score does NOT -> refused rather than returned.
+    assert (
+        await ab.resolve_game_id("wnba", kickoff, "Indiana Fever", "Chicago Sky", (99, 12))
+    ) is None
+    # No score to check against -> falls back to the name pair alone.
+    assert (await ab.resolve_game_id("wnba", kickoff, "Indiana Fever", "Chicago Sky", None)) == 999

@@ -183,6 +183,11 @@ function TeamLink({
  */
 type TabKey = "h2h" | "meetings" | "standings";
 
+/** Sports whose fixture detail offers a league table. Kept beside the tab list because the
+ *  cost of disagreeing with the server is invisible: the endpoint serves a table nobody can
+ *  reach. "nba" is the sport slug for every basketball league, European ones included. */
+const SPORTS_WITH_A_TABLE = new Set(["football", "nba"]);
+
 function FixtureTabs({ fixture }: { fixture: FixtureDetail }) {
   const [tab, setTab] = useState<TabKey>("h2h");
   const h2h = fixture.head_to_head;
@@ -192,7 +197,11 @@ function FixtureTabs({ fixture }: { fixture: FixtureDetail }) {
   const tabs: { key: TabKey; label: string }[] = [
     ...(h2h ? ([{ key: "h2h", label: "Head to head" }] as const) : []),
     ...(meetings.length ? ([{ key: "meetings", label: "Meetings" }] as const) : []),
-    ...(fixture.sport_slug === "football"
+    // Mirrors the server's own _STANDINGS_SPORTS. Basketball has a table for all nine of its
+    // leagues; tennis is absent BY NATURE rather than by gap, since there is no league table
+    // in tennis. Leaving this football-only is what would have made the basketball tables
+    // unreachable in the app while the endpoint happily served them.
+    ...(SPORTS_WITH_A_TABLE.has(fixture.sport_slug)
       ? ([{ key: "standings", label: "Standings" }] as const)
       : []),
   ];

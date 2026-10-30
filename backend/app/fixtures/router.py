@@ -1745,28 +1745,27 @@ async def _fetch_match_stats(
                             live_state (already stored, so no call is spent on it)
         tennis     6 rows   BallDontLie /match_stats -- the same serve and return measures the
                             H2H panel shows, for this one match
-        basketball none     NOT a provider limit, despite BallDontLie's /stats being 401:
-                            API-Basketball publishes a real box score and the H2H panel reads
-                            it. Unwired here, which is a gap rather than an absence
+        basketball 7 rows   API-Basketball /games/statistics/teams, plus points from our own
+                            settled live_state. BallDontLie's /stats is 401, which was once
+                            read as "no box score exists" -- it does, at the other provider
 
     Returns [] rather than raising for every unhappy path -- an unplayed fixture, a provider
     outage, a competition with no published statistics. The panel is an enrichment; losing it
     must not fail the fixture screen, which is exactly what the H2H panel had to learn when a
     daily quota ran out.
     """
-    # Basketball has no per-match statistics at any price we hold, so there is nothing to fetch
-    # and nothing worth caching -- returning before the cache also keeps its keyspace to the
-    # sports that actually use it.
     if (
         fixture.status != FixtureStatus.COMPLETED
         or not fixture.external_id
-        or sport_slug not in ("football", "tennis")
+        or sport_slug not in ("football", "tennis", "nba")
     ):
         return []
 
     try:
         if sport_slug == "football":
             return await _football_match_stats(db, fixture, live_state)
+        if sport_slug == "nba":
+            return await _basketball_match_stats(db, league_slug, fixture, live_state)
         return await _tennis_match_stats(db, league_slug, fixture)
     except httpx.HTTPError:
         logger.warning("Match-stats fetch failed; rendering the fixture without the panel")
@@ -1791,6 +1790,89 @@ async def _cached_provider_payload(sport_slug: str, fixture_external_id: str, fe
     payload = await fetch()
     await set_cached_match_stats(redis, sport_slug, fixture_external_id, payload)
     return payload
+
+
+async def _basketball_match_stats(
+    db: AsyncSession,
+    league_slug: str | None,
+    fixture: Fixture,
+    live_state: FixtureLiveState | None,
+) -> list[ComparisonStat]:
+    """The box score for one played basketball match.
+
+    TWO WAYS IN, because basketball's fixtures come from two providers. The European leagues
+    already carry an "ab:"-prefixed id, so the box score is one call. The NBA and WNBA carry a
+    BallDontLie id that means nothing to the provider holding the statistics, so their match is
+    resolved by DATE PLUS BOTH CLUB NAMES -- never one name, since a wrong game id returns a
+    real, confident, wrong box score rather than an error.
+
+    POINTS COME FROM OUR OWN live_state, not from the provider: it is already stored, so the
+    row costs no call -- the same trick football uses for goals.
+    """
+    from app.adapters.api_basketball import (
+        BASKETBALL_LEAGUE_IDS,
+        ID_PREFIX,
+        fetch_match_box_score,
+        resolve_game_id,
+        resolve_team_ids_by_name,
+    )
+
+    league = league_slug or "nba"
+    home_team = (
+        await db.execute(select(Team).where(Team.id == fixture.home_team_id))
+    ).scalar_one_or_none()
+    away_team = (
+        await db.execute(select(Team).where(Team.id == fixture.away_team_id))
+    ).scalar_one_or_none()
+    if home_team is None or away_team is None:
+        return []
+
+    if league in BASKETBALL_LEAGUE_IDS:
+        game_id = fixture.external_id.removeprefix(ID_PREFIX)
+        home_provider_id = (home_team.external_id or "").removeprefix(ID_PREFIX)
+    else:
+        resolved = await resolve_team_ids_by_name(league, [home_team.name])
+        if home_team.name not in resolved:
+            return []
+        home_provider_id = str(resolved[home_team.name])
+        # Our own settled score, used to VERIFY the match rather than merely find it.
+        expected = (
+            (live_state.home_score, live_state.away_score)
+            if live_state
+            and live_state.home_score is not None
+            and live_state.away_score is not None
+            else None
+        )
+        game_id = await resolve_game_id(
+            league, fixture.kickoff_utc, home_team.name, away_team.name, expected
+        )
+        if game_id is None:
+            return []
+
+    stats = await _cached_provider_payload(
+        "nba",
+        str(fixture.external_id),
+        lambda: _box_score_payload(game_id, home_provider_id, fetch_match_box_score),
+    )
+    rows = [ComparisonStat(**row) for row in stats]
+    # Points first, from our own settled score, so the panel leads with the number that
+    # actually decided the pick.
+    if live_state and live_state.home_score is not None and live_state.away_score is not None:
+        rows.insert(
+            0,
+            ComparisonStat(
+                label="Points",
+                home=float(live_state.home_score),
+                away=float(live_state.away_score),
+            ),
+        )
+    return rows
+
+
+async def _box_score_payload(game_id, home_provider_id: str, fetch) -> list[dict]:
+    """Cacheable (JSON-safe) form of the provider's box score — dicts, not dataclasses, because
+    this is what goes into Redis and comes back as plain JSON."""
+    return [dataclasses.asdict(stat) for stat in await fetch(game_id, home_provider_id)]
 
 
 async def _football_match_stats(
