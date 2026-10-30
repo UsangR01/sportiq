@@ -31,6 +31,80 @@ logger = logging.getLogger(__name__)
 # a fixture's provider-side data any more often than every 5 minutes (TDD §2.3's schedule).
 LIVE_SCORES_WINDOW_DAYS = 1
 
+# ---------------------------------------------------------------------------------------
+# POLL ONLY LEAGUES THAT PLAUSIBLY HAVE A MATCH IN PLAY.
+#
+# This loop fans out one provider call PER LEAGUE PER RUN, and at a 5-minute cadence that is
+# 288 runs a day. Football alone is 34 leagues, so the ungated cost is 34 x 288 = 9,792
+# API-Football calls a day -- more than the ENTIRE 7,500/day Pro allowance, before odds,
+# injuries, the daily ingest or retrodiction have spent anything.
+#
+# That cadence was set when the plan was Ultra (75,000/day), where the same fan-out is 13% of
+# the day. It is the exact trap CLAUDE.md already records: "a constraint recorded as an
+# engineering decision should name the budget it assumed." This one did not, the league count
+# then grew 9 -> 34, and the allowance shrank.
+#
+# MEASURED against a real matchday (2026-10-31, the busiest in the window): gating to
+# PRE/POST below costs 3,319 calls/day instead of 9,792 -- 34% -- because most of the 34
+# leagues have nothing being played at any given tick. Peak concurrency is 19 leagues.
+#
+# The window is deliberately GENEROUS on both sides. Being too tight costs a missed
+# settlement, which is a user-visible grey card; being generous costs a few hundred calls.
+LIVE_POLL_BEFORE_KICKOFF_HOURS = 1.0
+LIVE_POLL_AFTER_KICKOFF_HOURS = 6.0
+
+
+async def _leagues_with_play_in_progress(db, league_ids: list) -> set:
+    """League ids worth polling right now. DB-only: this spends no provider quota.
+
+    THREE WAYS IN, and the second and third are the ones that keep this from repeating old
+    bugs rather than fixing one:
+
+    1. A real kickoff inside the window -- the ordinary case, and where the saving comes from.
+    2. **Anything already LIVE**, regardless of its clock. A match that ran long must never
+       stop being polled just because a timer expired; that is how it would never settle.
+    3. **Any ESTIMATED kickoff on a nearby date.** A tennis fixture with no `scheduled_time`
+       is stored at MIDNIGHT of its match day, so a time window would poll it only around
+       midnight and starve the entire tournament. This repo has now been bitten FOUR times by
+       a clock rule applied to a placeholder, most recently inventing nine POSTPONED matches
+       that were never postponed -- so placeholders are exempted from the clock, not tuned
+       against it. Tennis is on a free provider anyway, so it costs nothing to leave alone.
+    """
+    now = datetime.now(UTC)
+    rows = (
+        (
+            await db.execute(
+                select(Fixture.league_id)
+                .where(
+                    Fixture.league_id.in_(league_ids),
+                    Fixture.status.in_([FixtureStatus.SCHEDULED, FixtureStatus.LIVE]),
+                    or_(
+                        Fixture.status == FixtureStatus.LIVE,
+                        # Bounded by DATE, never by time of day -- a placeholder midnight says
+                        # which day the match belongs to and nothing about when it starts. Two
+                        # days rather than one so a late-evening match whose placeholder sits at
+                        # the far edge is still covered.
+                        (Fixture.kickoff_is_estimated.is_(True))
+                        & (
+                            Fixture.kickoff_utc.between(
+                                now - timedelta(days=LIVE_SCORES_WINDOW_DAYS + 1),
+                                now + timedelta(days=LIVE_SCORES_WINDOW_DAYS + 1),
+                            )
+                        ),
+                        Fixture.kickoff_utc.between(
+                            now - timedelta(hours=LIVE_POLL_AFTER_KICKOFF_HOURS),
+                            now + timedelta(hours=LIVE_POLL_BEFORE_KICKOFF_HOURS),
+                        ),
+                    ),
+                )
+                .distinct()
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return set(rows)
+
 
 async def _ingest_live_scores_for_league(sport: Sport, league: League) -> None:
     adapter = AdapterFactory.get_stats_adapter(sport.slug, league.slug)
@@ -641,9 +715,19 @@ async def _ingest_live_scores() -> None:
             .all()
             for sport in sports
         }
+        # One DB query for every league at once, rather than one per league inside the loop.
+        in_play = await _leagues_with_play_in_progress(
+            db, [lg.id for sport in sports for lg in leagues_by_sport[sport.id]]
+        )
 
+    skipped = 0
     for sport in sports:
         for league in leagues_by_sport[sport.id]:
+            if league.id not in in_play:
+                # Nothing to poll FOR. Skipping is what keeps this task inside the provider's
+                # daily allowance -- see LIVE_POLL_*_HOURS above for the measurement.
+                skipped += 1
+                continue
             # One league's stats adapter failing (e.g. a sport whose provider tier isn't
             # unlocked yet — tennis's BallDontLie endpoints 401 until the ALL-STAR plan is
             # confirmed, see CLAUDE.md) must never block every OTHER league's live-score
@@ -665,6 +749,17 @@ async def _ingest_live_scores() -> None:
                     league.slug,
                     exc,
                 )
+
+    # Logged because a quiet task is indistinguishable from a broken one -- the shape behind
+    # the odds outage, the stale worker and the unfired beat schedule. If this ever reports
+    # every league skipped on a busy matchday, the gate is wrong and the feed has silently
+    # stopped updating.
+    if skipped:
+        logger.info(
+            "live scores: polled %d league(s), skipped %d with nothing in play",
+            len(in_play),
+            skipped,
+        )
 
     # After the polling pass, so a fixture that just reported a score this cycle is already
     # LIVE/COMPLETED and can never be swept. Costs one query and no API calls.
