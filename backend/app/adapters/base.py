@@ -259,9 +259,9 @@ class H2HPanel:
 
     A list of labelled stats rather than named fields, because the sports do not share a
     vocabulary and their providers do not expose the same depth -- football has corners and
-    possession, tennis has aces and break points, and BallDontLie's NBA plan returns 401 for
-    /stats so basketball has the final scores and nothing else. Naming every measure in one
-    type would give each sport a majority of permanently-null fields.
+    possession, tennis has aces and break points, and basketball has rebounds and shooting
+    percentages. Naming every measure in one type would give each sport a majority of
+    permanently-null fields.
 
     Every value is relative to the CURRENT fixture's home/away assignment, not each historical
     meeting's own: a team's record should not flip depending on which side it happened to be on

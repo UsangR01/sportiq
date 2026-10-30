@@ -1490,8 +1490,9 @@ async def _fetch_head_to_head(
 
         football   5 rows   API-Football /fixtures/headtohead + /fixtures/statistics
         tennis     6 rows   BallDontLie /head_to_head (record) + /match_stats (serve/return)
-        NBA/WNBA   2 rows   BallDontLie /games -- /stats is 401 on this plan, so the final
-                            score is the only real per-meeting number that exists
+        basketball 7 rows   API-Basketball /games + /games/statistics/teams. BallDontLie's
+                            /stats is 401 at every tier we hold, so the NBA and WNBA are
+                            joined to that provider by NAME to reach the same depth
 
     None, never a fabricated empty record, for two teams that have never met or a team with no
     external_id."""
@@ -1744,8 +1745,9 @@ async def _fetch_match_stats(
                             live_state (already stored, so no call is spent on it)
         tennis     6 rows   BallDontLie /match_stats -- the same serve and return measures the
                             H2H panel shows, for this one match
-        NBA/WNBA   none     /stats is 401 on this plan, so the final score is the only real
-                            per-match number and it is already displayed above the panel
+        basketball none     NOT a provider limit, despite BallDontLie's /stats being 401:
+                            API-Basketball publishes a real box score and the H2H panel reads
+                            it. Unwired here, which is a gap rather than an absence
 
     Returns [] rather than raising for every unhappy path -- an unplayed fixture, a provider
     outage, a competition with no published statistics. The panel is an enrichment; losing it
