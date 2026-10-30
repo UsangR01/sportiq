@@ -246,7 +246,11 @@ function FixtureTabs({ fixture }: { fixture: FixtureDetail }) {
         />
       )}
       {active === "meetings" && (
-        <Meetings meetings={meetings} homeTeam={fixture.home_team} />
+        <Meetings
+          meetings={meetings}
+          homeTeam={fixture.home_team}
+          sportSlug={fixture.sport_slug}
+        />
       )}
       {active === "standings" && <Standings fixture={fixture} />}
     </View>
@@ -255,12 +259,24 @@ function FixtureTabs({ fixture }: { fixture: FixtureDetail }) {
 
 /** Past meetings, newest first. The scoreline keeps the meeting's own venue while the chip is
  * scored from the current home side — see MeetingRow in lib/api/types.ts for why. */
-function Meetings({ meetings, homeTeam }: { meetings: MeetingRow[]; homeTeam: string }) {
+/** Sports where a match cannot end level, so the caption must not promise a "D". */
+const SPORTS_WITHOUT_DRAWS = new Set(["nba", "tennis"]);
+
+function Meetings({
+  meetings,
+  homeTeam,
+  sportSlug,
+}: {
+  meetings: MeetingRow[];
+  homeTeam: string;
+  sportSlug: string;
+}) {
+  const verdicts = SPORTS_WITHOUT_DRAWS.has(sportSlug) ? "W/L" : "W/D/L";
   return (
     <View>
       <Text className="mb-2 text-xs text-gray-400">
-        Last {meetings.length} meeting{meetings.length === 1 ? "" : "s"}, newest first · W/D/L from{" "}
-        {homeTeam}&apos;s view
+        Last {meetings.length} meeting{meetings.length === 1 ? "" : "s"}, newest first · {verdicts}{" "}
+        from {homeTeam}&apos;s view
       </Text>
       <View className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-800">
         {meetings.map((meeting, index) => (

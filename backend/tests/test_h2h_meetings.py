@@ -95,3 +95,25 @@ def test_the_tournament_name_is_carried_so_no_row_renders_a_blank_label():
     )
 
     assert _meeting_rows([match], "10")[0].competition == "Winston-Salem Open"
+
+
+# ------------------------------------------------- the provider's naming, stripped for display
+
+
+def test_the_wnba_suffix_never_reaches_a_meetings_row():
+    """FOUND BY LOOKING AT RENDERED OUTPUT, not by reading the payload. The meetings list read
+    "Chicago Sky W v Indiana Fever W ... NBA W" -- API-Basketball disambiguating itself from
+    the men's league, leaking straight onto the card. It had been stripped for the standings
+    table and not here, which is what happens when the same quirk is handled in two places.
+    """
+    from app.adapters.api_basketball import display_competition_name, display_team_name
+
+    assert display_team_name("Chicago Sky W", "wnba") == "Chicago Sky"
+    assert display_competition_name("NBA W") == "WNBA"
+
+    # Scoped: the suffix is only the provider's convention for the WNBA.
+    assert display_team_name("Some Club W", "acb") == "Some Club W"
+    # And a club whose name merely contains a W is untouched.
+    assert display_team_name("Washington Wizards", "nba") == "Washington Wizards"
+    # A competition with no override passes through unchanged.
+    assert display_competition_name("ACB") == "ACB"

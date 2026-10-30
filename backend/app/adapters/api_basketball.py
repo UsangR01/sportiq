@@ -606,9 +606,7 @@ async def fetch_standings(league: str) -> list[StandingRow]:
             # the provider disambiguating itself from the men's league, not part of the club's
             # name, and showing it would read as a typo on the table. Scoped to the WNBA rather
             # than stripped globally, so a club legitimately ending in " W" survives elsewhere.
-            team_name = (team.get("name") or "").strip()
-            if league == "wnba" and team_name.endswith(" W"):
-                team_name = team_name[:-2]
+            team_name = display_team_name(team.get("name"), league)
             group = (entry.get("group") or {}).get("name")
             # ONE ROW PER TEAM, first table wins. The NBA returns 60 rows for 30 teams --
             # every club once by CONFERENCE and again by DIVISION -- and the provider returns
@@ -643,6 +641,32 @@ async def fetch_standings(league: str) -> list[StandingRow]:
 # Resolved team-name -> provider-id maps, per league, held for the life of the process. The
 # list changes once a season; a restart re-resolves, which is cheap and self-correcting.
 _TEAM_NAME_CACHE: dict[str, dict[str, int]] = {}
+
+
+# The provider's own display quirks, stripped once at the boundary so no panel has to know
+# about them. Both were found by LOOKING at rendered output rather than by reading the
+# payload: the meetings list read "Chicago Sky W v Indiana Fever W ... NBA W".
+_COMPETITION_DISPLAY_NAMES = {"NBA W": "WNBA"}
+
+
+def display_team_name(name: str | None, league: str) -> str:
+    """A club name as a user should see it.
+
+    API-Basketball suffixes every WNBA club with " W" to disambiguate itself from the men's
+    league. That is the provider talking to itself, not part of the club's name. Scoped to the
+    WNBA so a club legitimately ending in " W" survives elsewhere.
+    """
+    cleaned = (name or "").strip()
+    if league == "wnba" and cleaned.endswith(" W"):
+        cleaned = cleaned[:-2]
+    return cleaned
+
+
+def display_competition_name(name: str | None) -> str | None:
+    """The competition label, mapped where the provider's differs from the common name."""
+    if not name:
+        return None
+    return _COMPETITION_DISPLAY_NAMES.get(name.strip(), name.strip())
 
 
 def normalise_team_name(name: str) -> str:
@@ -894,13 +918,13 @@ async def fetch_h2h_panel(
             H2HMeeting(
                 fixture_external_id=f"{ID_PREFIX}{game.get('id')}",
                 kickoff_utc=kickoff,
-                home_team=(game["teams"]["home"] or {}).get("name") or "",
-                away_team=(game["teams"]["away"] or {}).get("name") or "",
+                home_team=display_team_name((game["teams"]["home"] or {}).get("name"), league),
+                away_team=display_team_name((game["teams"]["away"] or {}).get("name"), league),
                 home_score=home_score,
                 away_score=away_score,
                 # Basketball cannot draw, so W/L only -- no "D" branch to get wrong.
                 result="W" if ours > theirs else "L",
-                competition=(game.get("league") or {}).get("name"),
+                competition=display_competition_name((game.get("league") or {}).get("name")),
             )
         )
 
