@@ -290,11 +290,42 @@ async def test_market_filter_restricts_to_one_market(api_client, seeded_multi_ma
     assert row_b["best_pick"]["market"] == "h2h"
 
 
-async def test_goals_total_market_requires_line(api_client, seeded_multi_market_fixtures):
+async def test_goals_total_without_a_line_uses_the_servers_own_line(
+    api_client, seeded_multi_market_fixtures
+):
+    """THIS USED TO BE A 422, and the change is deliberate rather than a loosening.
+
+    The feed's market chips stand for a FAMILY, not a line. Requiring the caller to name one
+    meant mobile keeping its own copy of {goals: 2.5, corners: 9.5} -- and that copy is
+    exactly how the chip's count and the filter drifted apart in production, the chip
+    counting every goals line while tapping it asked for 2.5 alone.
+
+    The server now owns the line, counts it, and applies it, so there is one source rather
+    than three. GET /picks keeps its 422: that is a programmatic endpoint where guessing a
+    line the caller never named would be worse than refusing.
+    """
+    from app.fixtures.router import MARKET_CHIP_LINES
+
     sport, _a, _b = seeded_multi_market_fixtures
     response = await api_client.get(
         "/fixtures", params={"sport_slug": sport.slug, "market": "goals_total"}
     )
+    assert response.status_code == 200
+
+    explicit = await api_client.get(
+        "/fixtures",
+        params={
+            "sport_slug": sport.slug,
+            "market": "goals_total",
+            "line": MARKET_CHIP_LINES["goals_total"],
+        },
+    )
+    assert response.json() == explicit.json(), "the default must equal naming that line"
+
+
+async def test_picks_still_refuses_a_totals_market_with_no_line(api_client):
+    """The programmatic endpoint keeps its 422 -- the default above is a FEED affordance."""
+    response = await api_client.get("/picks", params={"market": "goals_total"})
     assert response.status_code == 422
 
 

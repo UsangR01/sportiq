@@ -1,7 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { router } from "expo-router";
 import { useEffect, useMemo, useState } from "react";
-import { Pressable, RefreshControl, ScrollView, Text, View } from "react-native";
+import {
+  ActivityIndicator,
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  Text,
+  View,
+} from "react-native";
 
 import { GuestBanner } from "@/components/GuestBanner";
 import { AdSlot, MIN_FEED_FOR_MPU, placeFeedAds, useAdsEnabled } from "@/lib/ads";
@@ -13,7 +20,7 @@ import { PicksHeader } from "@/components/picks/PicksHeader";
 import { SegmentedControl } from "@/components/picks/SegmentedControl";
 import { SportTabs, SPORT_TABS } from "@/components/picks/SportTabs";
 import { SummaryStrip, type CountryOption } from "@/components/picks/SummaryStrip";
-import { listFixtures, marketCounts } from "@/lib/api/fixtures";
+import { listFixturesWithCounts } from "@/lib/api/fixtures";
 import type { MarketFamily } from "@/store/picksStore";
 import type { BestPick, FixtureSummary } from "@/lib/api/types";
 import { getPreferences } from "@/lib/api/users";
@@ -167,7 +174,7 @@ export default function PicksScreen() {
       // It also keeps league suppression applied: passing league_slug deliberately BYPASSES
       // SUPPRESSED_LEAGUES server-side so deep links keep working, which would have quietly
       // reintroduced MLS the moment a tour chip was selected.
-      return listFixtures({
+      return listFixturesWithCounts({
         date_from: from,
         date_to: to,
         limit: FIXTURES_PAGE_LIMIT,
@@ -179,28 +186,8 @@ export default function PicksScreen() {
         // selector is the clutter that got the first version of these chips removed.
         // THE SERVER'S OWN LINE, from the counts response. Keeping a copy here is what made
         // the chip overstate: it counted every goals line while tapping it asked for 2.5.
-        line: store.market ? marketCountsQuery.data?.lines?.[store.market] : undefined,
-      });
-    },
-  });
-
-  // Counts for the chips, over the SAME day and floors but deliberately WITHOUT the market:
-  // their whole job is to say what the markets you are not looking at contain.
-  const marketCountsQuery = useQuery({
-    queryKey: [
-      "market-counts",
-      store.selectedDate.toDateString(),
-      store.minProbability,
-      store.minOdds,
-    ],
-    queryFn: () => {
-      const { from, to } = dayBounds(store.selectedDate);
-      return marketCounts({
-        date_from: from,
-        date_to: to,
-        limit: FIXTURES_PAGE_LIMIT,
-        min_probability: store.minProbability,
-        min_odds: store.minOdds,
+        // NO LINE SENT. The server defaults a totals market to the line it counted, so the
+        // client holds no copy to drift from -- which is what made the goals chip overstate.
       });
     },
   });
@@ -226,7 +213,7 @@ export default function PicksScreen() {
    * from the result of the FAVOURITES step but BEFORE the country filter, so switching country
    * is never a dead end. */
   const { groups, countries, visibleCount, liveCount } = useMemo(() => {
-    const everything = fixturesQuery.data ?? [];
+    const everything = fixturesQuery.data?.fixtures ?? [];
 
     // 1. SPORT / TOUR, applied here rather than server-side because the selection is a SET and
     //    the endpoint takes one slug. An empty list means "no restriction" — that is what the
@@ -323,7 +310,7 @@ export default function PicksScreen() {
   // Does that sport have ANY fixtures today, before this screen's own narrowing? This is the
   // difference between "your thresholds hid everything" and "there is no tennis today", and
   // sending someone to the odds slider when the truth is the latter wastes their time.
-  const sportHasFixtures = (fixturesQuery.data ?? []).some(
+  const sportHasFixtures = (fixturesQuery.data?.fixtures ?? []).some(
     (f) => !soleSport || f.sport_slug === soleSport.slug
   );
 
@@ -366,8 +353,9 @@ export default function PicksScreen() {
         />
         <MarketChips
           value={store.market}
-          counts={marketCountsQuery.data?.counts}
+          counts={fixturesQuery.data?.marketCounts?.counts}
           onChange={store.setMarket}
+          busy={fixturesQuery.isFetching}
         />
       </PicksHeader>
 
@@ -382,6 +370,25 @@ export default function PicksScreen() {
         {isGuest && (
           <View style={{ marginBottom: GAP.leagueGroup }}>
             <GuestBanner />
+          </View>
+        )}
+
+        {/* isFetching, NOT isLoading. `isLoading` is true only on a FIRST load with no cached
+            data, so with keepPreviousData every subsequent filter change refetched silently --
+            the card list sat unchanged with no indication, then swapped. Reported as "nothing
+            happens and after a while the cards are published". */}
+        {fixturesQuery.isFetching && !fixturesQuery.isLoading && (
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 8,
+              paddingVertical: 8,
+            }}
+          >
+            <ActivityIndicator size="small" color={colors.accent} />
+            <Text style={[TYPE.body, { color: colors.textSub }]}>Updating picks…</Text>
           </View>
         )}
 
@@ -447,6 +454,11 @@ export default function PicksScreen() {
                     onToggle={() => store.toggleExpanded(fixture.id)}
                     oddsFormat={oddsFormat}
                     isSaved={savedIds.has(fixture.id)}
+                    // Scoped to THIS fixture, not the mutation as a whole: a single
+                    // isPending would show every visible card as saving at once.
+                    savePending={
+                      saveMutation.isPending && saveMutation.variables?.id === fixture.id
+                    }
                     canSave={!isGuest}
                     onToggleSaved={() =>
                       isGuest
@@ -519,10 +531,15 @@ function MarketChips({
   value,
   counts,
   onChange,
+  busy,
 }: {
   value: MarketFamily | null;
   counts: Record<string, number> | undefined;
   onChange: (next: MarketFamily | null) => void;
+  /** A fetch is in flight for the current selection. The SELECTED chip shows a spinner in
+   *  place of its count, so the feedback sits where the finger just was rather than only at
+   *  the top of a list the user may have scrolled past. */
+  busy: boolean;
 }) {
   const { colors } = useTheme();
   const chips: { key: MarketFamily | null; label: string; count: number | null }[] = [
@@ -562,16 +579,19 @@ function MarketChips({
               opacity: !selected && empty ? 0.45 : 1,
             }}
           >
-            <Text
-              style={{
-                fontSize: 13,
-                fontWeight: selected ? "700" : "500",
-                color: selected ? "#fff" : colors.text,
-              }}
-            >
-              {chip.label}
-              {chip.count === null ? "" : ` (${chip.count})`}
-            </Text>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+              <Text
+                style={{
+                  fontSize: 13,
+                  fontWeight: selected ? "700" : "500",
+                  color: selected ? "#fff" : colors.text,
+                }}
+              >
+                {chip.label}
+                {selected && busy ? "" : chip.count === null ? "" : ` (${chip.count})`}
+              </Text>
+              {selected && busy && <ActivityIndicator size="small" color="#fff" />}
+            </View>
           </Pressable>
         );
       })}

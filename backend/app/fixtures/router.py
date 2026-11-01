@@ -1,11 +1,12 @@
 import dataclasses
+import json
 import logging
 import uuid
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -1178,6 +1179,10 @@ async def _bulk_best_picks(
         ]
         all_picks[fixture_id] = [_candidate_to_best_pick(c) for c in candidates]
 
+        # BEFORE the market filter, deliberately: the counts exist to say what the markets the
+        # user is NOT looking at contain, so computing them after would zero every chip but
+        # the selected one.
+        unfiltered_candidates = candidates
         if market and market != "all":
             candidates = [
                 c for c in candidates if c.market == market and (line is None or c.line == line)
@@ -1243,8 +1248,21 @@ async def _bulk_best_picks(
         # reconsider a card that has already been published.
         settled = fixture_id in settled_fixtures
         if with_survivors or with_market_counts:
+            # SURVIVORS USE THE NARROWED LIST, counts use the wide one, and conflating them
+            # let a card GAIN a pick: survivors are what the freeze stores, so feeding it
+            # candidates the default feed bars would publish a corners pick on a card that
+            # never showed one. Caught by test_a_card_that_showed_no_pick_cannot_gain_one.
             guarded = _surviving_candidates(
                 candidates, sport_slug=sport_by_fixture.get(fixture_id), is_settled=settled
+            )
+            # Each family is counted as though the user had ASKED for it, because tapping a
+            # chip is exactly that -- an explicit request, which this codebase already treats
+            # as different from a market winning the default ranking. So the corners bar does
+            # not apply here, and the chip's number matches what tapping it returns.
+            countable = _surviving_candidates(
+                unfiltered_candidates,
+                sport_slug=sport_by_fixture.get(fixture_id),
+                is_settled=settled,
             )
             if with_survivors:
                 survivors[fixture_id] = guarded
@@ -1340,7 +1358,7 @@ async def _bulk_best_picks(
                 chip_line = MARKET_CHIP_LINES.get(family)
                 in_family = [
                     c
-                    for c in guarded
+                    for c in countable
                     if c.market == family and (chip_line is None or c.line == chip_line)
                 ]
                 if not in_family:
@@ -1408,6 +1426,7 @@ def _apply_feed_filters(
 
 @router.get("/fixtures", response_model=list[FixtureSummary])
 async def list_fixtures(
+    response: Response,
     sport_slug: str | None = None,
     league_slug: str | None = None,
     status_filter: FixtureStatus | None = Query(None, alias="status"),
@@ -1429,7 +1448,15 @@ async def list_fixtures(
     if market in _VALID_LINES_BY_MARKET:
         valid_lines = _VALID_LINES_BY_MARKET[market]
         if line is None:
-            raise HTTPException(422, detail=f"market={market!r} requires a `line` query param")
+            # DEFAULTED RATHER THAN REJECTED, so the client never needs its own copy of the
+            # line. A chip stands for a market FAMILY; making the caller name a line meant
+            # mobile hardcoding {goals: 2.5, corners: 9.5}, which is precisely how the count
+            # and the filter drifted apart (the chip counted every goals line and tapping it
+            # asked for 2.5). The server owns the line, counts it, and applies it.
+            #
+            # /picks keeps its 422: that is a programmatic endpoint where guessing a line a
+            # caller did not ask for would be worse than telling them.
+            line = MARKET_CHIP_LINES[market]
         if line not in valid_lines:
             raise HTTPException(
                 422, detail=f"market={market!r} only supports line in {valid_lines}"
@@ -1464,13 +1491,26 @@ async def list_fixtures(
 
     rows = (await db.execute(stmt)).all()
     fixture_ids = [row[0].id for row in rows]
-    best_picks, all_picks = await _bulk_best_picks(
+    # COUNTS RIDE ALONG, because a second request for them cost as much as this one. Measured
+    # against production: /fixtures takes ~13.5s, so the separate /fixtures/market-counts call
+    # doubled every filter change to ~27s and read to the user as the filter failing. They are
+    # computed in this same loop, so carrying them here is free.
+    best_picks, all_picks, counts = await _bulk_best_picks(
         db,
         fixture_ids,
         market=market,
         line=line,
         min_probability=min_probability,
         min_odds=min_odds,
+        with_market_counts=True,
+    )
+    # A HEADER rather than an envelope: this route's response_model is a bare list, and
+    # wrapping it would break every existing caller for a number one screen needs.
+    response.headers["X-Market-Counts"] = json.dumps(
+        {
+            "counts": {family: counts.get(family, 0) for family in MARKET_FAMILIES},
+            "lines": MARKET_CHIP_LINES,
+        }
     )
     live_states = await _bulk_live_states(db, fixture_ids)
     _stamp_live_status(rows, best_picks, live_states)

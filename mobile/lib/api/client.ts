@@ -45,7 +45,6 @@ export async function rawFetch<T>(path: string, options: RequestInit = {}): Prom
   if (!response.ok) {
     throw new ApiError(response.status, await parseErrorMessage(response));
   }
-  if (response.status === 204) return undefined as T;
   return response.json();
 }
 
@@ -95,7 +94,28 @@ async function rotate(): Promise<boolean> {
 /** The client every screen should use: attaches the access token, and on a single 401
  * transparently rotates the refresh token once (per TDD §4.3's rotating-refresh-token
  * design) before retrying — falling back to logging the user out if that also fails. */
+/** Like apiFetch, but hands back the RESPONSE HEADERS too.
+ *
+ *  Exists because the feed carries its market counts in a header rather than an envelope:
+ *  /fixtures returns a bare list, and wrapping it would break every existing caller for a
+ *  number one screen needs. */
+export async function apiFetchWithHeaders<T>(
+  path: string,
+  options: RequestInit = {},
+): Promise<{ data: T; headers: Headers }> {
+  const response = await apiFetchRaw(path, options);
+  if (response.status === 204) return { data: undefined as T, headers: response.headers };
+  return { data: await response.json(), headers: response.headers };
+}
+
 export async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const response = await apiFetchRaw(path, options);
+  if (response.status === 204) return undefined as T;
+  return response.json();
+}
+
+/** The shared request path: auth header, one refresh-and-retry on 401, error mapping. */
+async function apiFetchRaw(path: string, options: RequestInit = {}): Promise<Response> {
   const withAuth = (token: string | null): RequestInit => ({
     ...options,
     headers: {
@@ -121,6 +141,5 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}): Prom
   if (!response.ok) {
     throw new ApiError(response.status, await parseErrorMessage(response));
   }
-  if (response.status === 204) return undefined as T;
-  return response.json();
+  return response;
 }

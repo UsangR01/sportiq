@@ -1,4 +1,4 @@
-import { apiFetch } from "./client";
+import { apiFetch, apiFetchWithHeaders } from "./client";
 import type {
   FixtureDetail,
   FixtureSummary,
@@ -32,6 +32,14 @@ export interface ListFixturesParams {
   line?: number;
 }
 
+export interface FixtureFeed {
+  fixtures: FixtureSummary[];
+  /** Per-market counts, carried on the SAME response. A second request for them cost as much
+   *  as this one -- ~13.5s against production -- which doubled every filter change and read
+   *  to the user as the filter failing. */
+  marketCounts: MarketCountsResponse | null;
+}
+
 export function listFixtures(params: ListFixturesParams = {}): Promise<FixtureSummary[]> {
   const query = new URLSearchParams();
   if (params.sport_slug) query.set("sport_slug", params.sport_slug);
@@ -48,6 +56,41 @@ export function listFixtures(params: ListFixturesParams = {}): Promise<FixtureSu
   if (params.line !== undefined) query.set("line", String(params.line));
   const qs = query.toString();
   return apiFetch<FixtureSummary[]>(`/fixtures${qs ? `?${qs}` : ""}`);
+}
+
+/** The feed PLUS its market counts, in one round trip. */
+export async function listFixturesWithCounts(
+  params: ListFixturesParams = {},
+): Promise<FixtureFeed> {
+  const query = new URLSearchParams();
+  if (params.sport_slug) query.set("sport_slug", params.sport_slug);
+  if (params.league_slug) query.set("league_slug", params.league_slug);
+  if (params.status) query.set("status", params.status);
+  if (params.limit) query.set("limit", String(params.limit));
+  if (params.date_from) query.set("date_from", params.date_from);
+  if (params.date_to) query.set("date_to", params.date_to);
+  if (params.min_probability !== undefined) {
+    query.set("min_probability", String(params.min_probability));
+  }
+  if (params.min_odds !== undefined) query.set("min_odds", String(params.min_odds));
+  if (params.market) query.set("market", params.market);
+  if (params.line !== undefined) query.set("line", String(params.line));
+  const qs = query.toString();
+  const { data, headers } = await apiFetchWithHeaders<FixtureSummary[]>(
+    `/fixtures${qs ? `?${qs}` : ""}`,
+  );
+  let marketCounts: MarketCountsResponse | null = null;
+  const raw = headers.get("x-market-counts");
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      marketCounts = { total: data.length, counts: parsed.counts, lines: parsed.lines };
+    } catch {
+      // A malformed header must cost the chips their counts, never the feed itself.
+      marketCounts = null;
+    }
+  }
+  return { fixtures: data, marketCounts };
 }
 
 /** Per-market counts for the filter chips, over the SAME fixtures the feed is showing.

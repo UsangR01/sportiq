@@ -34,6 +34,7 @@ export function MatchRow({
   onToggle,
   oddsFormat,
   isSaved,
+  savePending,
   onToggleSaved,
   canSave,
 }: {
@@ -43,6 +44,10 @@ export function MatchRow({
   onToggle: () => void;
   oddsFormat: OddsFormat;
   isSaved: boolean;
+  /** A save/remove is in flight for THIS fixture. Without it the button looked inert on tap
+   *  -- the label only changed once the server answered, so a user could not tell whether
+   *  the toggle had registered. Reported alongside the same problem on the filter chips. */
+  savePending?: boolean;
   onToggleSaved: () => void;
   canSave: boolean;
 }) {
@@ -246,6 +251,7 @@ export function MatchRow({
         <ExpandedPanel
           fixture={fixture}
           isSaved={isSaved}
+          savePending={savePending}
           onToggleSaved={onToggleSaved}
           canSave={canSave}
         />
@@ -444,11 +450,13 @@ function FactorRows({
 function ExpandedPanel({
   fixture,
   isSaved,
+  savePending,
   onToggleSaved,
   canSave,
 }: {
   fixture: FixtureSummary;
   isSaved: boolean;
+  savePending?: boolean;
   onToggleSaved: () => void;
   canSave: boolean;
 }) {
@@ -545,6 +553,7 @@ function ExpandedPanel({
         {fixture.status === "scheduled" && (
           <Pressable
             onPress={onToggleSaved}
+            disabled={savePending}
             accessibilityRole="button"
             style={{
               marginTop: 12,
@@ -562,9 +571,13 @@ function ExpandedPanel({
             >
               {!canSave
                 ? "Sign in to save this pick"
-                : isSaved
-                  ? "Remove from saved picks"
-                  : "Save this pick"}
+                : savePending
+                  ? isSaved
+                    ? "Removing…"
+                    : "Saving…"
+                  : isSaved
+                    ? "Remove from saved picks"
+                    : "Save this pick"}
             </Text>
           </Pressable>
         )}
