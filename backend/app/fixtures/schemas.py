@@ -319,6 +319,22 @@ class StandingRowResponse(BaseModel):
     group: str | None = None
 
 
+class MarketCountsResponse(BaseModel):
+    """How many fixtures in the CURRENT feed would still show a pick if filtered to each
+    market — so a chip can carry its own count and never offer a dead end.
+
+    DELIBERATELY IGNORES AN ACTIVE market FILTER. The point of the counts is to show what is
+    available in the markets you are NOT currently looking at; computing them against the
+    filter would make every chip but the selected one read zero.
+
+    `counts` omits a market entirely rather than reporting 0, so a client can tell "no data"
+    from "zero qualifying picks" — though in practice both render the same way.
+    """
+
+    total: int
+    counts: dict[str, int] = {}
+
+
 class StandingsResponse(BaseModel):
     """A league table, with the column HEADINGS supplied by the server.
 

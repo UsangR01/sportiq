@@ -32,6 +32,7 @@ from app.fixtures.schemas import (
     FixtureSummary,
     HeadToHeadResponse,
     LiveStateResponse,
+    MarketCountsResponse,
     MeetingRow,
     OddsLineResponse,
     PredictionResponse,
@@ -788,6 +789,15 @@ def _expected_value(candidate: _MarketCandidate) -> float:
 NO_DEMONSTRATED_SIGNAL_MARKETS = frozenset({"corners_total"})
 
 
+# The market FAMILIES the feed can be filtered to, in display order. Grouped rather than
+# listed per selection because users think in one question ("show me match-result picks"),
+# not in three -- and because splitting h2h into Home/Draw/Away would offer a Draw chip that
+# can never return anything: MIN_EDGE_OVER_BASE_RATE requires a draw to reach 0.3038 while
+# 92% of fixtures are given 0.2-0.3, and over the whole settled card history ZERO draw picks
+# have ever reached a card.
+MARKET_FAMILIES: tuple[str, ...] = ("h2h", "double_chance", "goals_total", "corners_total")
+
+
 def _surviving_candidates(
     candidates: list, *, sport_slug: str | None = None, is_settled: bool = False
 ) -> list:
@@ -1005,6 +1015,7 @@ async def _bulk_best_picks(
     min_probability: float | None = None,
     min_odds: float | None = None,
     with_survivors: bool = False,
+    with_market_counts: bool = False,
 ) -> tuple:
     """Computes each fixture's single best pick, drawn from ACROSS every market (h2h, double
     chance, Over/Under goals, Over/Under corners) by default — per the user's explicit ask
@@ -1137,6 +1148,7 @@ async def _bulk_best_picks(
     # Only built when the freeze asks for it -- see FrozenPick.candidates. Every other caller
     # pays nothing for it.
     survivors: dict = {}
+    market_counts: dict[str, int] = {}
     for fixture_id, prediction in latest_prediction_by_fixture.items():
         odds_by_market = {
             db_market: odds_by_fixture_market.get((fixture_id, db_market), [])
@@ -1221,10 +1233,12 @@ async def _bulk_best_picks(
         # Frozen wins outright. `continue` rather than falling through, so nothing below can
         # reconsider a card that has already been published.
         settled = fixture_id in settled_fixtures
-        if with_survivors:
-            survivors[fixture_id] = _surviving_candidates(
+        if with_survivors or with_market_counts:
+            guarded = _surviving_candidates(
                 candidates, sport_slug=sport_by_fixture.get(fixture_id), is_settled=settled
             )
+            if with_survivors:
+                survivors[fixture_id] = guarded
 
         frozen = frozen_by_fixture.get(fixture_id)
         if frozen is not None:
@@ -1273,6 +1287,12 @@ async def _bulk_best_picks(
                 shown = None if chosen is None else _candidate_to_best_pick(chosen)
             if shown is not None:
                 best_picks[fixture_id] = shown
+                if with_market_counts:
+                    # A PUBLISHED CARD CANNOT CHANGE ITS PICK, so filtering to a market either
+                    # shows this one or shows nothing -- it cannot promote a different
+                    # candidate the way an upcoming card can. Counting the frozen winner's own
+                    # family is therefore the honest answer, not a shortcut.
+                    market_counts[shown.market] = market_counts.get(shown.market, 0) + 1
             continue
 
         best = _pick_best(
@@ -1290,10 +1310,74 @@ async def _bulk_best_picks(
         )
         if best is not None:
             best_picks[fixture_id] = best
+        if with_market_counts:
+            # THE SAME SELECTION, restricted to one family at a time, so a chip's count and
+            # what the filter actually returns cannot disagree. Re-ranking rather than reading
+            # `best`'s own market: an upcoming card filtered to goals shows its best GOALS
+            # pick, which is usually not the pick that won overall.
+            for family in MARKET_FAMILIES:
+                in_family = [c for c in guarded if c.market == family]
+                if not in_family:
+                    continue
+                chosen = _rank_survivors(
+                    in_family,
+                    min_probability=min_probability,
+                    min_odds=None if settled else min_odds,
+                )
+                if chosen is not None:
+                    market_counts[family] = market_counts.get(family, 0) + 1
 
+    if with_survivors and with_market_counts:
+        return best_picks, all_picks, survivors, market_counts
+    if with_market_counts:
+        return best_picks, all_picks, market_counts
     if with_survivors:
         return best_picks, all_picks, survivors
     return best_picks, all_picks
+
+
+def _apply_feed_filters(
+    stmt,
+    *,
+    sport_slug: str | None,
+    league_slug: str | None,
+    status_filter,
+    date_from,
+    date_to,
+    limit: int,
+    offset: int,
+):
+    """The feed's own row selection, shared so the market-count chips cannot describe a
+    different set of fixtures from the one they sit above.
+
+    Extracted when the counts endpoint arrived: a second copy of these filters would drift the
+    first time a suppression rule changed, and the chips would then promise picks the feed
+    does not contain.
+    """
+    if not league_slug and SUPPRESSED_LEAGUES:
+        stmt = stmt.where(
+            or_(
+                League.slug.not_in(SUPPRESSED_LEAGUES),
+                Fixture.status == FixtureStatus.COMPLETED,
+            )
+        )
+    # The stronger form: hides settled fixtures too, so the league disappears entirely. Empty
+    # by default and deliberately so — see the set's own comment for why hiding a league's
+    # history is a worse default than hiding only what a user could still act on.
+    if not league_slug and SUPPRESSED_LEAGUES_INCLUDING_HISTORY:
+        stmt = stmt.where(League.slug.not_in(SUPPRESSED_LEAGUES_INCLUDING_HISTORY))
+    if sport_slug:
+        stmt = stmt.where(Sport.slug == sport_slug)
+    if league_slug:
+        stmt = stmt.where(League.slug == league_slug)
+    if status_filter:
+        stmt = stmt.where(Fixture.status == status_filter)
+    if date_from:
+        stmt = stmt.where(Fixture.kickoff_utc >= date_from)
+    if date_to:
+        stmt = stmt.where(Fixture.kickoff_utc <= date_to)
+    stmt = stmt.order_by(Fixture.kickoff_utc).limit(limit).offset(offset)
+    return stmt
 
 
 @router.get("/fixtures", response_model=list[FixtureSummary])
@@ -1341,29 +1425,16 @@ async def list_fixtures(
     # suppression, which is the retroactive-filtering bias the settled-fixture exemption in
     # _pick_best exists to prevent. An explicit league_slug request is still honoured, so a
     # deep link or a direct query into a suppressed league keeps working.
-    if not league_slug and SUPPRESSED_LEAGUES:
-        stmt = stmt.where(
-            or_(
-                League.slug.not_in(SUPPRESSED_LEAGUES),
-                Fixture.status == FixtureStatus.COMPLETED,
-            )
-        )
-    # The stronger form: hides settled fixtures too, so the league disappears entirely. Empty
-    # by default and deliberately so — see the set's own comment for why hiding a league's
-    # history is a worse default than hiding only what a user could still act on.
-    if not league_slug and SUPPRESSED_LEAGUES_INCLUDING_HISTORY:
-        stmt = stmt.where(League.slug.not_in(SUPPRESSED_LEAGUES_INCLUDING_HISTORY))
-    if sport_slug:
-        stmt = stmt.where(Sport.slug == sport_slug)
-    if league_slug:
-        stmt = stmt.where(League.slug == league_slug)
-    if status_filter:
-        stmt = stmt.where(Fixture.status == status_filter)
-    if date_from:
-        stmt = stmt.where(Fixture.kickoff_utc >= date_from)
-    if date_to:
-        stmt = stmt.where(Fixture.kickoff_utc <= date_to)
-    stmt = stmt.order_by(Fixture.kickoff_utc).limit(limit).offset(offset)
+    stmt = _apply_feed_filters(
+        stmt,
+        sport_slug=sport_slug,
+        league_slug=league_slug,
+        status_filter=status_filter,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+        offset=offset,
+    )
 
     rows = (await db.execute(stmt)).all()
     fixture_ids = [row[0].id for row in rows]
@@ -2001,6 +2072,59 @@ async def _load_fixture_or_404(fixture_id: uuid.UUID, db: AsyncSession):
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Fixture not found")
     return row
+
+
+@router.get("/fixtures/market-counts", response_model=MarketCountsResponse)
+async def get_market_counts(
+    sport_slug: str | None = None,
+    league_slug: str | None = None,
+    status_filter: FixtureStatus | None = Query(None, alias="status"),
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    min_probability: float | None = Query(None, ge=0.0, le=1.0),
+    min_odds: float | None = Query(None, ge=1.0, le=1000.0),
+    limit: int = Query(200, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-market counts for the feed's filter chips.
+
+    A SEPARATE ENDPOINT RATHER THAN A FIELD ON /fixtures, because that route returns a bare
+    list and adding an envelope would break every existing caller for a number only one
+    screen needs. The client fetches it alongside the feed.
+
+    TAKES THE SAME FILTERS AS THE FEED AND SHARES ITS ROW SELECTION (_apply_feed_filters), so
+    the chips cannot describe a different set of fixtures from the list beneath them. It
+    deliberately does NOT take `market`: the counts exist to show what the OTHER markets hold.
+
+    Costs one query and no provider calls -- the counting runs over candidates the feed
+    already assembles from stored predictions and odds.
+    """
+    stmt = _apply_feed_filters(
+        _fixture_query().where(Fixture.withdrawn.is_(False)),
+        sport_slug=sport_slug,
+        league_slug=league_slug,
+        status_filter=status_filter,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+        offset=offset,
+    )
+    rows = (await db.execute(stmt)).all()
+    fixture_ids = [row[0].id for row in rows]
+    if not fixture_ids:
+        return MarketCountsResponse(total=0, counts={})
+    _, _, counts = await _bulk_best_picks(
+        db,
+        fixture_ids,
+        min_probability=min_probability,
+        min_odds=min_odds,
+        with_market_counts=True,
+    )
+    return MarketCountsResponse(
+        total=len(fixture_ids),
+        counts={family: counts.get(family, 0) for family in MARKET_FAMILIES},
+    )
 
 
 @router.get("/fixtures/{fixture_id}", response_model=FixtureDetail)

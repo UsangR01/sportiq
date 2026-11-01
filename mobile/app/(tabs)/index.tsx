@@ -13,7 +13,8 @@ import { PicksHeader } from "@/components/picks/PicksHeader";
 import { SegmentedControl } from "@/components/picks/SegmentedControl";
 import { SportTabs, SPORT_TABS } from "@/components/picks/SportTabs";
 import { SummaryStrip, type CountryOption } from "@/components/picks/SummaryStrip";
-import { listFixtures } from "@/lib/api/fixtures";
+import { listFixtures, marketCounts } from "@/lib/api/fixtures";
+import type { MarketFamily } from "@/store/picksStore";
 import type { BestPick, FixtureSummary } from "@/lib/api/types";
 import { getPreferences } from "@/lib/api/users";
 import { addToWatchlist, listWatchlist, removeFromWatchlist } from "@/lib/api/watchlist";
@@ -107,6 +108,21 @@ function groupFixtures(fixtures: FixtureSummary[]): LeagueGroup[] {
   return out;
 }
 
+/** The most-traded line per totals market, so a family chip needs no second selector.
+ *  Goals 2.5 and corners 9.5 are the standard lines this project already models against. */
+const DEFAULT_LINE_FOR_MARKET: Record<string, number | undefined> = {
+  goals_total: 2.5,
+  corners_total: 9.5,
+};
+
+/** Chip labels, in display order. Keys match the server's MARKET_FAMILIES. */
+const MARKET_CHIPS: { key: MarketFamily; label: string }[] = [
+  { key: "h2h", label: "1X2" },
+  { key: "double_chance", label: "Double chance" },
+  { key: "goals_total", label: "Goals" },
+  { key: "corners_total", label: "Corners" },
+];
+
 export default function PicksScreen() {
   const { colors } = useTheme();
   const queryClient = useQueryClient();
@@ -141,7 +157,13 @@ export default function PicksScreen() {
       // 5-match card to 0 until the needless refetch landed.
       store.minProbability,
       store.minOdds,
+      // The market DOES belong in the key, unlike the sport: narrowing to one market changes
+      // which candidate wins each fixture, so it cannot be re-filtered client-side the way
+      // the sport chips are. keepPreviousData below is what stops the feed emptying between
+      // the tap and the response -- the exact symptom the sport-chip comment above records.
+      store.market,
     ],
+    placeholderData: (previous) => previous,
     queryFn: () => {
       const { from, to } = dayBounds(store.selectedDate);
       // FETCHED WITHOUT A SPORT PARAM and filtered below, because the endpoint takes a single
@@ -153,6 +175,32 @@ export default function PicksScreen() {
       // SUPPRESSED_LEAGUES server-side so deep links keep working, which would have quietly
       // reintroduced MLS the moment a tour chip was selected.
       return listFixtures({
+        date_from: from,
+        date_to: to,
+        limit: FIXTURES_PAGE_LIMIT,
+        min_probability: store.minProbability,
+        min_odds: store.minOdds,
+        market: store.market ?? undefined,
+        // The totals markets require a line server-side. The chip is a FAMILY, so it picks
+        // the market's own most-traded line rather than asking the user for one -- another
+        // selector is the clutter that got the first version of these chips removed.
+        line: DEFAULT_LINE_FOR_MARKET[store.market ?? ""],
+      });
+    },
+  });
+
+  // Counts for the chips, over the SAME day and floors but deliberately WITHOUT the market:
+  // their whole job is to say what the markets you are not looking at contain.
+  const marketCountsQuery = useQuery({
+    queryKey: [
+      "market-counts",
+      store.selectedDate.toDateString(),
+      store.minProbability,
+      store.minOdds,
+    ],
+    queryFn: () => {
+      const { from, to } = dayBounds(store.selectedDate);
+      return marketCounts({
         date_from: from,
         date_to: to,
         limit: FIXTURES_PAGE_LIMIT,
@@ -321,6 +369,11 @@ export default function PicksScreen() {
           // this count is that it means something is happening right now.
           badges={liveCount > 0 ? { Live: String(liveCount) } : undefined}
         />
+        <MarketChips
+          value={store.market}
+          counts={marketCountsQuery.data?.counts}
+          onChange={store.setMarket}
+        />
       </PicksHeader>
 
       <ScrollView
@@ -453,5 +506,80 @@ export default function PicksScreen() {
         onReset={store.resetFilters}
       />
     </View>
+  );
+}
+
+
+/** Market filter chips, each carrying its own count.
+ *
+ * THE COUNT IS THE WHOLE POINT. These chips existed once and were removed as clutter -- a row
+ * of filters that mostly led to empty feeds. The count comes from the server running the SAME
+ * selection restricted to that market, so a chip reading "Corners (0)" tells the user not to
+ * tap it rather than letting them discover it.
+ *
+ * A market with no picks today is rendered DIMMED AND STILL TAPPABLE rather than hidden:
+ * chips that appear and disappear between days make the row impossible to learn.
+ */
+function MarketChips({
+  value,
+  counts,
+  onChange,
+}: {
+  value: MarketFamily | null;
+  counts: Record<string, number> | undefined;
+  onChange: (next: MarketFamily | null) => void;
+}) {
+  const { colors } = useTheme();
+  const chips: { key: MarketFamily | null; label: string; count: number | null }[] = [
+    { key: null, label: "All", count: null },
+    ...MARKET_CHIPS.map((chip) => ({
+      key: chip.key as MarketFamily | null,
+      label: chip.label,
+      // undefined while the count request is in flight -- shown without a number rather than
+      // as "(0)", which would read as "empty" when it means "not known yet".
+      count: counts ? (counts[chip.key] ?? 0) : null,
+    })),
+  ];
+  return (
+    <ScrollView
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      className="grow-0"
+      contentContainerStyle={{ gap: 6, paddingVertical: 6 }}
+    >
+      {chips.map((chip) => {
+        const selected = value === chip.key;
+        const empty = chip.count === 0;
+        return (
+          <Pressable
+            key={chip.key ?? "all"}
+            onPress={() => onChange(chip.key)}
+            accessibilityRole="button"
+            accessibilityState={{ selected }}
+            accessibilityLabel={
+              chip.count === null ? chip.label : `${chip.label}, ${chip.count} picks`
+            }
+            style={{
+              paddingHorizontal: 12,
+              paddingVertical: 6,
+              borderRadius: 999,
+              backgroundColor: selected ? colors.accent : colors.surfaceAlt,
+              opacity: !selected && empty ? 0.45 : 1,
+            }}
+          >
+            <Text
+              style={{
+                fontSize: 13,
+                fontWeight: selected ? "700" : "500",
+                color: selected ? "#fff" : colors.text,
+              }}
+            >
+              {chip.label}
+              {chip.count === null ? "" : ` (${chip.count})`}
+            </Text>
+          </Pressable>
+        );
+      })}
+    </ScrollView>
   );
 }
