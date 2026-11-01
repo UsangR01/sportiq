@@ -1262,6 +1262,8 @@ async def _bulk_best_picks(
                     frozen,
                     min_probability=min_probability,
                     min_odds=min_odds,
+                    market=market,
+                    line=line,
                 )
             else:
                 # A ROW FROM THE WINNER-ONLY VERSION, which recorded no candidate set. There is
@@ -1287,12 +1289,21 @@ async def _bulk_best_picks(
                 shown = None if chosen is None else _candidate_to_best_pick(chosen)
             if shown is not None:
                 best_picks[fixture_id] = shown
-                if with_market_counts:
-                    # A PUBLISHED CARD CANNOT CHANGE ITS PICK, so filtering to a market either
-                    # shows this one or shows nothing -- it cannot promote a different
-                    # candidate the way an upcoming card can. Counting the frozen winner's own
-                    # family is therefore the honest answer, not a shortcut.
-                    market_counts[shown.market] = market_counts.get(shown.market, 0) + 1
+            if with_market_counts:
+                # THE SAME SELECTION PER FAMILY, over the FROZEN list rather than today's.
+                # Counting the frozen winner's own family instead was wrong by 5 cards in
+                # production: a filter narrows the frozen candidates and can surface a
+                # DIFFERENT one of them, exactly as a slider can.
+                for family in MARKET_FAMILIES:
+                    in_family = apply_frozen(
+                        BestPick,
+                        frozen,
+                        min_probability=min_probability,
+                        min_odds=min_odds,
+                        market=family,
+                    )
+                    if in_family is not None:
+                        market_counts[family] = market_counts.get(family, 0) + 1
             continue
 
         best = _pick_best(

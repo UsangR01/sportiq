@@ -287,6 +287,8 @@ def apply_frozen(
     *,
     min_probability: float | None = None,
     min_odds: float | None = None,
+    market: str | None = None,
+    line: float | None = None,
 ):
     """The card this fixture showed, chosen from its FROZEN candidates against the caller's own
     sliders. None when nothing the user allows survived.
@@ -294,6 +296,16 @@ def apply_frozen(
     THE SLIDERS PICK AMONG CANDIDATES, THEY DO NOT VETO A WINNER, and getting that backwards is
     what broke the feed for a day: a frozen 1.02 favourite was simply deleted at a 1.20 floor
     instead of yielding to the goals line sitting behind it.
+
+    `market` NARROWS THE FROZEN CANDIDATE LIST, exactly as the sliders do, and leaving it out
+    was a real bug: the feed's market filter was applied to live candidates only, so a
+    past-kickoff card ignored it and showed its pick under every market. Measured in
+    production -- the chips reported 50 h2h picks while filtering returned 55.
+
+    It is the user's own control, like min_probability, so the same rule applies: it CHOOSES
+    AMONG the frozen candidates rather than vetoing the winner, and a card that drops out
+    under a filter is that filter working. It cannot invent a pick, because it can only ever
+    narrow a list fixed at kickoff.
 
     `pick_class` is passed in rather than imported so this module stays free of the schemas
     package -- the same cycle avoidance as above.
@@ -315,6 +327,9 @@ def apply_frozen(
                     as_of=frozen.prediction_created_at,
                 )
                 for c in frozen.candidates
+                if market is None
+                or market == "all"
+                or (c["market"] == market and (line is None or c["line"] == line))
             ],
             min_probability=min_probability,
             min_odds=min_odds,

@@ -79,3 +79,56 @@ async def test_the_counts_ignore_an_active_market_filter(api_client):
     # An unknown query param is ignored by FastAPI, which is the behaviour we want here:
     # the counts are identical either way.
     assert with_market.json() == plain.json()
+
+
+def test_a_frozen_card_honours_the_market_filter():
+    """THE BUG THE END-TO-END CHECK MISSED, and why this one is a unit test.
+
+    The feed applied `market` to LIVE candidates only. A past-kickoff card is served from its
+    frozen list instead, which was never filtered -- so it appeared under every market. The
+    cross-check above passed locally because the dev database had no frozen multi-market
+    fixtures; production disagreed by 5 cards (chips said 50 h2h, filtering returned 55).
+
+    The filter is the user's own control, like min_probability, so it CHOOSES AMONG the
+    frozen candidates rather than vetoing the winner -- it can narrow a list fixed at
+    kickoff, never invent a pick that was not in it.
+    """
+    from datetime import UTC, datetime
+
+    from app.fixtures.schemas import BestPick
+    from app.predictions.pick_freeze import apply_frozen
+
+    class _Frozen:
+        prediction_created_at = datetime(2026, 11, 1, tzinfo=UTC)
+        candidates = [
+            {
+                "selection": "home",
+                "probability": 0.71,
+                "odds": 1.6,
+                "market": "h2h",
+                "line": None,
+                "feature_completeness": 0.8,
+            },
+            {
+                "selection": "1X",
+                "probability": 0.88,
+                "odds": 1.2,
+                "market": "double_chance",
+                "line": None,
+                "feature_completeness": 0.8,
+            },
+        ]
+
+    frozen = _Frozen()
+
+    # Unfiltered, the better-value candidate wins -- whichever that is.
+    assert apply_frozen(BestPick, frozen) is not None
+
+    # Narrowed, each market returns ITS OWN candidate, not the overall winner.
+    h2h = apply_frozen(BestPick, frozen, market="h2h")
+    dc = apply_frozen(BestPick, frozen, market="double_chance")
+    assert h2h is not None and h2h.market == "h2h"
+    assert dc is not None and dc.market == "double_chance"
+
+    # A market this card never had returns nothing, rather than falling back to the winner.
+    assert apply_frozen(BestPick, frozen, market="corners_total") is None
