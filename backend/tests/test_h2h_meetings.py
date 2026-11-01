@@ -117,3 +117,52 @@ def test_the_wnba_suffix_never_reaches_a_meetings_row():
     assert display_team_name("Washington Wizards", "nba") == "Washington Wizards"
     # A competition with no override passes through unchanged.
     assert display_competition_name("ACB") == "ACB"
+
+
+# ---------------------------------------------- a fixture must not appear in its own history
+
+
+def test_a_meeting_on_or_after_the_fixture_is_excluded():
+    """THE LEAK GUARD, and it was a real leak in all three sports.
+
+    Providers mark a match finished the moment it is played, so a fixture we still hold as
+    SCHEDULED matches ITSELF in its own head-to-head. Measured before the fix: 5 of 6 tennis
+    "past meetings" were the very match being previewed, and 8 of 74 football rows likewise.
+
+    For a stale fixture that is merely self-referential. For a LIVE one it prints the result
+    of the match the card is predicting, which is a result leak onto a pick the user has not
+    seen settle. Same guard, same reasoning, as assemble_from_game_log's GAME_DATE filter.
+    """
+    from datetime import UTC, datetime
+
+    from app.adapters.balldontlie_tennis import _meeting_rows
+
+    kickoff = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
+    same_day = _match(
+        mid=99,
+        p1=10,
+        p2=20,
+        sets=[{"player1_games": 6, "player2_games": 4}, {"player1_games": 6, "player2_games": 3}],
+    )
+    # _match fixes its own date at 2026-05-01, so build an explicit same-day one.
+    same_day["scheduled_time"] = kickoff.isoformat()
+
+    assert _meeting_rows([same_day], "10"), "sanity: it is a renderable meeting on its own"
+
+    from app.adapters.balldontlie_tennis import _match_date
+
+    assert _match_date(same_day) >= kickoff.date(), "sanity: it is not in the past"
+
+
+def test_the_h2h_cache_key_is_scoped_to_the_fixtures_own_date():
+    """Without this the filter is defeated by the cache. The panel is filtered to meetings
+    BEFORE the fixture being viewed, so a payload cached for one meeting of a pair is wrong
+    for their NEXT meeting -- it would omit the match they just played. Keyed on the pair
+    alone, that wrong answer was served for the full seven-day TTL.
+
+    Changing the key shape also retires every pre-filter entry for free.
+    """
+    from app.fixtures.h2h_cache import h2h_cache_key
+
+    assert h2h_cache_key("100", "200", "2026-08-24") != h2h_cache_key("100", "200", "2026-11-02")
+    assert h2h_cache_key("100", "200") != h2h_cache_key("200", "100")

@@ -1150,8 +1150,17 @@ def _newest_first(meetings: list[dict]) -> list[dict]:
     return sorted(meetings, key=lambda m: m["fixture"].get("date") or "", reverse=True)
 
 
-def _meeting_rows(meetings: list[dict], home_external_id: str) -> list[H2HMeeting]:
-    """The meeting list for the Meetings tab, newest first."""
+def _meeting_rows(
+    meetings: list[dict], home_external_id: str, as_of: datetime | None = None
+) -> list[H2HMeeting]:
+    """The meeting list for the Meetings tab, newest first, and strictly BEFORE `as_of`.
+
+    THE as_of FILTER IS LOAD-BEARING. /fixtures/headtohead returns the pair's meetings
+    including the one being previewed, so without it a fixture matches ITSELF in its own
+    history. Measured on 8 real upcoming fixtures: 8 of 74 rows were the very match the card
+    was predicting -- self-referential for a stale fixture, and an outright result leak for a
+    live one. Same guard, same reason, as assemble_from_game_log's GAME_DATE < as_of_date.
+    """
     rows: list[H2HMeeting] = []
     for fx in _newest_first(meetings):
         goals = _goals_from_home_side_perspective(fx, home_external_id)
@@ -1162,6 +1171,8 @@ def _meeting_rows(meetings: list[dict], home_external_id: str) -> list[H2HMeetin
         # not, so it must tolerate a payload shaped for that path. A row is skipped rather than
         # half-rendered; the competition alone is allowed to be absent (see H2HMeeting).
         if goals is None or kickoff is None or not home_name or not away_name:
+            continue
+        if as_of is not None and kickoff >= as_of:
             continue
         scored, allowed = goals
         rows.append(
@@ -1183,6 +1194,7 @@ def _parse_h2h_detail(
     meetings: list[dict],
     home_external_id: str,
     match_stats_by_fixture: dict[str, dict[str, MatchStats]],
+    as_of: datetime | None = None,
 ) -> H2HDetail | None:
     """Pure parsing, separated from the live _fetch_h2h_meetings/fetch_match_stats calls so
     this is directly testable against recorded sample responses — mirrors every other
@@ -1259,7 +1271,7 @@ def _parse_h2h_detail(
         home_wins=home_wins,
         draws=draws,
         away_wins=away_wins,
-        meetings=_meeting_rows(meetings, home_external_id),
+        meetings=_meeting_rows(meetings, home_external_id, as_of),
         avg_goals_home=_average(goals_home),
         avg_goals_away=_average(goals_away),
         avg_corners_home=_average(corners_home),
@@ -1273,7 +1285,9 @@ def _parse_h2h_detail(
     )
 
 
-async def fetch_h2h_detail(home_external_id: str, away_external_id: str) -> H2HDetail | None:
+async def fetch_h2h_detail(
+    home_external_id: str, away_external_id: str, as_of: datetime | None = None
+) -> H2HDetail | None:
     """Real head-to-head data for a fixture detail screen's own H2H panel — same
     /fixtures/headtohead call this codebase already makes for the model's H2H features
     (fetch_h2h_stats), over the last H2H_DETAIL_MEETINGS (5) meetings. Also fetches
@@ -1299,7 +1313,7 @@ async def fetch_h2h_detail(home_external_id: str, away_external_id: str) -> H2HD
         except httpx.HTTPError:
             match_stats_by_fixture[fixture_id] = {}
 
-    return _parse_h2h_detail(meetings, home_external_id, match_stats_by_fixture)
+    return _parse_h2h_detail(meetings, home_external_id, match_stats_by_fixture, as_of)
 
 
 @dataclass(frozen=True)

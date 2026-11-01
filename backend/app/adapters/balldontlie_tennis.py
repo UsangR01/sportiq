@@ -995,8 +995,11 @@ WHOLE_MATCH_SET_NUMBER = 0
 H2H_PANEL_MEETINGS = 5
 
 
-async def fetch_h2h_panel(
-    home_external_id: str, away_external_id: str, league: str = "atp"
+async def fetch_h2h_panel(  # noqa: C901
+    home_external_id: str,
+    away_external_id: str,
+    league: str = "atp",
+    as_of: datetime | None = None,
 ) -> H2HPanel | None:
     """Head-to-head history for the fixture detail panel: the career record plus serve and
     return averages over their most recent meetings.
@@ -1018,21 +1021,28 @@ async def fetch_h2h_panel(
         headers={"Authorization": api_key},
         timeout=15.0,
     ) as client:
+        record: dict = {}
         try:
             response = await _get_with_retry(
                 client, "/head_to_head", {"player1_id": home_raw, "player2_id": away_raw}
             )
+            record = (response.json() or {}).get("data") or {}
         except httpx.HTTPStatusError as exc:
-            # A pair who have NEVER MET comes back 404, not an empty record -- confirmed live
-            # against two real upcoming ATP players. That is a normal answer for a first-time
-            # meeting, which is common in early rounds, so it must not surface as an error or
-            # be logged as one.
-            if exc.response is not None and exc.response.status_code == 404:
-                return None
-            raise
-        record = (response.json() or {}).get("data") or {}
+            # A 404 here does NOT mean the two have never met, which is what this code assumed
+            # and what made most tennis cards show no Meetings tab at all.
+            #
+            # MEASURED 2026-10-30. The endpoint answers fine for well-known pairs (Djokovic v
+            # Alcaraz 5-5, Sinner v Alcaraz 10-7) and 404s in BOTH directions for lower-ranked
+            # ones -- Struff v Hanfmann among them, who demonstrably have played: their meeting
+            # at the 2026 Swiss Indoors is sitting in the match history this adapter already
+            # fetches. Across 12 real upcoming fixtures only 2 had a record at all.
+            #
+            # So a 404 is treated as "this endpoint does not know", and the record is rebuilt
+            # from the match history below.
+            if exc.response is None or exc.response.status_code != 404:
+                raise
         if not record:
-            return None
+            return await _h2h_from_match_history(client, home_raw, away_raw, as_of)
         # The endpoint answers in ITS OWN player1/player2 order, which is not our home/away.
         # Reading the wins without checking which slot our home player landed in would invert
         # the record for roughly half of all fixtures -- the same class of error as trusting
@@ -1046,7 +1056,7 @@ async def fetch_h2h_panel(
         stats: list[H2HPanelStat] = []
         rows: list[H2HMeeting] = []
         try:
-            meetings = await _recent_meetings(client, home_raw, away_raw)
+            meetings = await _recent_meetings(client, home_raw, away_raw, as_of)
             stats = await _serve_return_averages(client, meetings, home_raw, away_raw)
             rows = _meeting_rows(meetings, home_raw)
         except httpx.HTTPError:
@@ -1059,6 +1069,46 @@ async def fetch_h2h_panel(
         # Tennis cannot draw -- structurally zero, not unmeasured.
         draws=0,
         away_wins=int(away_wins),
+        stats=stats,
+        meetings=rows,
+    )
+
+
+async def _h2h_from_match_history(
+    client, home_raw: str, away_raw: str, as_of: datetime | None = None
+) -> H2HPanel | None:
+    """The head-to-head rebuilt from the players' own match history.
+
+    THE FALLBACK WHEN /head_to_head 404s, which is the common case rather than the exception:
+    on 12 real upcoming ATP fixtures, 10 had no record from that endpoint while the meetings
+    themselves were reachable.
+
+    HONEST DIFFERENCE FROM THE ENDPOINT, and it is a real one rather than a quibble: that
+    endpoint returns a CAREER record, while this counts only the meetings inside the window
+    `_recent_meetings` searches (TENNIS_SEASONS_BACK seasons, capped at H2H_PANEL_MEETINGS).
+    So a pair with a long history will show fewer wins here than their true career record.
+
+    What it gains is CONSISTENCY: the record is derived from exactly the meetings listed
+    beneath it, so the two cannot disagree. Returns None -- never a zeroed record -- when no
+    meeting is found, which is the genuine never-met case.
+    """
+    try:
+        meetings = await _recent_meetings(client, home_raw, away_raw, as_of)
+    except httpx.HTTPError:
+        return None
+    rows = _meeting_rows(meetings, home_raw)
+    if not rows:
+        return None
+    home_wins = sum(1 for row in rows if row.result == "W")
+    try:
+        stats = await _serve_return_averages(client, meetings, home_raw, away_raw)
+    except httpx.HTTPError:
+        stats = []
+    return H2HPanel(
+        meetings_count=len(rows),
+        home_wins=home_wins,
+        draws=0,
+        away_wins=len(rows) - home_wins,
         stats=stats,
         meetings=rows,
     )
@@ -1134,15 +1184,29 @@ async def fetch_match_stat_panel(
         )
 
 
-async def _recent_meetings(client, home_raw: str, away_raw: str) -> list[dict]:
-    """Their most recent completed meetings, newest first."""
+async def _recent_meetings(
+    client, home_raw: str, away_raw: str, as_of: datetime | None = None
+) -> list[dict]:
+    """Their most recent completed meetings BEFORE `as_of`, newest first.
+
+    THE as_of FILTER IS NOT OPTIONAL IN PRACTICE, and leaving it out was a real bug: the
+    provider marks a match completed as soon as it is played, so a fixture we still hold as
+    SCHEDULED matches ITSELF in its own history. Measured on 6 real fixtures, 5 of the
+    "past meetings" shown were the very match being previewed.
+
+    For a stale fixture that is merely self-referential; for a live one it would print the
+    result of the match the card is predicting. Same guard, and same reason, as
+    assemble_from_game_log's GAME_DATE < as_of_date.
+    """
     current_season = _current_tennis_season()
     seasons = [current_season - i for i in range(TENNIS_SEASONS_BACK)]
     matches = await _fetch_matches_across_seasons(client, home_raw, seasons)
     meetings = [
         m
         for m in matches
-        if _match_completed(m) and str((_opponent(m, home_raw) or {}).get("id")) == str(away_raw)
+        if _match_completed(m)
+        and str((_opponent(m, home_raw) or {}).get("id")) == str(away_raw)
+        and (as_of is None or _match_date(m) < as_of.date())
     ]
     meetings.sort(key=lambda m: str(_match_date(m)), reverse=True)
     return meetings[:H2H_PANEL_MEETINGS]

@@ -43,11 +43,21 @@ logger = logging.getLogger(__name__)
 H2H_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
 
 
-def h2h_cache_key(home_external_id: str, away_external_id: str) -> str:
-    return f"h2h:detail:{home_external_id}:{away_external_id}"
+def h2h_cache_key(home_external_id: str, away_external_id: str, as_of: str = "") -> str:
+    """Keyed by the FIXTURE'S OWN DATE as well as the pair, and that is a correctness
+    requirement rather than a tuning choice.
+
+    The panel's meetings are filtered to those BEFORE the fixture being viewed, so a payload
+    cached for one meeting of a pair is wrong for their NEXT meeting -- it would omit the
+    match they just played, or, built by the pre-filter code, include the fixture itself.
+    Keying on the pair alone served exactly one of those answers for seven days.
+
+    It also retires every pre-filter entry for free, since the key shape changed.
+    """
+    return f"h2h:detail:{home_external_id}:{away_external_id}:{as_of}"
 
 
-async def get_cached_h2h(redis, home_external_id: str, away_external_id: str, cls):
+async def get_cached_h2h(redis, home_external_id: str, away_external_id: str, cls, as_of: str = ""):
     """Return a cached H2HDetail, or None to mean "go and fetch it".
 
     A cached NULL result is stored as the literal string "null" so that two teams who have
@@ -56,7 +66,7 @@ async def get_cached_h2h(redis, home_external_id: str, away_external_id: str, cl
     (hit, value) pair rather than just the value.
     """
     try:
-        raw = await redis.get(h2h_cache_key(home_external_id, away_external_id))
+        raw = await redis.get(h2h_cache_key(home_external_id, away_external_id, as_of))
     except Exception:
         # A Redis problem must never be visible to someone opening a fixture.
         logger.warning("H2H cache read failed; falling through to the live call", exc_info=True)
@@ -76,7 +86,9 @@ async def get_cached_h2h(redis, home_external_id: str, away_external_id: str, cl
         return False, None
 
 
-async def set_cached_h2h(redis, home_external_id: str, away_external_id: str, detail) -> None:
+async def set_cached_h2h(
+    redis, home_external_id: str, away_external_id: str, detail, as_of: str = ""
+) -> None:
     """Store a fetched panel, including a genuine 'these teams have never met' result."""
     # `default=str` because the payload now nests H2HMeeting rows carrying a datetime, which
     # json.dumps cannot serialise on its own. Note this line sits OUTSIDE the try below, so
@@ -86,7 +98,7 @@ async def set_cached_h2h(redis, home_external_id: str, away_external_id: str, de
     payload = "null" if detail is None else json.dumps(dataclasses.asdict(detail), default=str)
     try:
         await redis.set(
-            h2h_cache_key(home_external_id, away_external_id),
+            h2h_cache_key(home_external_id, away_external_id, as_of),
             payload,
             ex=H2H_CACHE_TTL_SECONDS,
         )

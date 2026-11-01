@@ -113,7 +113,10 @@ async def test_an_unresolvable_club_falls_back_rather_than_guessing(monkeypatch)
     monkeypatch.setattr(ab, "resolve_team_ids_by_name", only_one)
 
     result = await _basketball_head_to_head_by_name(
-        "nba", Team(name="Boston Celtics"), Team(name="Mystery Club")
+        "nba",
+        Team(name="Boston Celtics"),
+        Team(name="Mystery Club"),
+        datetime(2026, 11, 1, tzinfo=UTC),
     )
     assert result is None, "a half-resolved pairing must not produce a panel"
 

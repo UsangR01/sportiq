@@ -390,7 +390,10 @@ H2H_PANEL_MEETINGS = 5
 
 
 async def fetch_h2h_panel(
-    home_external_id: str, away_external_id: str, league: str = "nba"
+    home_external_id: str,
+    away_external_id: str,
+    league: str = "nba",
+    as_of: datetime | None = None,
 ) -> H2HPanel | None:
     """Head-to-head history for the fixture detail panel: record, plus average points scored
     and conceded per side over their last real meetings.
@@ -425,12 +428,26 @@ async def fetch_h2h_panel(
         home_side = str(g["home_team"]["id"]) == home_raw
         return str(g["visitor_team"]["id"]) if home_side else str(g["home_team"]["id"])
 
+    def before_kickoff(g: dict) -> bool:
+        """A PAST meeting must predate the fixture. The provider marks a game Final as soon as
+        it is played, so a fixture we still hold as SCHEDULED can match ITSELF in its own
+        history -- self-referential at best, and at worst printing the result of the very
+        match the card is predicting."""
+        if as_of is None:
+            return True
+        try:
+            played = datetime.fromisoformat(str(g["datetime"]).replace("Z", "+00:00"))
+        except (KeyError, ValueError):
+            return False
+        return played.astimezone(UTC) < as_of
+
     meetings = [
         g
         for g in games
         if g.get("status") == "Final"
         and opponent_id(g) == away_raw
         and g.get("home_team_score") is not None
+        and before_kickoff(g)
     ]
     if not meetings:
         return None

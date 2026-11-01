@@ -185,7 +185,9 @@ async def test_fetch_head_to_head_maps_real_detail_for_football(
 
     captured_ids = []
 
-    async def _fake_fetch(home_external_id, away_external_id):
+    # as_of is the fixture's own kickoff: the panel filters out meetings dated on or after
+    # it, so a fixture cannot appear in its own head-to-head.
+    async def _fake_fetch(home_external_id, away_external_id, as_of=None):
         captured_ids.append((home_external_id, away_external_id))
         return fake_detail
 
@@ -232,7 +234,9 @@ async def test_fetch_head_to_head_returns_none_when_adapter_has_no_real_meetings
     """Real teams that have simply never played each other before — a genuine, honest None,
     not a fabricated empty-but-present record."""
 
-    async def _fake_fetch(home_external_id, away_external_id):
+    # as_of is the fixture's own kickoff: the panel filters out meetings dated on or after
+    # it, so a fixture cannot appear in its own head-to-head.
+    async def _fake_fetch(home_external_id, away_external_id, as_of=None):
         return None
 
     monkeypatch.setattr("app.adapters.api_football.fetch_h2h_detail", _fake_fetch)

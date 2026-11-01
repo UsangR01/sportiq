@@ -1510,7 +1510,7 @@ async def _fetch_head_to_head(
     ).scalar_one_or_none()
 
     if sport_slug == "football":
-        return await _football_head_to_head(home_team, away_team)
+        return await _football_head_to_head(home_team, away_team, fixture.kickoff_utc)
     if sport_slug in ("nba", "tennis"):
         # BASKETBALL IS TWO PROVIDERS UNDER ONE SPORT. The NBA and WNBA come from BallDontLie;
         # the European competitions come from API-Basketball with "ab:"-prefixed ids that
@@ -1520,7 +1520,9 @@ async def _fetch_head_to_head(
         from app.adapters.api_basketball import BASKETBALL_LEAGUE_IDS
 
         if league_slug in BASKETBALL_LEAGUE_IDS:
-            return await _api_basketball_head_to_head(league_slug, home_team, away_team)
+            return await _api_basketball_head_to_head(
+                league_slug, home_team, away_team, fixture.kickoff_utc
+            )
         if sport_slug == "nba":
             # THE NBA AND WNBA GET THEIR BOX SCORES FROM THE OTHER PROVIDER TOO. BallDontLie's
             # /stats is 401 at every tier we hold, so through it this panel is one row -- the
@@ -1530,10 +1532,14 @@ async def _fetch_head_to_head(
             #
             # Falls through to BallDontLie when a club cannot be resolved, rather than
             # guessing: a wrong id returns a real, confident, WRONG head-to-head.
-            enriched = await _basketball_head_to_head_by_name(league_slug, home_team, away_team)
+            enriched = await _basketball_head_to_head_by_name(
+                league_slug, home_team, away_team, fixture.kickoff_utc
+            )
             if enriched is not None:
                 return enriched
-        return await _balldontlie_head_to_head(sport_slug, league_slug, home_team, away_team)
+        return await _balldontlie_head_to_head(
+            sport_slug, league_slug, home_team, away_team, fixture.kickoff_utc
+        )
     return None
 
 
@@ -1552,12 +1558,14 @@ def _meeting_rows(panel) -> list[MeetingRow]:
 
 
 async def _api_basketball_head_to_head(
-    league_slug: str, home_team: Team, away_team: Team
+    league_slug: str, home_team: Team, away_team: Team, kickoff: datetime
 ) -> HeadToHeadResponse | None:
     from app.adapters.api_basketball import fetch_h2h_panel
 
     try:
-        panel = await fetch_h2h_panel(home_team.external_id, away_team.external_id, league_slug)
+        panel = await fetch_h2h_panel(
+            home_team.external_id, away_team.external_id, league_slug, kickoff
+        )
     except httpx.HTTPError:
         logger.warning("H2H fetch failed for %s; rendering the fixture without it", league_slug)
         return None
@@ -1577,7 +1585,7 @@ async def _api_basketball_head_to_head(
 
 
 async def _basketball_head_to_head_by_name(
-    league_slug: str | None, home_team: Team, away_team: Team
+    league_slug: str | None, home_team: Team, away_team: Team, kickoff: datetime
 ) -> HeadToHeadResponse | None:
     """The richer basketball panel for leagues whose fixtures come from BallDontLie.
 
@@ -1599,6 +1607,7 @@ async def _basketball_head_to_head_by_name(
             f"{ID_PREFIX}{resolved[home_team.name]}",
             f"{ID_PREFIX}{resolved[away_team.name]}",
             league,
+            kickoff,
         )
     except httpx.HTTPError:
         return None
@@ -1618,7 +1627,7 @@ async def _basketball_head_to_head_by_name(
 
 
 async def _balldontlie_head_to_head(
-    sport_slug: str, league_slug: str | None, home_team: Team, away_team: Team
+    sport_slug: str, league_slug: str | None, home_team: Team, away_team: Team, kickoff: datetime
 ) -> HeadToHeadResponse | None:
     """Basketball and tennis both come from BallDontLie, through different namespaces and very
     different endpoints — hence one branch per sport rather than one shared call."""
@@ -1632,7 +1641,7 @@ async def _balldontlie_head_to_head(
         league = league_slug or "nba"
 
     try:
-        panel = await fetch_h2h_panel(home_team.external_id, away_team.external_id, league)
+        panel = await fetch_h2h_panel(home_team.external_id, away_team.external_id, league, kickoff)
     except httpx.HTTPError:
         # The panel is an enrichment; a rate limit or an outage must not fail the whole
         # fixture screen. BallDontLie's NBA tier is 5 req/min, so this is a live possibility.
@@ -1653,7 +1662,9 @@ async def _balldontlie_head_to_head(
     )
 
 
-async def _football_head_to_head(home_team: Team, away_team: Team) -> HeadToHeadResponse | None:
+async def _football_head_to_head(
+    home_team: Team, away_team: Team, kickoff: datetime
+) -> HeadToHeadResponse | None:
     from app.adapters.api_football import H2HDetail, fetch_h2h_detail
     from app.core.redis import get_redis
     from app.fixtures.h2h_cache import get_cached_h2h, set_cached_h2h
@@ -1661,19 +1672,22 @@ async def _football_head_to_head(home_team: Team, away_team: Team) -> HeadToHead
     # Cached because this panel cost up to SIX live API calls on EVERY view (2-3s measured),
     # for facts that do not change until these two teams next meet. See h2h_cache.py.
     redis = get_redis()
+    # The fixture's own date is part of the key: the panel is filtered to meetings BEFORE
+    # this fixture, so a payload cached for one meeting of a pair is wrong for their next.
+    as_of_key = kickoff.date().isoformat()
     hit, detail = await get_cached_h2h(
-        redis, home_team.external_id, away_team.external_id, H2HDetail
+        redis, home_team.external_id, away_team.external_id, H2HDetail, as_of_key
     )
     if not hit:
         try:
-            detail = await fetch_h2h_detail(home_team.external_id, away_team.external_id)
+            detail = await fetch_h2h_detail(home_team.external_id, away_team.external_id, kickoff)
         except httpx.HTTPError:
             # Quota exhaustion arrives here as APIFootballQuotaExceeded. The panel is an
             # enrichment; losing it must not fail the whole fixture screen, which is exactly
             # what happened when the daily allowance ran out.
             logger.warning("H2H fetch failed; rendering the fixture without the panel")
             return None
-        await set_cached_h2h(redis, home_team.external_id, away_team.external_id, detail)
+        await set_cached_h2h(redis, home_team.external_id, away_team.external_id, detail, as_of_key)
     if detail is None:
         return None
 

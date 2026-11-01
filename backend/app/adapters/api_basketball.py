@@ -862,7 +862,10 @@ async def fetch_match_box_score(game_id, home_provider_team_id: str) -> list[H2H
 
 
 async def fetch_h2h_panel(
-    home_external_id: str, away_external_id: str, league: str = "acb"
+    home_external_id: str,
+    away_external_id: str,
+    league: str = "acb",
+    as_of: datetime | None = None,
 ) -> H2HPanel | None:
     """The fixture-detail head-to-head panel for the European competitions.
 
@@ -887,6 +890,19 @@ async def fetch_h2h_panel(
     except httpx.HTTPError:
         logger.warning("API-Basketball h2h panel failed for %s", league, exc_info=True)
         return None
+    if as_of is not None:
+        # A PAST meeting must predate the fixture. The provider marks a game finished the
+        # moment it is played, so a fixture we still hold as SCHEDULED can match ITSELF in its
+        # own history -- self-referential at best, and at worst printing the result of the very
+        # match the card is predicting. Same guard as assemble_from_game_log's leakage filter.
+        kept = []
+        for game in meetings:
+            try:
+                if _kickoff(game) < as_of:
+                    kept.append(game)
+            except (KeyError, ValueError):
+                continue
+        meetings = kept
     meetings = meetings[:H2H_PANEL_MEETINGS]
     if not meetings:
         return None
