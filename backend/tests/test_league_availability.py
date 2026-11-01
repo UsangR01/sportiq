@@ -51,7 +51,10 @@ def test_the_feed_hides_only_undecided_fixtures_of_a_suppressed_league():
     source = (Path(__file__).resolve().parents[1] / "app" / "fixtures" / "router.py").read_text(
         encoding="utf-8"
     )
-    listing = source[source.index("async def list_fixtures") :]
+    # The filters moved into _apply_feed_filters when the market-count chips arrived: the
+    # counts endpoint must select the SAME rows as the feed, and a second copy of these
+    # clauses would drift the first time a suppression rule changed.
+    listing = source[source.index("def _apply_feed_filters") :]
     guard = listing[listing.index("SUPPRESSED_LEAGUES") : listing.index("if sport_slug:")]
     assert "or_(" in guard, "the suppression filter must not be unconditional"
     assert "FixtureStatus.COMPLETED" in guard, "settled fixtures must be exempt from hiding"
@@ -65,7 +68,10 @@ def test_an_explicit_league_request_still_serves_a_suppressed_league():
     source = (Path(__file__).resolve().parents[1] / "app" / "fixtures" / "router.py").read_text(
         encoding="utf-8"
     )
-    listing = source[source.index("async def list_fixtures") :]
+    # The filters moved into _apply_feed_filters when the market-count chips arrived: the
+    # counts endpoint must select the SAME rows as the feed, and a second copy of these
+    # clauses would drift the first time a suppression rule changed.
+    listing = source[source.index("def _apply_feed_filters") :]
     guard_line = listing[listing.index("if not league_slug and SUPPRESSED_LEAGUES") :][:120]
     assert "not league_slug" in guard_line
 
@@ -123,7 +129,10 @@ def test_the_history_hiding_filter_is_unconditional_on_status():
     source = (Path(__file__).resolve().parents[1] / "app" / "fixtures" / "router.py").read_text(
         encoding="utf-8"
     )
-    listing = source[source.index("async def list_fixtures") :]
+    # The filters moved into _apply_feed_filters when the market-count chips arrived: the
+    # counts endpoint must select the SAME rows as the feed, and a second copy of these
+    # clauses would drift the first time a suppression rule changed.
+    listing = source[source.index("def _apply_feed_filters") :]
     start = listing.index("if not league_slug and SUPPRESSED_LEAGUES_INCLUDING_HISTORY:")
     guard = listing[start : listing.index("if sport_slug:", start)]
     assert "not_in" in guard

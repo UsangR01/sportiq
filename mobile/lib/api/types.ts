@@ -258,6 +258,12 @@ export interface StandingRowResponse {
   group: string | null;
 }
 
+/** Per-market counts for the feed's filter chips. */
+export interface MarketCountsResponse {
+  total: number;
+  counts: Record<string, number>;
+}
+
 export interface StandingsResponse {
   league_slug: string;
   league_name: string;

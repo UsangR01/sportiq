@@ -2,6 +2,11 @@ import { create } from "zustand";
 
 import { getItem, setItem } from "@/lib/storage";
 
+/** The market families the feed can be filtered to. Grouped rather than per selection:
+ *  users think in one question ("show me match-result picks"), and splitting h2h into
+ *  Home/Draw/Away would offer a Draw chip that can never return anything. */
+export type MarketFamily = "h2h" | "double_chance" | "goals_total" | "corners_total";
+
 /** Picks-screen state (design spec §9.1).
  *
  * In a store rather than screen state because three surfaces read the same values: the feed,
@@ -54,6 +59,10 @@ interface PicksState {
   segment: Segment;
   minProbability: number;
   minOdds: number;
+  /** null = every market, which stays the default. The chips were removed once as clutter
+   *  and came back only with counts attached, so a market can be seen to be empty before
+   *  it is tapped. */
+  market: MarketFamily | null;
   /** null = every country. */
   country: string | null;
   /** League NAMES, matching what the group header displays. */
@@ -74,6 +83,7 @@ interface PicksState {
   setSegment: (segment: Segment) => void;
   setMinProbability: (value: number) => void;
   setMinOdds: (value: number) => void;
+  setMarket: (value: MarketFamily | null) => void;
   setCountry: (country: string | null) => void;
   toggleFavourite: (league: string) => void;
   setOnlyFavourites: (value: boolean) => void;
@@ -116,6 +126,7 @@ const FILTER_DEFAULTS = {
   segment: "All" as Segment,
   minProbability: DEFAULT_MIN_PROBABILITY,
   minOdds: DEFAULT_MIN_ODDS,
+  market: null,
   country: null as string | null,
   onlyFavourites: false,
 };
@@ -186,6 +197,7 @@ export const usePicksStore = create<PicksState>((set, get) => ({
   },
   setSegment: (segment) => set({ segment }),
   setMinProbability: (minProbability) => set({ minProbability }),
+  setMarket: (market) => set({ market }),
   setMinOdds: (minOdds) => set({ minOdds }),
   setCountry: (country) => set({ country }),
   setOnlyFavourites: (onlyFavourites) => set({ onlyFavourites }),
@@ -234,6 +246,7 @@ export function hasActiveFilters(state: PicksState): boolean {
     state.segment !== FILTER_DEFAULTS.segment ||
     state.minProbability !== FILTER_DEFAULTS.minProbability ||
     state.minOdds !== FILTER_DEFAULTS.minOdds ||
+    state.market !== FILTER_DEFAULTS.market ||
     state.country !== FILTER_DEFAULTS.country ||
     state.onlyFavourites !== FILTER_DEFAULTS.onlyFavourites
   );
