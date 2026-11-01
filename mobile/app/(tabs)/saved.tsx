@@ -1,12 +1,21 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { router } from "expo-router";
 import { useState } from "react";
-import { ActivityIndicator, Pressable, RefreshControl, ScrollView, Text, View } from "react-native";
+import {
+  ActivityIndicator,
+  Alert,
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  Text,
+  View,
+} from "react-native";
 
 import { AdSlot, MIN_SAVED_FOR_AD, useAdsEnabled } from "@/lib/ads";
 import type { WatchlistItem } from "@/lib/api/types";
 import { getPreferences } from "@/lib/api/users";
-import { listWatchlist, removeFromWatchlist } from "@/lib/api/watchlist";
+import { clearWatchlist, listWatchlist, removeFromWatchlist } from "@/lib/api/watchlist";
+import { SPORT_TABS } from "@/components/picks/SportTabs";
 import { formatOdds, toOddsFormat, type OddsFormat } from "@/lib/oddsFormat";
 import { pickHeadline } from "@/lib/pickFormat";
 import {
@@ -61,13 +70,40 @@ export default function SavedScreen() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["watchlist"] }),
   });
 
+  const clearMutation = useMutation({
+    mutationFn: clearWatchlist,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["watchlist"] }),
+  });
+
   const items = watchlistQuery.data ?? [];
   const adsEnabled = useAdsEnabled();
   // Upcoming first: a saved list answers "what am I waiting on". Finished ones are KEPT rather
   // than hidden — hiding settled cards would quietly delete the losses, which is the same bias
   // that makes a retroactively filtered track record look better than it was.
-  const upcoming = items.filter((item) => item.status !== "completed");
-  const finished = items.filter((item) => item.status === "completed");
+  // GROUPED BY SPORT FIRST, then Upcoming/Finished within each. The sport is the outer level
+  // because that is how the ask was framed and how the rest of the app is organised (the tab
+  // row is sports); the Upcoming/Finished split is kept INSIDE rather than replaced, because
+  // a saved list answers "what am I waiting on" and finished picks are deliberately retained
+  // -- hiding settled cards would quietly delete the losses.
+  //
+  // SPORT_TABS drives the order, so Saved and the Picks tab agree, and a sport the app does
+  // not know about still appears (appended) rather than silently vanishing from the list.
+  const bySport = SPORT_TABS.map((tab) => tab.slug)
+    .concat(
+      Array.from(new Set(items.map((item) => item.sport_slug))).filter(
+        (slug) => !SPORT_TABS.some((tab) => tab.slug === slug),
+      ),
+    )
+    .map((slug) => {
+      const mine = items.filter((item) => item.sport_slug === slug);
+      return {
+        slug,
+        label: SPORT_TABS.find((tab) => tab.slug === slug)?.label ?? slug,
+        upcoming: mine.filter((item) => item.status !== "completed"),
+        finished: mine.filter((item) => item.status === "completed"),
+      };
+    })
+    .filter((group) => group.upcoming.length + group.finished.length > 0);
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.bg }}>
@@ -84,7 +120,35 @@ export default function SavedScreen() {
           SportPIQ
         </Text>
         {accessToken && items.length > 0 && (
-          <Text style={[TYPE.caption, { color: colors.textFaint }]}>{items.length} saved</Text>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+            <Text style={[TYPE.caption, { color: colors.textFaint }]}>{items.length} saved</Text>
+            {/* CONFIRMED FIRST, because this is irreversible: a saved pick is a RECEIPT of
+                what the card showed when it was saved, and nothing can reconstruct one after
+                it is gone -- best_pick is recomputed per request and never stored. */}
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Clear all saved picks"
+              disabled={clearMutation.isPending}
+              onPress={() =>
+                Alert.alert(
+                  "Clear all saved picks?",
+                  `This removes all ${items.length} saved picks, including finished ones. It cannot be undone.`,
+                  [
+                    { text: "Cancel", style: "cancel" },
+                    {
+                      text: "Clear all",
+                      style: "destructive",
+                      onPress: () => clearMutation.mutate(),
+                    },
+                  ],
+                )
+              }
+            >
+              <Text style={[TYPE.caption, { color: colors.fail }]}>
+                {clearMutation.isPending ? "Clearing…" : "Clear all"}
+              </Text>
+            </Pressable>
+          </View>
         )}
       </View>
 
@@ -145,36 +209,51 @@ export default function SavedScreen() {
             />
           }
         >
-          {upcoming.length > 0 && (
-            <Section label="Upcoming">
-              {upcoming.map((item) => (
-                <SavedCard
-                  key={item.fixture_id}
-                  item={item}
-                  oddsFormat={oddsFormat}
-                  onRemove={() => removeMutation.mutate(item.fixture_id)}
-                  removing={
-                    removeMutation.isPending && removeMutation.variables === item.fixture_id
-                  }
-                />
-              ))}
-            </Section>
-          )}
-          {finished.length > 0 && (
-            <Section label="Finished">
-              {finished.map((item) => (
-                <SavedCard
-                  key={item.fixture_id}
-                  item={item}
-                  oddsFormat={oddsFormat}
-                  onRemove={() => removeMutation.mutate(item.fixture_id)}
-                  removing={
-                    removeMutation.isPending && removeMutation.variables === item.fixture_id
-                  }
-                />
-              ))}
-            </Section>
-          )}
+          {bySport.map((group) => (
+            <View key={group.slug} style={{ marginBottom: GAP.leagueGroup }}>
+              <Text
+                style={[
+                  TYPE.eyebrow,
+                  { color: colors.textSub, marginTop: GAP.card, marginBottom: 4 },
+                ]}
+              >
+                {group.label}
+              </Text>
+              {/* The Upcoming/Finished split survives INSIDE each sport. A heading is only
+                  rendered when the other half also has rows -- a sport with nothing finished
+                  does not need to be told its picks are upcoming. */}
+              {group.upcoming.length > 0 && (
+                <Section label={group.finished.length > 0 ? "Upcoming" : undefined}>
+                  {group.upcoming.map((item) => (
+                    <SavedCard
+                      key={item.fixture_id}
+                      item={item}
+                      oddsFormat={oddsFormat}
+                      onRemove={() => removeMutation.mutate(item.fixture_id)}
+                      removing={
+                        removeMutation.isPending && removeMutation.variables === item.fixture_id
+                      }
+                    />
+                  ))}
+                </Section>
+              )}
+              {group.finished.length > 0 && (
+                <Section label={group.upcoming.length > 0 ? "Finished" : undefined}>
+                  {group.finished.map((item) => (
+                    <SavedCard
+                      key={item.fixture_id}
+                      item={item}
+                      oddsFormat={oddsFormat}
+                      onRemove={() => removeMutation.mutate(item.fixture_id)}
+                      removing={
+                        removeMutation.isPending && removeMutation.variables === item.fixture_id
+                      }
+                    />
+                  ))}
+                </Section>
+              )}
+            </View>
+          ))}
 
           {/* Only once the list is worth interrupting. Below three saved picks the unit
               collapses rather than padding a near-empty screen — and it sits AFTER both
@@ -206,13 +285,18 @@ function Centered({ children }: { children: React.ReactNode }) {
   );
 }
 
-function Section({ label, children }: { label: string; children: React.ReactNode }) {
+/** `label` is optional now that sport is the outer grouping: inside a sport that has only
+ *  upcoming picks, an "Upcoming" heading says nothing the absence of a "Finished" one does
+ *  not already say, and two stacked headings for one short list reads as clutter. */
+function Section({ label, children }: { label?: string; children: React.ReactNode }) {
   const { colors } = useTheme();
   return (
-    <View style={{ marginBottom: GAP.leagueGroup }}>
-      <Text style={[TYPE.eyebrow, { color: colors.textFaint, marginBottom: 9, marginTop: 4 }]}>
-        {label}
-      </Text>
+    <View style={{ marginBottom: label ? GAP.leagueGroup : 0 }}>
+      {label && (
+        <Text style={[TYPE.eyebrow, { color: colors.textFaint, marginBottom: 9, marginTop: 4 }]}>
+          {label}
+        </Text>
+      )}
       {children}
     </View>
   );

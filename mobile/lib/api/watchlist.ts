@@ -39,3 +39,12 @@ export function addToWatchlist(fixtureId: string, shown?: BestPick | null): Prom
 export function removeFromWatchlist(fixtureId: string): Promise<void> {
   return apiFetch<void>(`/user/watchlist/${fixtureId}`, { method: "DELETE" });
 }
+
+/** Removes EVERY saved pick in ONE request.
+ *
+ *  Looping the per-fixture delete would be N round trips that can fail halfway and leave a
+ *  half-cleared screen with no way to tell what happened -- and at ~13s a request on the
+ *  current backend, a thirty-item list would take minutes. */
+export function clearWatchlist(): Promise<void> {
+  return apiFetch<void>("/user/watchlist", { method: "DELETE" });
+}

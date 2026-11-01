@@ -468,3 +468,54 @@ async def test_an_impossible_price_is_rejected_rather_than_stored(api_client):
         headers=auth,
     )
     assert response.status_code == 422
+
+
+async def test_clear_all_removes_every_saved_pick_in_one_request(api_client):
+    """ONE REQUEST RATHER THAN N, which is why this endpoint exists at all.
+
+    The client could loop the per-fixture delete, but a thirty-item list would then be thirty
+    round trips that can fail halfway and leave the user looking at a half-cleared screen
+    with no way to tell what happened.
+    """
+    token = await _register(api_client)
+    auth = {"Authorization": f"Bearer {token}"}
+    first, second = await _seed_fixture(), await _seed_fixture()
+
+    for fixture_id in (first, second):
+        assert (
+            await api_client.post(
+                "/user/watchlist", json={"fixture_id": str(fixture_id)}, headers=auth
+            )
+        ).status_code == 204
+    assert len((await api_client.get("/user/watchlist", headers=auth)).json()) == 2
+
+    assert (await api_client.delete("/user/watchlist", headers=auth)).status_code == 204
+    assert (await api_client.get("/user/watchlist", headers=auth)).json() == []
+
+
+async def test_clearing_an_empty_list_is_not_an_error(api_client):
+    """Idempotent, like its single-fixture sibling: the client never has to reconcile which
+    state it thought it was in before pressing the button."""
+    token = await _register(api_client)
+    auth = {"Authorization": f"Bearer {token}"}
+
+    assert (await api_client.delete("/user/watchlist", headers=auth)).status_code == 204
+    assert (await api_client.delete("/user/watchlist", headers=auth)).status_code == 204
+
+
+async def test_clear_all_touches_only_the_caller(api_client):
+    """THE ONE THAT WOULD BE UNRECOVERABLE IF WRONG. A missing user_id filter on a bulk delete
+    empties every user's saved picks, and nothing in the response would look different."""
+    mine = await _register(api_client)
+    theirs = await _register(api_client)
+    my_auth = {"Authorization": f"Bearer {mine}"}
+    their_auth = {"Authorization": f"Bearer {theirs}"}
+    fixture_id = await _seed_fixture()
+
+    for auth in (my_auth, their_auth):
+        await api_client.post("/user/watchlist", json={"fixture_id": str(fixture_id)}, headers=auth)
+
+    assert (await api_client.delete("/user/watchlist", headers=my_auth)).status_code == 204
+
+    assert (await api_client.get("/user/watchlist", headers=my_auth)).json() == []
+    assert len((await api_client.get("/user/watchlist", headers=their_auth)).json()) == 1

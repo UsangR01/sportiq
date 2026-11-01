@@ -275,6 +275,28 @@ async def add_to_watchlist(
         logger.exception("Could not queue kickoff reminder for fixture %s", body.fixture_id)
 
 
+@router.delete("/user/watchlist", status_code=status.HTTP_204_NO_CONTENT)
+async def clear_watchlist(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Removes EVERY saved fixture for this user.
+
+    ONE REQUEST RATHER THAN N, which is the whole reason it exists: the client could loop the
+    per-fixture delete, but a 30-item list would then be 30 round trips that can fail halfway
+    and leave the user looking at a half-cleared screen with no way to tell what happened.
+
+    Idempotent like its single-fixture sibling -- clearing an empty list is a 204, not a 404,
+    so the client never has to reconcile which state it thought it was in.
+
+    DELIBERATELY NOT SCOPED to upcoming-only. A saved finished pick is a receipt the user
+    chose to keep, and deciding on their behalf which half of their own list "clear all"
+    means is worse than clearing what the button says.
+    """
+    await db.execute(delete(WatchlistItem).where(WatchlistItem.user_id == user.id))
+    await db.commit()
+
+
 @router.delete("/user/watchlist/{fixture_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def remove_from_watchlist(
     fixture_id: uuid.UUID,
