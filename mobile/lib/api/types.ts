@@ -262,6 +262,9 @@ export interface StandingRowResponse {
 export interface MarketCountsResponse {
   total: number;
   counts: Record<string, number>;
+  /** The line each totals chip stands for. Served rather than hardcoded so the client asks
+   *  for the line that was actually counted. */
+  lines: Record<string, number>;
 }
 
 export interface StandingsResponse {

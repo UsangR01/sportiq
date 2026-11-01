@@ -333,6 +333,10 @@ class MarketCountsResponse(BaseModel):
 
     total: int
     counts: dict[str, int] = {}
+    # The line each totals chip stands for, so the client requests the one that was COUNTED.
+    # Returned rather than hardcoded on both sides: the client having its own copy is how the
+    # first version drifted, counting every goals line while tapping it asked for only 2.5.
+    lines: dict[str, float] = {}
 
 
 class StandingsResponse(BaseModel):

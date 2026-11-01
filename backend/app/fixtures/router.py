@@ -797,6 +797,15 @@ NO_DEMONSTRATED_SIGNAL_MARKETS = frozenset({"corners_total"})
 # have ever reached a card.
 MARKET_FAMILIES: tuple[str, ...] = ("h2h", "double_chance", "goals_total", "corners_total")
 
+# The line a FAMILY chip stands for, for the two totals markets. The server owns these and
+# returns them with the counts, because the client having its own copy is exactly how the
+# first version drifted: the chip counted every goals line (49) while tapping it requested
+# only 2.5 (43). A chip that overstates is worse than no chip.
+#
+# 2.5 goals and 9.5 corners are the standard, most-traded lines this project already models
+# and prices against.
+MARKET_CHIP_LINES: dict[str, float] = {"goals_total": 2.5, "corners_total": 9.5}
+
 
 def _surviving_candidates(
     candidates: list, *, sport_slug: str | None = None, is_settled: bool = False
@@ -1301,6 +1310,7 @@ async def _bulk_best_picks(
                         min_probability=min_probability,
                         min_odds=min_odds,
                         market=family,
+                        line=MARKET_CHIP_LINES.get(family),
                     )
                     if in_family is not None:
                         market_counts[family] = market_counts.get(family, 0) + 1
@@ -1327,7 +1337,12 @@ async def _bulk_best_picks(
             # `best`'s own market: an upcoming card filtered to goals shows its best GOALS
             # pick, which is usually not the pick that won overall.
             for family in MARKET_FAMILIES:
-                in_family = [c for c in guarded if c.market == family]
+                chip_line = MARKET_CHIP_LINES.get(family)
+                in_family = [
+                    c
+                    for c in guarded
+                    if c.market == family and (chip_line is None or c.line == chip_line)
+                ]
                 if not in_family:
                     continue
                 chosen = _rank_survivors(
@@ -2135,6 +2150,7 @@ async def get_market_counts(
     return MarketCountsResponse(
         total=len(fixture_ids),
         counts={family: counts.get(family, 0) for family in MARKET_FAMILIES},
+        lines=MARKET_CHIP_LINES,
     )
 
 

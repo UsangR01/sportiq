@@ -57,11 +57,14 @@ async def test_the_count_equals_what_filtering_actually_returns(api_client):
     counts = (await api_client.get("/fixtures/market-counts?limit=200")).json()
     assert "total" in counts and "counts" in counts
 
-    default_line = {"goals_total": 2.5, "corners_total": 9.5}
+    # THE SERVER'S OWN LINES, not a copy. Using a local dict here is what let the first
+    # version pass while production disagreed: the count tallied every goals line (49) and
+    # tapping the chip asked for 2.5 (43).
+    lines = counts["lines"]
     for family, expected in counts["counts"].items():
         query = f"/fixtures?limit=200&market={family}"
-        if family in default_line:
-            query += f"&line={default_line[family]}"
+        if family in lines:
+            query += f"&line={lines[family]}"
         feed = (await api_client.get(query)).json()
         actual = sum(1 for fixture in feed if fixture.get("best_pick"))
         assert actual == expected, (

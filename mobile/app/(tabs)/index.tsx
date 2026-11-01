@@ -108,13 +108,6 @@ function groupFixtures(fixtures: FixtureSummary[]): LeagueGroup[] {
   return out;
 }
 
-/** The most-traded line per totals market, so a family chip needs no second selector.
- *  Goals 2.5 and corners 9.5 are the standard lines this project already models against. */
-const DEFAULT_LINE_FOR_MARKET: Record<string, number | undefined> = {
-  goals_total: 2.5,
-  corners_total: 9.5,
-};
-
 /** Chip labels, in display order. Keys match the server's MARKET_FAMILIES. */
 const MARKET_CHIPS: { key: MarketFamily; label: string }[] = [
   { key: "h2h", label: "1X2" },
@@ -184,7 +177,9 @@ export default function PicksScreen() {
         // The totals markets require a line server-side. The chip is a FAMILY, so it picks
         // the market's own most-traded line rather than asking the user for one -- another
         // selector is the clutter that got the first version of these chips removed.
-        line: DEFAULT_LINE_FOR_MARKET[store.market ?? ""],
+        // THE SERVER'S OWN LINE, from the counts response. Keeping a copy here is what made
+        // the chip overstate: it counted every goals line while tapping it asked for 2.5.
+        line: store.market ? marketCountsQuery.data?.lines?.[store.market] : undefined,
       });
     },
   });
