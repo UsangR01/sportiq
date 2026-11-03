@@ -86,6 +86,15 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        # `allow_headers` governs the REQUEST; a browser hides every non-safelisted RESPONSE
+        # header from JavaScript unless it is named here. /fixtures carries its market-chip
+        # counts in X-Market-Counts -- a header rather than an envelope, because that route
+        # returns a bare list -- so without this the web target silently got `null` counts and
+        # fell back to showing every chip with no number on it.
+        #
+        # Native builds are not subject to CORS at all, which is exactly why this went unseen:
+        # the chips have always worked on Android and have never worked on web.
+        expose_headers=["X-Market-Counts"],
     )
 
     @app.get("/health")

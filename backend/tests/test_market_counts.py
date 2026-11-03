@@ -6,6 +6,8 @@ one carries a count, so "Corners (0)" tells a user not to tap it. A count that d
 what tapping returns would be worse than no chip at all.
 """
 
+import json
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -283,3 +285,43 @@ def test_the_counted_list_is_snapshotted_below_every_gate_a_chip_tap_obeys():
             f"{default_only!r} only bars a market from winning the DEFAULT ranking, so it must "
             "NOT narrow the counted list -- tapping a chip is an explicit request"
         )
+
+
+@pytest.mark.asyncio
+async def test_the_counts_header_is_readable_from_a_browser(api_client):
+    """A BROWSER HIDES IT OTHERWISE, and that is not theoretical -- it is why the chips have
+    always worked on Android and have never worked on web.
+
+    X-Market-Counts is not a CORS-safelisted response header, so without an explicit
+    Access-Control-Expose-Headers the web target's `headers.get("x-market-counts")` returns
+    null, the counts come back undefined, and the row falls back to every chip with no number.
+    Caught by screenshotting the web feed after the per-sport work, not by any API check --
+    the header was present and correct in curl the whole time.
+    """
+    response = await api_client.get(
+        "/fixtures?limit=1", headers={"Origin": "http://localhost:8081"}
+    )
+    exposed = response.headers.get("access-control-expose-headers", "")
+    assert (
+        "x-market-counts" in exposed.lower()
+    ), "the chips' counts ride in this header; a browser cannot read it unless CORS says so"
+
+
+@pytest.mark.asyncio
+async def test_a_day_with_no_fixtures_is_an_empty_feed_not_a_500(api_client):
+    """FOUND AS A LIVE PRODUCTION 500, while testing the CORS header above.
+
+    _bulk_best_picks returned a 2-tuple whatever flags it was given, while list_fixtures always
+    asks for counts and unpacks three -- so any date with no fixtures raised
+    "not enough values to unpack". Reachable by stepping the date strip onto an empty day.
+    Confirmed against production before fixing: GET /fixtures for 2027-06-01 returned HTTP 500.
+    """
+    response = await api_client.get(
+        "/fixtures?date_from=2099-06-01T00:00:00Z&date_to=2099-06-01T23:59:59Z&limit=200"
+    )
+    assert response.status_code == 200
+    assert response.json() == []
+    counts = json.loads(response.headers["x-market-counts"])
+    # An empty day still says which chips each sport should be offered -- applicability is a
+    # property of the sport, not of the day.
+    assert counts["applicable_by_sport"]["nba"] == ["h2h"]

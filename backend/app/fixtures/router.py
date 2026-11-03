@@ -1144,7 +1144,17 @@ async def _bulk_best_picks(
     per the user's explicit ask: "I need all markets predicted in the past to still be
     shown... Over and Under, double chances, corners. Everything should be shown."."""
     if not fixture_ids:
-        return {}, {}
+        # THE SHAPE HAS TO MATCH THE FLAGS, and it did not: this returned a 2-tuple whatever was
+        # asked for, so list_fixtures -- which always asks for counts -- raised
+        # "not enough values to unpack" on any day with no fixtures. A live HTTP 500 in
+        # production, reachable by stepping the date strip onto an empty day, found while
+        # testing something else entirely.
+        empty: tuple = ({}, {})
+        if with_survivors:
+            empty += ({},)
+        if with_market_counts:
+            empty += ({},)
+        return empty
 
     odds_rows = (
         (await db.execute(select(Odds).where(Odds.fixture_id.in_(fixture_ids)))).scalars().all()
