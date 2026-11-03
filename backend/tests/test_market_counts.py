@@ -240,3 +240,46 @@ async def test_the_breakdown_a_sport_filter_reports_matches_that_sport_alone(api
                 f"{sport}/{family}: breakdown says {count}, narrowing says "
                 f"{narrowed['counts'].get(family, 0)}"
             )
+
+
+def test_the_counted_list_is_snapshotted_below_every_gate_a_chip_tap_obeys():
+    """THE ORDER OF TWO STATEMENTS, which is the whole of a bug production found on 2026-11-03.
+
+    A chip's count is taken from `unfiltered_candidates`, deliberately above the market filter
+    so the chips can describe the markets you are NOT looking at. It was also above three gates
+    that apply to an explicit request as well -- offers_corners, corner_selection_is_publishable
+    and the operator override -- so the corners chip counted picks that tapping it then
+    rejected: 6 promised, 2 delivered, measured on that day's real football card.
+
+    A SOURCE-ORDER TEST BECAUSE THE BUG IS SOURCE ORDER, and because the end-to-end cross-check
+    above cannot see it: the dev database holds no priced football fixtures, the same blind spot
+    that hid the frozen-card bug recorded earlier in this file. This fails the moment anyone
+    moves the snapshot back up.
+    """
+    import inspect
+
+    from app.fixtures.router import _bulk_best_picks
+
+    source = inspect.getsource(_bulk_best_picks)
+    snapshot = source.index("unfiltered_candidates = candidates")
+
+    for gate in (
+        "if not offers_corners(",
+        "corner_selection_is_publishable(c.selection, c.line)",
+        "operator_suppressed = suppressed_markets_for(",
+    ):
+        assert source.index(gate) < snapshot, (
+            f"{gate!r} applies to an explicit market request, so it must narrow the list "
+            "BEFORE the counts are taken from it -- otherwise the chip overstates"
+        )
+
+    # The CODE, not the bare name: both gates above mention NO_DEMONSTRATED_SIGNAL_MARKETS in
+    # their own comments, and matching that found a comment rather than a statement.
+    for default_only in (
+        "c.market not in NO_DEMONSTRATED_SIGNAL_MARKETS",
+        "if not offers_goals(",
+    ):
+        assert source.index(default_only) > snapshot, (
+            f"{default_only!r} only bars a market from winning the DEFAULT ranking, so it must "
+            "NOT narrow the counted list -- tapping a chip is an explicit request"
+        )

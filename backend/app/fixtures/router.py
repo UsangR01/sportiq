@@ -1269,38 +1269,6 @@ async def _bulk_best_picks(
         ]
         all_picks[fixture_id] = [_candidate_to_best_pick(c) for c in candidates]
 
-        # BEFORE the market filter, deliberately: the counts exist to say what the markets the
-        # user is NOT looking at contain, so computing them after would zero every chip but
-        # the selected one.
-        unfiltered_candidates = candidates
-        if market and market != "all":
-            candidates = [
-                c for c in candidates if c.market == market and (line is None or c.line == line)
-            ]
-        else:
-            # Only when no market was explicitly asked for. A caller naming goals_total wants
-            # goals_total; what is barred is it winning the DEFAULT cross-market ranking.
-            #
-            # DELIBERATELY still applied to settled fixtures, unlike the guards in _pick_best,
-            # and this was tried the other way first. Lifting it for settled fixtures put goals
-            # under-4.5 at 1.18 on the reported Hearts v Dundee Utd card in place of the
-            # corners pick the user actually saw — rewriting the past by ADDING rather than
-            # removing. The distinction that matters: the guards in _pick_best DELETE a
-            # fixture's pick outright, while this one only decides which market wins the
-            # headline, and it decides that the same way on every day at once.
-            #
-            candidates = [c for c in candidates if c.market not in NO_DEMONSTRATED_SIGNAL_MARKETS]
-
-            # DECOUPLED FROM THE BAR ABOVE, deliberately. This used to wrap it — the bar only
-            # applied where offers_goals said no — which was right while the set held goals and
-            # would be a silent bug now that it holds corners: a league cleared for goals would
-            # have had its CORNERS pick let through as well.
-            #
-            # goals_availability.py flipped polarity on the same evidence and is now open by
-            # default, so this excludes only a league whose own live signal has been revoked.
-            if not offers_goals(league_by_fixture.get(fixture_id)):
-                candidates = [c for c in candidates if c.market != "goals_total"]
-
         # A corners pick in a league that cannot settle corners at full time sits GREY through
         # the whole window users open the app in -- half a day, structurally, because
         # API-Football does not cover it and the second source lags ~12h. Measured per league;
@@ -1334,6 +1302,51 @@ async def _bulk_best_picks(
         if operator_suppressed:
             candidates = [c for c in candidates if c.market not in operator_suppressed]
 
+        # BEFORE THE MARKET FILTER AND AFTER THE THREE GATES ABOVE, and both halves of that
+        # are load-bearing.
+        #
+        # Before the market filter, because the counts exist to say what the markets the user
+        # is NOT looking at contain; computing them after would zero every chip but the
+        # selected one.
+        #
+        # After the gates, because those apply to an EXPLICIT request too -- and this was
+        # snapshotted above them until 2026-11-03, so the chip counted corners picks that
+        # tapping it then rejected. Measured in production on the day's real card: the chip
+        # said 6 and filtering returned 2. Only the two gates inside the `else` below are
+        # default-ranking-only, and those are the only two a chip tap is entitled to ignore.
+        #
+        # The local suite could not catch this: test_the_count_equals_what_filtering_actually
+        # _returns runs against a dev database holding no priced football fixtures -- the same
+        # blind spot that hid the frozen-card bug recorded in that same file.
+        unfiltered_candidates = candidates
+        if market and market != "all":
+            candidates = [
+                c for c in candidates if c.market == market and (line is None or c.line == line)
+            ]
+        else:
+            # Only when no market was explicitly asked for. A caller naming goals_total wants
+            # goals_total; what is barred is it winning the DEFAULT cross-market ranking.
+            #
+            # DELIBERATELY still applied to settled fixtures, unlike the guards in _pick_best,
+            # and this was tried the other way first. Lifting it for settled fixtures put goals
+            # under-4.5 at 1.18 on the reported Hearts v Dundee Utd card in place of the
+            # corners pick the user actually saw — rewriting the past by ADDING rather than
+            # removing. The distinction that matters: the guards in _pick_best DELETE a
+            # fixture's pick outright, while this one only decides which market wins the
+            # headline, and it decides that the same way on every day at once.
+            #
+            candidates = [c for c in candidates if c.market not in NO_DEMONSTRATED_SIGNAL_MARKETS]
+
+            # DECOUPLED FROM THE BAR ABOVE, deliberately. This used to wrap it — the bar only
+            # applied where offers_goals said no — which was right while the set held goals and
+            # would be a silent bug now that it holds corners: a league cleared for goals would
+            # have had its CORNERS pick let through as well.
+            #
+            # goals_availability.py flipped polarity on the same evidence and is now open by
+            # default, so this excludes only a league whose own live signal has been revoked.
+            if not offers_goals(league_by_fixture.get(fixture_id)):
+                candidates = [c for c in candidates if c.market != "goals_total"]
+
         # Frozen wins outright. `continue` rather than falling through, so nothing below can
         # reconsider a card that has already been published.
         settled = fixture_id in settled_fixtures
@@ -1347,8 +1360,13 @@ async def _bulk_best_picks(
             )
             # Each family is counted as though the user had ASKED for it, because tapping a
             # chip is exactly that -- an explicit request, which this codebase already treats
-            # as different from a market winning the default ranking. So the corners bar does
-            # not apply here, and the chip's number matches what tapping it returns.
+            # as different from a market winning the default ranking. So the two
+            # default-ranking-only gates (NO_DEMONSTRATED_SIGNAL_MARKETS, offers_goals) do not
+            # apply here and the chip's number matches what tapping it returns.
+            #
+            # THE THREE GATES THAT DO APPLY TO AN EXPLICIT REQUEST ARE ALREADY IN THIS LIST,
+            # because the snapshot now sits below them -- see the comment there. Counting above
+            # them made the corners chip promise 6 picks and deliver 2.
             countable = _surviving_candidates(
                 unfiltered_candidates,
                 sport_slug=sport_by_fixture.get(fixture_id),
