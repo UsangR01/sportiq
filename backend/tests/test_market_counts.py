@@ -135,3 +135,108 @@ def test_a_frozen_card_honours_the_market_filter():
 
     # A market this card never had returns nothing, rather than falling back to the winner.
     assert apply_frozen(BestPick, frozen, market="corners_total") is None
+
+
+# ---------------------------------------------------------------------------------------------
+# Which chips a SPORT is offered at all -- distinct from how many picks a market has today.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_basketball_and_tennis_are_offered_only_the_market_they_can_produce():
+    """A chip for a market a sport can never fill is a dead end on every day, not a quiet one.
+
+    Measured in production 2026-11-03 at the default 60% / 1.01: nba and tennis return 0 for
+    double chance, goals and corners while h2h returns 128 and 102. Those zeros are structural
+    -- _all_market_candidates derives double chance from draw_prob, goals from xg_home/away and
+    corners from corners_xg_*, and all three are NULL for both sports.
+    """
+    from app.fixtures.router import _applicable_markets_by_sport
+
+    applicable = _applicable_markets_by_sport({})
+    assert applicable["nba"] == ["h2h"]
+    assert applicable["tennis"] == ["h2h"]
+    # Football keeps all four, corners included: its corners count is 0 on a quiet day, which
+    # is the OTHER case entirely and still earns a dimmed, tappable chip.
+    assert applicable["football"] == list(MARKET_FAMILIES)
+
+
+def test_an_empty_day_still_says_which_chips_a_sport_should_have():
+    """Applicability is a property of the SPORT, so a day with no fixtures must not collapse
+    the row -- chips that come and go between days are the thing that got them removed once."""
+    from app.fixtures.router import MARKETS_BY_SPORT, _applicable_markets_by_sport
+
+    assert set(_applicable_markets_by_sport({})) >= set(MARKETS_BY_SPORT)
+
+
+def test_a_market_with_real_picks_is_offered_even_though_it_is_not_declared(caplog):
+    """THE FAIL-SAFE, and the reason this is a union rather than a lookup.
+
+    MARKETS_BY_SPORT is a hand-maintained declaration, so it will eventually be wrong -- the
+    day a basketball totals model lands, nothing would otherwise prompt anyone to update it.
+    A stale map must be able to show a useless chip and must NEVER hide a market holding real
+    picks, so anything that actually counted is offered regardless, and logged so the staleness
+    is visible rather than silent.
+    """
+    import logging
+
+    from app.fixtures.router import _applicable_markets_by_sport
+
+    with caplog.at_level(logging.WARNING):
+        applicable = _applicable_markets_by_sport({"nba": {"h2h": 7, "goals_total": 3}})
+
+    assert applicable["nba"] == ["h2h", "goals_total"]
+    assert any("market_chip_map_stale" in record.message for record in caplog.records)
+
+
+def test_a_declared_market_with_no_picks_today_is_still_offered():
+    """The whole point of the split: 0 means "nothing today" and keeps its chip, dimmed."""
+    from app.fixtures.router import _applicable_markets_by_sport
+
+    applicable = _applicable_markets_by_sport({"football": {"h2h": 4, "corners_total": 0}})
+    assert applicable["football"] == list(MARKET_FAMILIES)
+
+
+def test_an_unknown_sport_is_offered_every_market():
+    """Matching offers_corners' own default for an unknown league: withholding a market from a
+    newly-added sport is a worse failure than showing it and finding out."""
+    from app.fixtures.router import MARKETS_BY_SPORT, _applicable_markets_by_sport
+
+    assert "cricket" not in MARKETS_BY_SPORT
+    applicable = _applicable_markets_by_sport({"cricket": {}})
+    assert applicable["cricket"] == list(MARKET_FAMILIES)
+
+
+def test_the_pooled_counts_are_the_breakdown_summed():
+    """`counts` is published and predates the breakdown, so it must keep meaning exactly what
+    it meant -- every sport's picks added together."""
+    from app.fixtures.router import _pooled_counts
+
+    pooled = _pooled_counts({"football": {"h2h": 3, "goals_total": 5}, "tennis": {"h2h": 4}})
+    assert pooled["h2h"] == 7
+    assert pooled["goals_total"] == 5
+    assert pooled["corners_total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_the_breakdown_a_sport_filter_reports_matches_that_sport_alone(api_client):
+    """The feed is fetched for a whole day WITHOUT a sport param and narrowed on the client, so
+    the breakdown is the only thing that can describe what is on screen.
+
+    Checked against the server narrowing itself, which is a different code path: asking for one
+    sport must report the same numbers as that sport's slice of the unnarrowed breakdown. Before
+    this existed the client used the pooled figure, and with Tennis selected the double-chance
+    chip showed football's count and delivered nothing.
+    """
+    everything = (await api_client.get("/fixtures/market-counts?limit=200")).json()
+    breakdown = everything.get("counts_by_sport") or {}
+    for sport, expected in breakdown.items():
+        if not sport:  # a fixture whose sport did not resolve; no slug to narrow by
+            continue
+        narrowed = (
+            await api_client.get(f"/fixtures/market-counts?limit=200&sport_slug={sport}")
+        ).json()
+        for family, count in expected.items():
+            assert narrowed["counts"].get(family, 0) == count, (
+                f"{sport}/{family}: breakdown says {count}, narrowing says "
+                f"{narrowed['counts'].get(family, 0)}"
+            )

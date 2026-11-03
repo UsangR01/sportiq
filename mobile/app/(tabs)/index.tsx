@@ -22,7 +22,7 @@ import { SportTabs, SPORT_TABS } from "@/components/picks/SportTabs";
 import { SummaryStrip, type CountryOption } from "@/components/picks/SummaryStrip";
 import { listFixturesWithCounts } from "@/lib/api/fixtures";
 import type { MarketFamily } from "@/store/picksStore";
-import type { BestPick, FixtureSummary } from "@/lib/api/types";
+import type { BestPick, FixtureSummary, MarketCountsResponse } from "@/lib/api/types";
 import { getPreferences } from "@/lib/api/users";
 import { addToWatchlist, listWatchlist, removeFromWatchlist } from "@/lib/api/watchlist";
 import { countryForTournamentLocation } from "@/lib/countryFlags";
@@ -123,6 +123,64 @@ const MARKET_CHIPS: { key: MarketFamily; label: string }[] = [
   { key: "corners_total", label: "Corners" },
 ];
 
+interface MarketChip {
+  key: MarketFamily;
+  label: string;
+  /** null while the server has not said -- rendered without a number, because "(0)" would
+   *  read as "empty" when it means "not known yet". */
+  count: number | null;
+}
+
+/** The chips to offer for the sports currently on screen, each with its own count.
+ *
+ * WHICH CHIPS: the server says, per sport, and this never keeps its own sport-to-market map.
+ * Basketball and tennis predictions carry no draw_prob, xg or corners_xg, so double chance,
+ * goals and corners cannot ever fill there -- but the day a basketball totals model lands, the
+ * server starts reporting those families and the chip appears here with no release at all. A
+ * copy of that knowledge on this side is exactly how the chips drifted before, when the client
+ * held the totals line and counted 49 goals picks while tapping it asked for 43.
+ *
+ * NOT THE SAME TEST AS A COUNT OF ZERO, and the two must stay apart. Zero means "nothing
+ * today" and keeps a dimmed, tappable chip, because a row whose chips come and go between days
+ * cannot be learned. Inapplicable means "never, in this sport" and belongs off the row.
+ *
+ * THE COUNTS ARE SUMMED OVER THE SELECTED SPORTS, because the feed is fetched for the whole day
+ * with no sport param and narrowed here (see the queryFn comment below). The server's pooled
+ * number therefore describes fixtures that are not on screen: measured in production, with
+ * Tennis selected the double-chance chip showed football's 85 and tapping it delivered nothing.
+ *
+ * Returns null when the server has said nothing about applicability -- an older API, or a
+ * malformed header. The caller then shows every chip, which is the safe direction to fail: a
+ * useless chip costs a tap, a missing one hides real picks.
+ */
+function marketChipsFor(
+  counts: MarketCountsResponse | null | undefined,
+  sports: string[]
+): MarketChip[] | null {
+  const applicable = counts?.applicable_by_sport;
+  if (!applicable) return null;
+  // An empty selection means every sport -- the filter sheet reaches it in one tap.
+  const selected = sports.length ? sports : Object.keys(applicable);
+  const allowed = new Set<string>();
+  for (const sport of selected) {
+    // A sport the server did not report gets every family, matching the server's own default
+    // for an unknown sport: withholding a market from something newly added is the worse
+    // failure of the two.
+    for (const family of applicable[sport] ?? MARKET_CHIPS.map((c) => c.key)) {
+      allowed.add(family);
+    }
+  }
+  const breakdown = counts?.counts_by_sport;
+  return MARKET_CHIPS.filter((chip) => allowed.has(chip.key)).map((chip) => ({
+    ...chip,
+    count: breakdown
+      ? selected.reduce((n, sport) => n + (breakdown[sport]?.[chip.key] ?? 0), 0)
+      : // No breakdown: the pooled count is wrong for a narrowed selection, but it is the only
+        // number there is, and it was what shipped before this.
+        (counts?.counts?.[chip.key] ?? null),
+  }));
+}
+
 export default function PicksScreen() {
   const { colors } = useTheme();
   const queryClient = useQueryClient();
@@ -191,6 +249,26 @@ export default function PicksScreen() {
       });
     },
   });
+
+  // Derived once and used twice -- by the row, and by the reset below. Computing it in each
+  // place would let the two disagree about whether the selected market still exists.
+  const marketChips = useMemo(
+    () => marketChipsFor(fixturesQuery.data?.marketCounts, store.sports),
+    [fixturesQuery.data?.marketCounts, store.sports]
+  );
+
+  // A SELECTED MARKET THAT NO LONGER APPLIES MUST BE DROPPED, or it keeps filtering from
+  // off-screen. Tapping Basketball with "Goals" active would otherwise leave the request
+  // narrowed to a market basketball cannot produce, with no chip anywhere to show why the
+  // card came back empty -- an invisible filter, which this project has twice decided is
+  // worse than one the user cannot set (see toggleSport dropping orphaned tours).
+  //
+  // Guarded on marketChips being non-null: an older API says nothing about applicability, and
+  // clearing the user's filter on the strength of silence would be its own bug.
+  useEffect(() => {
+    if (!marketChips || !store.market) return;
+    if (!marketChips.some((chip) => chip.key === store.market)) store.setMarket(null);
+  }, [marketChips, store.market, store.setMarket]);
 
   const watchlistQuery = useQuery({
     queryKey: ["watchlist"],
@@ -353,7 +431,7 @@ export default function PicksScreen() {
         />
         <MarketChips
           value={store.market}
-          counts={fixturesQuery.data?.marketCounts?.counts}
+          markets={marketChips ?? MARKET_CHIPS.map((chip) => ({ ...chip, count: null }))}
           onChange={store.setMarket}
           busy={fixturesQuery.isFetching}
         />
@@ -529,12 +607,14 @@ export default function PicksScreen() {
  */
 function MarketChips({
   value,
-  counts,
+  markets,
   onChange,
   busy,
 }: {
   value: MarketFamily | null;
-  counts: Record<string, number> | undefined;
+  /** Only the markets this sport can produce, already counted for the current selection --
+   *  see marketChipsFor. */
+  markets: MarketChip[];
   onChange: (next: MarketFamily | null) => void;
   /** A fetch is in flight for the current selection. The SELECTED chip shows a spinner in
    *  place of its count, so the feedback sits where the finger just was rather than only at
@@ -542,14 +622,16 @@ function MarketChips({
   busy: boolean;
 }) {
   const { colors } = useTheme();
+  // ONE market means "All" and that market are the same filter, so the row would be two chips
+  // that do nothing different -- worse than no row. True for basketball and tennis today,
+  // which have h2h alone.
+  if (markets.length < 2) return null;
   const chips: { key: MarketFamily | null; label: string; count: number | null }[] = [
     { key: null, label: "All", count: null },
-    ...MARKET_CHIPS.map((chip) => ({
+    ...markets.map((chip) => ({
       key: chip.key as MarketFamily | null,
       label: chip.label,
-      // undefined while the count request is in flight -- shown without a number rather than
-      // as "(0)", which would read as "empty" when it means "not known yet".
-      count: counts ? (counts[chip.key] ?? 0) : null,
+      count: chip.count,
     })),
   ];
   return (

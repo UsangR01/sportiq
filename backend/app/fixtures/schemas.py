@@ -333,6 +333,17 @@ class MarketCountsResponse(BaseModel):
 
     total: int
     counts: dict[str, int] = {}
+    # THE SAME COUNTS BROKEN DOWN BY SPORT, because the feed is fetched without a sport filter
+    # and narrowed on the client, so a pooled number describes a different set of fixtures from
+    # the one on screen: with Tennis showing, the double-chance chip read football's 85 and
+    # delivered nothing. The client sums the sports it is showing.
+    counts_by_sport: dict[str, dict[str, int]] = {}
+    # Which chips each sport should be OFFERED at all, whatever today's counts are -- basketball
+    # and tennis predictions carry no draw_prob, xg or corners_xg, so three of the four families
+    # are dead ends there however the day goes. Distinct from a count of 0, which means "nothing
+    # today" and is still shown, dimmed. Keyed by every known sport, not only those with
+    # fixtures, so an empty day cannot collapse the row.
+    applicable_by_sport: dict[str, list[str]] = {}
     # The line each totals chip stands for, so the client requests the one that was COUNTED.
     # Returned rather than hardcoded on both sides: the client having its own copy is how the
     # first version drifted, counting every goals line while tapping it asked for only 2.5.

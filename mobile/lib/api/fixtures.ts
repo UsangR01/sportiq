@@ -84,7 +84,15 @@ export async function listFixturesWithCounts(
   if (raw) {
     try {
       const parsed = JSON.parse(raw);
-      marketCounts = { total: data.length, counts: parsed.counts, lines: parsed.lines };
+      marketCounts = {
+        total: data.length,
+        counts: parsed.counts,
+        // Undefined against an older API, which the chips read as "no breakdown" and fall
+        // back to the pooled counts for -- never as zero, which would read as "empty".
+        counts_by_sport: parsed.counts_by_sport,
+        applicable_by_sport: parsed.applicable_by_sport,
+        lines: parsed.lines,
+      };
     } catch {
       // A malformed header must cost the chips their counts, never the feed itself.
       marketCounts = null;

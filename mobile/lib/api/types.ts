@@ -261,7 +261,18 @@ export interface StandingRowResponse {
 /** Per-market counts for the feed's filter chips. */
 export interface MarketCountsResponse {
   total: number;
+  /** Summed across every sport. Kept for callers that do not narrow by sport; the feed must
+   *  use `counts_by_sport`, because it fetches the whole day and filters sports on the
+   *  client, so a pooled number counts fixtures that are not on screen. */
   counts: Record<string, number>;
+  /** The same counts per sport slug. Absent from an older API, which the caller must treat
+   *  as "no breakdown" rather than as zero. */
+  counts_by_sport?: Record<string, Record<string, number>>;
+  /** Which chips a sport should be offered AT ALL, whatever today's counts are: basketball and
+   *  tennis predictions carry no draw_prob, xg or corners_xg, so double chance, goals and
+   *  corners are dead ends there on every day. Distinct from a count of 0, which means
+   *  "nothing today" and stays visible, dimmed. */
+  applicable_by_sport?: Record<string, string[]>;
   /** The line each totals chip stands for. Served rather than hardcoded so the client asks
    *  for the line that was actually counted. */
   lines: Record<string, number>;

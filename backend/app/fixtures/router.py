@@ -808,6 +808,91 @@ MARKET_FAMILIES: tuple[str, ...] = ("h2h", "double_chance", "goals_total", "corn
 MARKET_CHIP_LINES: dict[str, float] = {"goals_total": 2.5, "corners_total": 9.5}
 
 
+# Which of those families a SPORT can produce at all -- so a chip is never offered to a sport
+# whose predictions structurally cannot fill it.
+#
+# THIS IS NOT ABOUT TODAY'S COUNT, and the two must not be conflated. A family with no picks
+# today is still shown, dimmed, because chips that come and go between days make the row
+# impossible to learn (see MarketChips in mobile). A family a sport can NEVER produce is a
+# dead end whatever the day, and belongs off the row.
+#
+# Measured in production 2026-11-03 at the default 60% / 1.01, which is what makes this a fact
+# rather than a guess:
+#
+#     football   h2h  19   double_chance 85   goals 25   corners 0
+#     nba        h2h 128   double_chance  0   goals  0   corners 0
+#     tennis     h2h 102   double_chance  0   goals  0   corners 0
+#
+# Those nine zeros are structural, not a quiet day: _all_market_candidates derives every
+# non-h2h family from prediction columns -- draw_prob for double chance, xg_home/away for
+# goals, corners_xg_* for corners -- and all three are NULL for basketball and tennis. Football
+# corners at 0 is the OTHER case: a real market having a quiet day, which is why it stays.
+#
+# ON THE SERVER rather than in the client, for the reason MARKET_CHIP_LINES is: the client's
+# own copy is exactly how the first version of these chips drifted, counting every goals line
+# (49) while tapping it asked for only 2.5 (43).
+#
+# AND IT CANNOT HIDE A REAL PICK EVEN IF IT GOES STALE -- see _applicable_markets_by_sport,
+# which unions this with whatever actually produced a count and warns when the two disagree.
+# So the day basketball gains a totals model, its chip appears on its own and the warning says
+# to come and update this map.
+MARKETS_BY_SPORT: dict[str, tuple[str, ...]] = {
+    "football": MARKET_FAMILIES,
+    "nba": ("h2h",),
+    "tennis": ("h2h",),
+}
+
+
+def _bump(counts: dict[str, dict[str, int]], sport: str | None, family: str) -> None:
+    """One fixture's qualifying family, recorded against its sport. A fixture whose sport
+    could not be resolved is counted under "" rather than dropped -- it still has a real pick,
+    and the client pools unknown keys into its all-sports view."""
+    bucket = counts.setdefault(sport or "", {})
+    bucket[family] = bucket.get(family, 0) + 1
+
+
+def _pooled_counts(counts_by_sport: dict[str, dict[str, int]]) -> dict[str, int]:
+    """Every family summed across sports: the pre-sport-breakdown shape, kept because
+    `counts` is published and a client that ignores the breakdown must keep working."""
+    pooled = {family: 0 for family in MARKET_FAMILIES}
+    for bucket in counts_by_sport.values():
+        for family, count in bucket.items():
+            pooled[family] = pooled.get(family, 0) + count
+    return pooled
+
+
+def _applicable_markets_by_sport(
+    counts_by_sport: dict[str, dict[str, int]],
+) -> dict[str, list[str]]:
+    """The market chips each sport should be offered, in MARKET_FAMILIES display order.
+
+    Declared set UNION anything that actually counted, which is the fail-safe direction: a
+    stale map can add a useless chip but can never hide a market that has real picks in it.
+    An undeclared family with a real count is logged, because that is the moment the map is
+    wrong and nothing else would say so.
+
+    A sport absent from MARKETS_BY_SPORT gets every family, matching offers_corners' own
+    "an unknown league returns True" default -- withholding a market from a newly-added sport
+    is a worse failure than showing it and finding out.
+    """
+    sports = set(MARKETS_BY_SPORT) | set(counts_by_sport)
+    applicable: dict[str, list[str]] = {}
+    for sport in sports:
+        declared = set(MARKETS_BY_SPORT.get(sport, MARKET_FAMILIES))
+        produced = {family for family, count in counts_by_sport.get(sport, {}).items() if count > 0}
+        undeclared = produced - declared
+        if undeclared:
+            logger.warning(
+                "market_chip_map_stale sport=%s undeclared=%s "
+                "(MARKETS_BY_SPORT needs updating; the chips are showing it anyway)",
+                sport,
+                sorted(undeclared),
+            )
+        allowed = declared | produced
+        applicable[sport] = [f for f in MARKET_FAMILIES if f in allowed]
+    return applicable
+
+
 def _surviving_candidates(
     candidates: list, *, sport_slug: str | None = None, is_settled: bool = False
 ) -> list:
@@ -1158,7 +1243,12 @@ async def _bulk_best_picks(
     # Only built when the freeze asks for it -- see FrozenPick.candidates. Every other caller
     # pays nothing for it.
     survivors: dict = {}
-    market_counts: dict[str, int] = {}
+    # KEYED BY SPORT, because the feed is fetched WITHOUT a sport filter and narrowed on
+    # the client (see the queryFn comment in mobile's picks screen). A pooled count was
+    # therefore wrong for the selection on screen: with Tennis showing, the double-chance
+    # chip read football's 85 and delivered nothing. The client sums the sports it is
+    # showing, exactly as it already filters the fixtures themselves.
+    market_counts: dict[str, dict[str, int]] = {}
     for fixture_id, prediction in latest_prediction_by_fixture.items():
         odds_by_market = {
             db_market: odds_by_fixture_market.get((fixture_id, db_market), [])
@@ -1331,7 +1421,7 @@ async def _bulk_best_picks(
                         line=MARKET_CHIP_LINES.get(family),
                     )
                     if in_family is not None:
-                        market_counts[family] = market_counts.get(family, 0) + 1
+                        _bump(market_counts, sport_by_fixture.get(fixture_id), family)
             continue
 
         best = _pick_best(
@@ -1369,7 +1459,7 @@ async def _bulk_best_picks(
                     min_odds=None if settled else min_odds,
                 )
                 if chosen is not None:
-                    market_counts[family] = market_counts.get(family, 0) + 1
+                    _bump(market_counts, sport_by_fixture.get(fixture_id), family)
 
     if with_survivors and with_market_counts:
         return best_picks, all_picks, survivors, market_counts
@@ -1508,7 +1598,9 @@ async def list_fixtures(
     # wrapping it would break every existing caller for a number one screen needs.
     response.headers["X-Market-Counts"] = json.dumps(
         {
-            "counts": {family: counts.get(family, 0) for family in MARKET_FAMILIES},
+            "counts": _pooled_counts(counts),
+            "counts_by_sport": counts,
+            "applicable_by_sport": _applicable_markets_by_sport(counts),
             "lines": MARKET_CHIP_LINES,
         }
     )
@@ -2179,7 +2271,14 @@ async def get_market_counts(
     rows = (await db.execute(stmt)).all()
     fixture_ids = [row[0].id for row in rows]
     if not fixture_ids:
-        return MarketCountsResponse(total=0, counts={})
+        # No fixtures still says which chips a sport should be OFFERED: applicability is a
+        # property of the sport, not of today's card, so an empty day must not collapse the row.
+        return MarketCountsResponse(
+            total=0,
+            counts={},
+            applicable_by_sport=_applicable_markets_by_sport({}),
+            lines=MARKET_CHIP_LINES,
+        )
     _, _, counts = await _bulk_best_picks(
         db,
         fixture_ids,
@@ -2189,7 +2288,9 @@ async def get_market_counts(
     )
     return MarketCountsResponse(
         total=len(fixture_ids),
-        counts={family: counts.get(family, 0) for family in MARKET_FAMILIES},
+        counts=_pooled_counts(counts),
+        counts_by_sport=counts,
+        applicable_by_sport=_applicable_markets_by_sport(counts),
         lines=MARKET_CHIP_LINES,
     )
 
