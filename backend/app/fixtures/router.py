@@ -843,6 +843,21 @@ MARKETS_BY_SPORT: dict[str, tuple[str, ...]] = {
 }
 
 
+def shows_a_pick(status: FixtureStatus) -> bool:
+    """Whether the feed will DISPLAY a pick for a fixture in this status.
+
+    POSTPONED fixtures get their best_pick and all_market_picks nulled on the way out -- there
+    is nothing to back on a match that is not being played, and showing a pre-postponement pick
+    as though it were live is a real report this project fixed once already.
+
+    IT HAS TO BE ASKED IN TWO PLACES, which is why it is a function. The chips counted a
+    postponed fixture that the response then nulled, so the double-chance chip promised 20 and
+    the feed showed 19 -- measured in production on 2026-11-03, on Northampton v Oldham. A count
+    that disagrees with what tapping it returns is the one thing these chips must never do.
+    """
+    return status != FixtureStatus.POSTPONED
+
+
 def _bump(counts: dict[str, dict[str, int]], sport: str | None, family: str) -> None:
     """One fixture's qualifying family, recorded against its sport. A fixture whose sport
     could not be resolved is counted under "" rather than dropped -- it still has a real pick,
@@ -1111,6 +1126,7 @@ async def _bulk_best_picks(
     min_odds: float | None = None,
     with_survivors: bool = False,
     with_market_counts: bool = False,
+    pickless_fixture_ids: set | None = None,
 ) -> tuple:
     """Computes each fixture's single best pick, drawn from ACROSS every market (h2h, double
     chance, Over/Under goals, Over/Under corners) by default — per the user's explicit ask
@@ -1249,6 +1265,10 @@ async def _bulk_best_picks(
     # chip read football's 85 and delivered nothing. The client sums the sports it is
     # showing, exactly as it already filters the fixtures themselves.
     market_counts: dict[str, dict[str, int]] = {}
+    # Fixtures whose pick the RESPONSE will null regardless of what is computed here -- see
+    # shows_a_pick. Passed in because the caller already holds each row's status and this
+    # function is given only ids.
+    pickless = pickless_fixture_ids or set()
     for fixture_id, prediction in latest_prediction_by_fixture.items():
         odds_by_market = {
             db_market: odds_by_fixture_market.get((fixture_id, db_market), [])
@@ -1424,7 +1444,7 @@ async def _bulk_best_picks(
                 shown = None if chosen is None else _candidate_to_best_pick(chosen)
             if shown is not None:
                 best_picks[fixture_id] = shown
-            if with_market_counts:
+            if with_market_counts and fixture_id not in pickless:
                 # THE SAME SELECTION PER FAMILY, over the FROZEN list rather than today's.
                 # Counting the frozen winner's own family instead was wrong by 5 cards in
                 # production: a filter narrows the frozen candidates and can surface a
@@ -1457,7 +1477,7 @@ async def _bulk_best_picks(
         )
         if best is not None:
             best_picks[fixture_id] = best
-        if with_market_counts:
+        if with_market_counts and fixture_id not in pickless:
             # THE SAME SELECTION, restricted to one family at a time, so a chip's count and
             # what the filter actually returns cannot disagree. Re-ranking rather than reading
             # `best`'s own market: an upcoming card filtered to goals shows its best GOALS
@@ -1611,6 +1631,7 @@ async def list_fixtures(
         min_probability=min_probability,
         min_odds=min_odds,
         with_market_counts=True,
+        pickless_fixture_ids={r[0].id for r in rows if not shows_a_pick(r[0].status)},
     )
     # A HEADER rather than an envelope: this route's response_model is a bare list, and
     # wrapping it would break every existing caller for a number one screen needs.
@@ -1633,12 +1654,8 @@ async def list_fixtures(
     summaries = [
         _to_summary(
             *row,
-            best_pick=(
-                best_picks.get(row[0].id) if row[0].status != FixtureStatus.POSTPONED else None
-            ),
-            all_market_picks=(
-                all_picks.get(row[0].id) if row[0].status != FixtureStatus.POSTPONED else None
-            ),
+            best_pick=(best_picks.get(row[0].id) if shows_a_pick(row[0].status) else None),
+            all_market_picks=(all_picks.get(row[0].id) if shows_a_pick(row[0].status) else None),
             live_state=live_states.get(row[0].id),
         )
         for row in rows
@@ -2303,6 +2320,7 @@ async def get_market_counts(
         min_probability=min_probability,
         min_odds=min_odds,
         with_market_counts=True,
+        pickless_fixture_ids={r[0].id for r in rows if not shows_a_pick(r[0].status)},
     )
     return MarketCountsResponse(
         total=len(fixture_ids),

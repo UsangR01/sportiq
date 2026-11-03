@@ -2,6 +2,7 @@
 the merged Home/Picks feed can surface "only fixtures whose best pick, drawn from every market,
 clears a probability and odds floor" per the user's explicit request (see CLAUDE.md)."""
 
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -754,3 +755,37 @@ def test_football_base_rates_are_unchanged_by_the_per_sport_split():
     assert MARKET_BASE_RATES[("h2h", "home", None)] == 0.4582
     assert MARKET_BASE_RATES[("h2h", "away", None)] == 0.2879
     assert MARKET_BASE_RATES[("goals_total", "under", 3.5)] == 0.6941
+
+
+async def test_a_postponed_fixture_is_not_counted_by_the_market_chips(
+    api_client, seeded_postponed_fixture_with_high_confidence_prediction
+):
+    """THE CHIP MUST NOT PROMISE A PICK THE RESPONSE THEN NULLS.
+
+    This fixture carries a real pre-postponement Prediction and Odds pair whose h2h and
+    double-chance candidates clear every guard, so _bulk_best_picks computes a pick for it --
+    and the response correctly nulls it, because a match that is not being played has nothing
+    to back. The counts were taken before that nulling, so the chip counted it anyway.
+
+    Measured in production on 2026-11-03, on Northampton v Oldham: the double-chance chip said
+    20 and filtering the feed returned 19. Both count call sites are asserted, because they are
+    separate code paths and keeping them in step is the whole contract here.
+    """
+    sport, fixture = seeded_postponed_fixture_with_high_confidence_prediction
+
+    response = await api_client.get(f"/fixtures?sport_slug={sport.slug}&limit=200")
+    body = response.json()
+    assert [row["id"] for row in body] == [str(fixture.id)]
+    # The premise: a pick exists for it and is deliberately withheld.
+    assert body[0]["best_pick"] is None
+
+    header = json.loads(response.headers["x-market-counts"])
+    assert header["counts_by_sport"].get(sport.slug, {}) == {}
+    assert set(header["counts"].values()) == {0}
+
+    standalone = (
+        await api_client.get(f"/fixtures/market-counts?sport_slug={sport.slug}&limit=200")
+    ).json()
+    assert standalone["total"] == 1, "the row is still counted as a fixture, just not as a pick"
+    assert standalone["counts_by_sport"].get(sport.slug, {}) == {}
+    assert set(standalone["counts"].values()) == {0}
